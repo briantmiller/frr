@@ -1,0 +1,23 @@
+{
+	"attr": {
+		"status": "ok",
+		"entriesCount": 2
+	},
+	"table": [
+		{
+			"type": "local",
+			"up": false,
+			"used": false,
+			"protocolAddress": "172.16.1.5",
+			"protocolAddressSize": 32
+		},
+		{
+			"type": "nhs",
+			"up": true,
+			"used": false,
+			"protocolAddress": "172.16.1.1",
+			"protocolAddressSize": 32,
+			"nbmaAddress": "192.168.1.1"
+		}
+	]
+}

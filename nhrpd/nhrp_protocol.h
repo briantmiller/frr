@@ -75,6 +75,13 @@
 #define NHRP_AUTHENTICATION_PLAINTEXT		0x00000001
 #define NHRP_CISCO_PASS_LEN			8
 
+/* Cisco supports group names up to 40 characters */
+#define NHRP_CISCO_GROUP_LENGTH 40
+
+/* Cisco group type extracted from packet capture */
+#define NHRP_CISCO_GROUP_TYPE 0x00000c01
+
+
 /* NHRP Packet Structures */
 struct nhrp_packet_header {
 	/* Fixed header */
@@ -123,6 +130,12 @@ struct nhrp_extension_header {
 struct nhrp_cisco_authentication_extension {
 	uint32_t type;
 	uint8_t secret[8];
+} __attribute__((packed));
+
+struct nhrp_cisco_group_extension {
+	uint32_t type;
+	uint8_t group_len;
+	uint8_t group[NHRP_CISCO_GROUP_LENGTH];
 } __attribute__((packed));
 
 #endif

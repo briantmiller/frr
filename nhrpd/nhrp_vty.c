@@ -743,6 +743,28 @@ DEFUN(if_no_nhrp_nhs, if_no_nhrp_nhs_cmd,
 	return nhrp_vty_return(vty, ret);
 }
 
+DEFPY  (if_nhrp_cisco_group, if_nhrp_cisco_group_cmd,
+	"[no] " AFI_CMD " nhrp attribute group ![GROUP]$group",
+	NO_STR 
+	AFI_STR
+        NHRP_STR
+        "Specify NHRP vendor specific attribute\n"
+        "Specify NHRP group\n"
+        "NHRP group name\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+	afi_t afi = cmd_to_afi(argv[0]);
+
+	memset(nifp->afi[afi].cisco_group, 0, NHRP_CISCO_GROUP_LENGTH + 1);
+	if (!no)
+		strlcpy((char *)nifp->afi[afi].cisco_group, group, NHRP_CISCO_GROUP_LENGTH);
+
+	nhrp_interface_update(ifp);
+
+	return CMD_SUCCESS;
+}
+
 struct info_ctx {
 	struct vty *vty;
 	afi_t afi;
@@ -800,6 +822,7 @@ static void show_ip_nhrp_cache(struct nhrp_cache *c, void *pctx)
 	}
 
 	if (ctx->json) {
+		struct nhrp_interface *nifp = c->ifp->info;
 		json = json_object_new_object();
 		json_object_string_add(json, "interface", c->ifp->name);
 		json_object_string_add(json, "type",
@@ -828,6 +851,13 @@ static void show_ip_nhrp_cache(struct nhrp_cache *c, void *pctx)
 					       c->cur.peer->vc->remote.id);
 		else
 			json_object_string_add(json, "identity", "-");
+
+		if (c->cur.type == NHRP_CACHE_LOCAL && nifp->afi[ctx->afi].cisco_group[0])
+			json_object_string_add(json, "ciscoGroup",
+					       (char *)nifp->afi[ctx->afi].cisco_group);
+		else if (c->cur.peer && c->cur.peer->cisco_group[0])
+			json_object_string_add(json, "ciscoGroup",
+					       (char *)c->cur.peer->cisco_group);
 
 		json_object_array_add(ctx->json, json);
 		return;
@@ -945,6 +975,7 @@ static void show_ip_opennhrp_cache(struct nhrp_cache *c, void *pctx)
 		sockunion2str(&c->cur.remote_nbma_natoa, buf[2],
 			      sizeof(buf[2]));
 	if (ctx->json) {
+		struct nhrp_interface *nifp = c->ifp->info;
 		json = json_object_new_object();
 		json_object_string_add(json, "type",
 				       nhrp_cache_type_str[c->cur.type]);
@@ -970,6 +1001,13 @@ static void show_ip_opennhrp_cache(struct nhrp_cache *c, void *pctx)
 		if (sockunion_family(&c->cur.remote_nbma_natoa) != AF_UNSPEC)
 			json_object_string_add(json, "nbmaNatOaAddress",
 					       buf[2]);
+
+		if (c->cur.type == NHRP_CACHE_LOCAL && nifp->afi[ctx->afi].cisco_group[0])
+			json_object_string_add(json, "ciscoGroup",
+					       (char *)nifp->afi[ctx->afi].cisco_group);
+		else if (c->cur.peer && c->cur.peer->cisco_group[0])
+			json_object_string_add(json, "ciscoGroup",
+					       (char *)c->cur.peer->cisco_group);
 
 		json_object_array_add(ctx->json, json);
 		return;
@@ -1232,6 +1270,9 @@ static int interface_config_write(struct vty *vty)
 			if (ad->network_id)
 				vty_out(vty, " %s nhrp network-id %u\n", aficmd,
 					ad->network_id);
+			if (ad->cisco_group[0])
+				vty_out(vty, " %s nhrp attribute group %s\n", aficmd,
+					(char *)ad->cisco_group);
 
 			if (ad->holdtime != NHRPD_DEFAULT_HOLDTIME)
 				vty_out(vty, " %s nhrp holdtime %u\n", aficmd,
@@ -1339,4 +1380,5 @@ void nhrp_config_init(void)
 	install_element(INTERFACE_NODE, &if_no_nhrp_map_multicast_cmd);
 	install_element(INTERFACE_NODE, &if_nhrp_nhs_cmd);
 	install_element(INTERFACE_NODE, &if_no_nhrp_nhs_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_cisco_group_cmd);
 }

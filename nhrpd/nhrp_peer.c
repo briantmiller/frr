@@ -180,6 +180,7 @@ static void *nhrp_peer_create(void *data)
 		.vc = key->vc,
 		.notifier_list = NOTIFIER_LIST_INITIALIZER(&p->notifier_list),
 	};
+	memset(p->cisco_group, 0, NHRP_CISCO_GROUP_LENGTH + 1);
 	nhrp_vc_notify_add(p->vc, &p->vc_notifier, nhrp_peer_vc_notify);
 	nhrp_interface_notify_add(p->ifp, &p->ifp_notifier,
 				  nhrp_peer_ifp_notify);
@@ -362,6 +363,49 @@ void nhrp_peer_send(struct nhrp_peer *p, struct zbuf *zb)
 	zbuf_reset(zb);
 }
 
+void nhrp_pack_cisco_group(struct zbuf *zb, struct nhrp_packet_header *hdr,
+			   struct nhrp_afi_data *if_ad)
+{
+	struct nhrp_extension_header *ext;
+	struct nhrp_cisco_group_extension *cge;
+	uint8_t len;
+	if (if_ad->cisco_group[0]) {
+		nhrp_packet_debug(zb, "Pushing Cisco group extension into packet. ");
+		ext = nhrp_ext_push(zb, hdr, NHRP_EXTENSION_VENDOR);
+		if (ext) {
+			len = strlen((char *)if_ad->cisco_group);
+			cge = (struct nhrp_cisco_group_extension *)zbuf_pushn(zb, (5 + len));
+			cge->type = htonl(NHRP_CISCO_GROUP_TYPE);
+			cge->group_len = len;
+			memcpy(&cge->group, if_ad->cisco_group, len);
+			nhrp_ext_complete(zb, ext);
+		}
+	}
+}
+
+void nhrp_parse_cisco_group(struct nhrp_extension_header *ext, struct nhrp_peer *p,
+			    struct zbuf *payload)
+{
+	if (p == NULL)
+		return;
+	uint8_t len;
+	struct nhrp_cisco_group_extension *cge;
+	if (ntohs(ext->length) > 5) {
+		cge = (struct nhrp_cisco_group_extension *)payload->head;
+		debugf(NHRP_DEBUG_COMMON, "Received vendor private extension 0x%08x ",
+		       ntohl(cge->type));
+		if (ntohl(cge->type) == NHRP_CISCO_GROUP_TYPE) {
+			len = strlen((char *)cge->group);
+			if (len > NHRP_CISCO_GROUP_LENGTH)
+				len = NHRP_CISCO_GROUP_LENGTH;
+			memset(p->cisco_group, 0, NHRP_CISCO_GROUP_LENGTH + 1);
+			strlcpy((char *)p->cisco_group, (char *)cge->group, len);
+			debugf(NHRP_DEBUG_COMMON, "Received Cisco group attribute: %s",
+			       p->cisco_group);
+		}
+	}
+}
+
 static void nhrp_process_nat_extension(struct nhrp_packet_parser *pp,
 				       union sockunion *proto,
 				       union sockunion *cie_nbma)
@@ -424,11 +468,11 @@ static void nhrp_handle_resolution_req(struct nhrp_packet_parser *pp)
 	struct nhrp_cie_header *cie;
 	struct nhrp_extension_header *ext;
 	struct nhrp_cache *c;
-	union sockunion cie_nbma, cie_nbma_nat, cie_proto, *proto_addr,
-		*nbma_addr, *claimed_nbma_addr;
+	union sockunion cie_nbma, cie_nbma_nat, cie_proto, *proto_addr, *nbma_addr = NULL,
+									*claimed_nbma_addr;
 	int holdtime, prefix_len, hostprefix_len;
 	struct nhrp_interface *nifp = ifp->info;
-	struct nhrp_peer *peer;
+	struct nhrp_peer *peer, *nbma_peer;
 	size_t paylen;
 
 	if (!(pp->if_ad->flags & NHRP_IFF_SHORTCUT)) {
@@ -601,6 +645,16 @@ static void nhrp_handle_resolution_req(struct nhrp_packet_parser *pp)
 			 * hop by hop.
 			 */
 			break;
+		case NHRP_EXTENSION_VENDOR:
+			if (nbma_addr) {
+				nbma_peer = nhrp_peer_get(pp->ifp, nbma_addr);
+				if (nbma_peer) {
+					nhrp_parse_cisco_group(ext, nbma_peer, &payload);
+					nhrp_peer_unref(nbma_peer);
+				}
+			}
+			nhrp_pack_cisco_group(zb, hdr, pp->if_ad);
+			break;
 		default:
 			if (nhrp_ext_reply(zb, hdr, ifp, ext, &payload) < 0)
 				goto err;
@@ -729,6 +783,9 @@ static void nhrp_handle_registration_request(struct nhrp_packet_parser *p)
 				cie->mtu = htons(p->if_ad->mtu);
 			}
 			nhrp_ext_complete(zb, ext);
+			break;
+		case NHRP_EXTENSION_VENDOR:
+			nhrp_parse_cisco_group(ext, p->peer, &payload);
 			break;
 		default:
 			if (nhrp_ext_reply(zb, hdr, ifp, ext, &payload) < 0)

@@ -475,6 +475,7 @@ static void nhrp_shortcut_send_resolution_req(struct nhrp_shortcut *s,
 		nhrp_ext_complete(zb, ext);
 	}
 
+	nhrp_pack_cisco_group(zb, hdr, if_ad);
 	nhrp_packet_complete(zb, hdr, ifp);
 
 	nhrp_peer_send(peer, zb);

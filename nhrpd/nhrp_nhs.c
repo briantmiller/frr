@@ -82,6 +82,7 @@ static void nhrp_reg_reply(struct nhrp_reqid *reqid, void *arg)
 			nhrp_cie_pull(&extpl, p->hdr, &cie_nbma_nhs,
 				      &cie_proto_nhs);
 			break;
+			/* ignore NHRP_EXTENSION_VENDOR - the hub will mirror back what spoke sent*/
 		}
 	}
 
@@ -239,6 +240,7 @@ static void nhrp_reg_send_req(struct event *t)
 	cie->prefix_length = 8 * sockunion_get_addrlen(&if_ad->addr);
 	cie->mtu = htons(if_ad->mtu);
 	nhrp_ext_complete(zb, ext);
+	nhrp_pack_cisco_group(zb, hdr, if_ad);
 
 	nhrp_packet_complete(zb, hdr, ifp);
 	nhrp_peer_send(r->peer, zb);

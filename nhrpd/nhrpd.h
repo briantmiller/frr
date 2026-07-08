@@ -11,6 +11,7 @@
 #include "debug.h"
 #include "memory.h"
 #include "resolver.h"
+#include "nhrp_protocol.h"
 
 DECLARE_MGROUP(NHRPD);
 
@@ -163,6 +164,7 @@ struct nhrp_peer {
 	unsigned requested : 1;
 	unsigned fallback_requested : 1;
 	unsigned prio : 1;
+	uint8_t cisco_group[NHRP_CISCO_GROUP_LENGTH + 1];
 	struct notifier_list notifier_list;
 	struct interface *ifp;
 	struct nhrp_vc *vc;
@@ -337,6 +339,7 @@ struct nhrp_interface {
 	struct nhrp_afi_data {
 		unsigned flags;
 		unsigned short configured : 1;
+		uint8_t cisco_group[NHRP_CISCO_GROUP_LENGTH + 1];
 		union sockunion addr;
 		uint32_t network_id;
 		short configured_mtu;
@@ -508,6 +511,7 @@ nhrp_ext_push(struct zbuf *zb, struct nhrp_packet_header *hdr, uint16_t type);
 void nhrp_ext_complete(struct zbuf *zb, struct nhrp_extension_header *ext);
 struct nhrp_extension_header *nhrp_ext_pull(struct zbuf *zb,
 					    struct zbuf *payload);
+unsigned short nhrp_ext_get(struct nhrp_packet_parser *pp, uint16_t type, void *pl);
 void nhrp_ext_request(struct zbuf *zb, struct nhrp_packet_header *hdr);
 int nhrp_ext_reply(struct zbuf *zb, struct nhrp_packet_header *hdr,
 		   struct interface *ifp, struct nhrp_extension_header *ext,
@@ -532,7 +536,10 @@ void nhrp_peer_notify_del(struct nhrp_peer *p, struct notifier_block *n);
 void nhrp_peer_recv(struct nhrp_peer *p, struct zbuf *zb);
 void nhrp_peer_send(struct nhrp_peer *p, struct zbuf *zb);
 void nhrp_peer_send_indication(struct interface *ifp, uint16_t protocol_type, struct zbuf *pkt);
-
+void nhrp_pack_cisco_group(struct zbuf *zb, struct nhrp_packet_header *hdr,
+			   struct nhrp_afi_data *if_ad);
+void nhrp_parse_cisco_group(struct nhrp_extension_header *ext, struct nhrp_peer *p,
+			    struct zbuf *payload);
 int nhrp_nhs_match_ip(union sockunion *in_ip, struct nhrp_interface *nifp);
 
 #endif

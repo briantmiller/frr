@@ -1,0 +1,44 @@
+{
+	"attr": {
+		"status": "ok",
+		"entriesCount": 4
+	},
+	"table": [
+		{
+			"type": "dynamic",
+			"up": true,
+			"used": false,
+			"protocolAddress": "172.16.1.4",
+			"protocolAddressSize": 32,
+			"nbmaAddress": "192.168.2.4",
+			"nbmaNatOaAddress": "192.168.2.4",
+			"ciscoGroup": "GROUP1"
+		},
+		{
+			"type": "local",
+			"up": false,
+			"used": false,
+			"protocolAddress": "172.16.1.5",
+			"protocolAddressSize": 32,
+			"ciscoGroup": "GROUP2"
+		},
+		{
+			"type": "dynamic",
+			"up": true,
+			"used": false,
+			"protocolAddress": "10.4.4.7",
+			"protocolAddressSize": 32,
+			"nbmaAddress": "192.168.2.4",
+			"nbmaNatOaAddress": "192.168.2.4",
+			"ciscoGroup": "GROUP1"
+		},
+		{
+			"type": "nhs",
+			"up": true,
+			"used": false,
+			"protocolAddress": "172.16.1.1",
+			"protocolAddressSize": 32,
+			"nbmaAddress": "192.168.1.1"
+		}
+	]
+}

@@ -348,6 +348,31 @@ err:
 	return -1;
 }
 
+/*
+ * Get a single extension by type and store into pl
+ * */
+unsigned short nhrp_ext_get(struct nhrp_packet_parser *pp, uint16_t type, void *pl)
+{
+	struct zbuf payload;
+	struct nhrp_extension_header *ext;
+	struct zbuf *extensions;
+	unsigned short ret = 0;
+
+	extensions = zbuf_alloc(zbuf_used(&pp->extensions));
+	if (extensions) {
+		zbuf_copy_peek(extensions, &pp->extensions, zbuf_used(&pp->extensions));
+		while ((ext = nhrp_ext_pull(extensions, &payload)) != NULL) {
+			if (ext && htons(ext->type) == type) {
+				ret = htons(ext->length);
+				memcpy(pl, zbuf_pulln(&payload, ret), ret);
+				break;
+			}
+		}
+		zbuf_free(extensions);
+	}
+	return ret;
+}
+
 static void nhrp_packet_recvraw(struct event *t)
 {
 	int fd = EVENT_FD(t), ifindex;
