@@ -266,11 +266,12 @@ static unsigned int ospf_packet_authspace(struct ospf_interface *oi)
 
 static unsigned int ospf_packet_max(struct ospf_interface *oi)
 {
-	int max;
+	int max = OSPF_IF_PARAM(oi, pkt_max);
 
-	max = oi->ifp->mtu - ospf_packet_authspace(oi);
+	if (max < OSPF_MIN_PACKET_SIZE)
+		max = oi->ifp->mtu;
 
-	max -= (OSPF_HEADER_SIZE + sizeof(struct ip));
+	max -= ospf_packet_authspace(oi) + (OSPF_HEADER_SIZE + sizeof(struct ip));
 
 	return max;
 }
@@ -567,7 +568,10 @@ static void ospf_write(struct event *event)
 		pkt_count++;
 #ifdef WANT_OSPF_WRITE_FRAGMENT
 		/* convenience - max OSPF data per packet */
-		maxdatasize = oi->ifp->mtu - sizeof(struct ip);
+		maxdatasize = OSPF_IF_PARAM(oi, pkt_max);
+		if (maxdatasize < OSPF_MIN_PACKET_SIZE)
+			maxdatasize = oi->ifp->mtu;
+		maxdatasize = maxdatasize - sizeof(struct ip);
 #endif /* WANT_OSPF_WRITE_FRAGMENT */
 
 		/* Reset socket fd to use. */
@@ -4002,8 +4006,11 @@ static struct ospf_packet *ospf_ls_upd_packet_new(struct list *update,
 		size = ntohs(lsa->data->length)
 		       + (oi->ifp->mtu - ospf_packet_max(oi))
 		       + OSPF_LS_UPD_MIN_SIZE;
-	} else
-		size = oi->ifp->mtu;
+	} else {
+		size = OSPF_IF_PARAM(oi, pkt_max);
+		if (size < OSPF_MIN_PACKET_SIZE)
+			size = oi->ifp->mtu;
+	}
 
 	if (size > OSPF_MAX_PACKET_SIZE) {
 		flog_warn(

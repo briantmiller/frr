@@ -560,6 +560,7 @@ static struct ospf_if_params *ospf_new_if_params(void)
 	UNSET_IF_PARAM(oip, transmit_delay);
 	UNSET_IF_PARAM(oip, retransmit_interval);
 	UNSET_IF_PARAM(oip, retransmit_window);
+	UNSET_IF_PARAM(oip, pkt_max);
 	UNSET_IF_PARAM(oip, passive_interface);
 	UNSET_IF_PARAM(oip, v_hello);
 	UNSET_IF_PARAM(oip, fast_hello);
@@ -625,6 +626,7 @@ void ospf_free_if_params(struct interface *ifp, struct in_addr addr)
 	    !OSPF_IF_PARAM_CONFIGURED(oip, transmit_delay) &&
 	    !OSPF_IF_PARAM_CONFIGURED(oip, retransmit_interval) &&
 	    !OSPF_IF_PARAM_CONFIGURED(oip, retransmit_window) &&
+	    !OSPF_IF_PARAM_CONFIGURED(oip, pkt_max) &&
 	    !OSPF_IF_PARAM_CONFIGURED(oip, passive_interface) &&
 	    !OSPF_IF_PARAM_CONFIGURED(oip, v_hello) && !OSPF_IF_PARAM_CONFIGURED(oip, fast_hello) &&
 	    !OSPF_IF_PARAM_CONFIGURED(oip, v_wait) && !OSPF_IF_PARAM_CONFIGURED(oip, priority) &&
@@ -721,6 +723,9 @@ int ospf_if_new_hook(struct interface *ifp)
 
 	SET_IF_PARAM(IF_DEF_PARAMS(ifp), retransmit_window);
 	IF_DEF_PARAMS(ifp)->retransmit_window = OSPF_RETRANSMIT_WINDOW_DEFAULT;
+
+	SET_IF_PARAM(IF_DEF_PARAMS(ifp), pkt_max);
+	IF_DEF_PARAMS(ifp)->pkt_max = 0;
 
 	SET_IF_PARAM(IF_DEF_PARAMS(ifp), priority);
 	IF_DEF_PARAMS(ifp)->priority = OSPF_ROUTER_PRIORITY_DEFAULT;

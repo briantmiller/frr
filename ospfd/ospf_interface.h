@@ -49,6 +49,7 @@ struct ospf_if_params {
 			 retransmit_interval); /* Retransmission Interval */
 	DECLARE_IF_PARAM(uint32_t,
 			 retransmit_window); /* Retransmission Window */
+	DECLARE_IF_PARAM(uint32_t, pkt_max); /* Maximum packet size */
 	DECLARE_IF_PARAM(uint8_t, passive_interface); /* OSPF Interface is
 							passive: no sending or
 							receiving (no need to

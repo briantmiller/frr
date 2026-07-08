@@ -11,6 +11,7 @@
 #define OSPF_AUTH_SIMPLE_SIZE     8U
 #define OSPF_AUTH_MD5_SIZE       16U
 
+#define OSPF_MIN_PACKET_SIZE	  120	   /* minimum packet size including IP and OSPF headers */
 #define OSPF_MAX_PACKET_SIZE  65535U   /* includes IP Header size. */
 #define OSPF_HELLO_MIN_SIZE      20U   /* not including neighbors */
 #define OSPF_DB_DESC_MIN_SIZE     8U

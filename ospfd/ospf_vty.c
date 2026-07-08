@@ -8794,6 +8794,47 @@ DEFUN_HIDDEN (no_ospf_priority,
 	return no_ip_ospf_priority(self, vty, argc, argv);
 }
 
+DEFPY (ip_ospf_pkt_size,
+       ip_ospf_pkt_size_cmd,
+       "[no] ip ospf packet-size ![(120-65535)]$packet-size [A.B.C.D]$ip_addr", NO_STR
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Max packet size\n"
+       "Size in bytes\n"
+       "Address of interface\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params;
+
+	params = IF_DEF_PARAMS(ifp);
+
+	if (!!no) {
+		if (ip_addr.s_addr != INADDR_ANY) {
+			params = ospf_lookup_if_params(ifp, ip_addr);
+			if (params == NULL)
+				return CMD_SUCCESS;
+		}
+
+		UNSET_IF_PARAM(params, pkt_max);
+		params->pkt_max = 0;
+
+		if (params != IF_DEF_PARAMS(ifp)) {
+			ospf_free_if_params(ifp, ip_addr);
+			ospf_if_update_params(ifp, ip_addr);
+		}
+		return CMD_SUCCESS;
+	}
+
+	if (ip_addr.s_addr != INADDR_ANY) {
+		params = ospf_get_if_params(ifp, ip_addr);
+		ospf_if_update_params(ifp, ip_addr);
+	}
+
+	SET_IF_PARAM(params, pkt_max);
+	params->pkt_max = packet_size;
+	return CMD_SUCCESS;
+}
+
 DEFUN (ip_ospf_retransmit_interval,
        ip_ospf_retransmit_interval_addr_cmd,
        "ip ospf retransmit-interval (1-65535) [A.B.C.D]",
@@ -12456,6 +12497,15 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 				vty_out(vty, "\n");
 			}
 
+			/* Max packet size print. */
+			if (OSPF_IF_PARAM_CONFIGURED(params, pkt_max) &&
+			    params->pkt_max >= OSPF_MIN_PACKET_SIZE) {
+				vty_out(vty, " ip ospf packet-size %u", params->pkt_max);
+				if (params != IF_DEF_PARAMS(ifp) && rn)
+					vty_out(vty, " %pI4", &rn->p.u.prefix4);
+				vty_out(vty, "\n");
+			}
+
 			/* Retransmit Interval print. */
 			if (OSPF_IF_PARAM_CONFIGURED(params,
 						     retransmit_interval)
@@ -13392,6 +13442,9 @@ static void ospf_vty_if_init(void)
 	/* "ip ospf priority" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_priority_cmd);
 	install_element(INTERFACE_NODE, &no_ip_ospf_priority_cmd);
+
+	/* "ip ospf packet-size" commands. */
+	install_element(INTERFACE_NODE, &ip_ospf_pkt_size_cmd);
 
 	/* "ip ospf retransmit-interval" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_retransmit_interval_addr_cmd);
