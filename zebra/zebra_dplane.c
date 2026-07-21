@@ -182,6 +182,8 @@ struct dplane_pw_info {
 	struct nexthop_group backup_nhg;
 
 	union pw_protocol_fields fields;
+
+	struct event *t_mac_disc;
 };
 
 /*
@@ -2731,6 +2733,14 @@ dplane_ctx_get_pw_backup_nhg(const struct zebra_dplane_ctx *ctx)
 	return &(ctx->u.pw.backup_nhg);
 }
 
+const struct event *
+dplane_ctx_get_pw_mac_disc_timer(const struct zebra_dplane_ctx *ctx)
+{
+        DPLANE_CTX_VALID(ctx);
+
+        return &(ctx->u.pw.t_mac_disc);
+}
+
 /* Accessors for interface information */
 uint32_t dplane_ctx_get_intf_metric(const struct zebra_dplane_ctx *ctx)
 {
@@ -4510,6 +4520,8 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.pw.dest = pw->nexthop;
 
 	ctx->u.pw.fields = pw->data;
+
+	ctx->u.pw.t_mac_disc = NULL;
 
 	/* Capture nexthop info for the pw destination. We need to look
 	 * up and use zebra datastructs, but we're running in the zebra

@@ -668,6 +668,50 @@ ldp_zebra_filter_update(struct access_list *access)
 	}
 }
 
+static void 
+ldp_zebra_neigh_added(ZAPI_CALLBACK_ARGS)
+{
+        union sockunion addr = {}, lladdr = {};
+        struct interface *ifp;
+        int state, ndm_state;
+	struct nexthop nh;
+        struct zapi_neigh_ip api = {};
+
+        zclient_neigh_ip_decode(zclient->ibuf, &api);
+
+        if (api.ip_len != IPV4_MAX_BYTELEN && api.ip_len != 0)
+                return 0;
+
+        if (api.ip_in.ipa_type == AF_UNSPEC)
+                return 0;
+        sockunion_family(&addr) = api.ip_in.ipa_type;
+        memcpy((uint8_t *)sockunion_get_addr(&addr), &api.ip_in.ip.addr,
+               family2addrsize(api.ip_in.ipa_type));
+
+        sockunion_family(&lladdr) = api.ip_out.ipa_type;
+        if (api.ip_out.ipa_type != AF_UNSPEC)
+                memcpy((uint8_t *)sockunion_get_addr(&lladdr),
+                       &api.ip_out.ip.addr,
+                       family2addrsize(api.ip_out.ipa_type));
+
+        ifp = if_lookup_by_index(api.index, vrf_id);
+        ndm_state = api.ndm_state;
+
+        if (!ifp)
+                return 0;
+        log_info("Netlink: %s %pSU dev %s lladdr %pSU nud 0x%x",
+               (cmd == ZEBRA_NEIGH_GET)     ? "who-has"
+               : (cmd == ZEBRA_NEIGH_ADDED) ? "new-neigh"
+                                            : "del-neigh",
+               &addr, ifp->name, &lladdr, ndm_state);
+
+	/*nh.ifindex = ifp.ifindex;
+	nh.rmac = lladdr;
+	nh.gate.ipv4 = kr->nexthop.v4
+
+	main_imsg_compose_lde(IMSG_LLADDR_NEW, 0, &zpw, sizeof(zpw));*/
+}
+
 extern struct zebra_privs_t ldpd_privs;
 
 static zclient_handler *const ldp_handlers[] = {
@@ -678,6 +722,7 @@ static zclient_handler *const ldp_handlers[] = {
 	[ZEBRA_REDISTRIBUTE_ROUTE_DEL] = ldp_zebra_read_route,
 	[ZEBRA_PW_STATUS_UPDATE] = ldp_zebra_read_pw_status_update,
 	[ZEBRA_OPAQUE_MESSAGE] = ldp_zebra_opaque_msg_handler,
+	[ZEBRA_NEIGH_ADDED] = ldp_zebra_neigh_added,
 };
 
 void ldp_zebra_init(struct event_loop *mst)
@@ -713,4 +758,22 @@ ldp_zebra_destroy(void)
 	zclient_stop(zclient_sync);
 	zclient_free(zclient_sync);
 	zclient_sync = NULL;
+}
+
+void ldp_zebra_neigh_get(struct interface *ifp, struct prefix *p)
+{
+        if (!ldp_zclient || ldp_zclient->sock < 0) {
+                zlog_err("%s: Cannot send neighbor GET request - zclient not connected", __func__);
+                return;
+        }
+
+        if (!ifp) {
+                zlog_err("%s: Cannot send neighbor GET request - interface is NULL", __func__);
+                return;
+        }
+
+        log_info("%s: Sending neighbor GET request for interface %s (index %u), IP %pI4", __func__,
+                        ifp->name, ifp->ifindex, p->u.prefix4);
+
+	zclient_send_neigh_discovery_req(ldp_zclient, ifp, p);
 }

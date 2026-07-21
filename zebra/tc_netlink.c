@@ -12,6 +12,9 @@
 #include <linux/rtnetlink.h>
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
+#include <linux/tc_act/tc_mpls.h>
+#include <linux/tc_act/tc_mirred.h>
+#include <linux/tc_act/tc_vlan.h>
 #include <netinet/if_ether.h>
 #include <sys/socket.h>
 
@@ -39,6 +42,18 @@
 
 #define TIME_UNITS_PER_SEC (1000000)
 #define xmittime(r, s) (TIME_UNITS_PER_SEC * ((double)(s) / (double)(r)))
+
+/*
+ * We need netlink-specific strings for the filter types/kinds.
+ */
+const struct tc_strs tc_action_strs[] = {
+        { TC_ACTION_MPLS_POP, "mpls" },
+        { TC_ACTION_MPLS_MAC_PUSH, "mpls" },
+        { TC_ACTION_VLAN_POP_ETH, "vlan" },
+        { TC_ACTION_VLAN_PUSH_ETH, "vlan" },
+        { TC_ACTION_MIRRED, "mirred" },
+        { 0 },
+};
 
 static uint32_t tc_get_freq(void)
 {
@@ -78,6 +93,18 @@ static void tc_calc_rate_table(struct tc_ratespec *ratespec, uint32_t *table,
 	ratespec->cell_align = -1;
 	ratespec->cell_log = cell_log;
 	ratespec->linklayer = TC_LINKLAYER_ETHERNET;
+}
+
+static const char *tc_action_kind2str(enum tc_filter_kind kind)
+{
+        const struct tc_strs *tcs;
+
+        for (tcs = tc_action_strs; tcs->kind != 0; tcs++) {
+                if (tcs->kind == kind)
+                        return tcs->str;
+        }
+
+        return "unknown";
 }
 
 static int tc_flower_get_inet_prefix(const struct prefix *prefix,
@@ -473,6 +500,11 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 			return 0;
 	}
 
+	if (filter_bm & TC_FLOWER_MPLS) {
+		nl_attr_put32(n, datalen, TCA_FLOWER_KEY_MPLS_LABEL, flower->mpls_label);
+		nl_attr_put8(n, datalen, TCA_FLOWER_KEY_MPLS_BOS, 1);
+	}
+
 	classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
 			    dplane_ctx_tc_filter_get_classid(ctx));
 	if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
@@ -487,6 +519,140 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 	return 1;
 }
 
+static void
+netlink_taction_mpls_put_parm(struct nlmsghdr *n, size_t datalen, 
+			      const int mpls_act_type)
+{
+	struct tc_mpls mpls_parm = {
+                .action = TC_ACT_PIPE,
+                .m_action = mpls_act_type,
+        };
+	nl_attr_put(n, datalen, TCA_MPLS_PARMS, &mpls_parm, sizeof(mpls_parm));
+}
+
+static int
+netlink_taction_mpls_mac_push(struct nlmsghdr *n, size_t datalen,
+                                   const struct tc_action *action)
+{
+	netlink_taction_mpls_put_parm(n, datalen, TCA_MPLS_ACT_MAC_PUSH);
+	nl_attr_put32(n, datalen, TCA_MPLS_LABEL, action->u.mpls_mac_push.label);
+	nl_attr_put8(n, datalen, TCA_MPLS_TC, action->u.mpls_mac_push.tc);
+	nl_attr_put8(n, datalen, TCA_MPLS_TTL, action->u.mpls_mac_push.ttl);
+}
+
+static int
+netlink_taction_mpls_pop(struct nlmsghdr *n, size_t datalen)
+{
+        netlink_taction_mpls_put_parm(n, datalen, TCA_MPLS_PROTO);
+	nl_attr_put16(n, datalen, TCA_MPLS_PARMS, htons(ETH_P_IP));
+}
+
+static int
+netlink_tcaction_vlan_put_parm(struct nlmsghdr *n, size_t datalen, int vlan_act_type)
+{
+	struct tc_vlan vlan_parm  = {
+		.action = TC_ACT_PIPE,
+		.v_action = vlan_act_type,
+	};
+	nl_attr_put(n, datalen, TCA_VLAN_PARMS, &vlan_parm, sizeof(vlan_parm));
+}
+
+static int
+netlink_tcaction_vlan_push(struct nlmsghdr *n, size_t datalen, 
+			   const struct ethaddr dst, const struct ethaddr src)
+{
+	netlink_tcaction_vlan_put_parm(n, datalen, TCA_VLAN_ACT_PUSH_ETH);	
+        nl_attr_put(n, datalen, TCA_VLAN_PUSH_ETH_DST, &dst, sizeof(dst));
+        nl_attr_put(n, datalen, TCA_VLAN_PUSH_ETH_SRC, &src, sizeof(src));
+}
+
+static int
+netlink_tcaction_mirred_redirect(struct nlmsghdr *n, size_t datalen,
+				 const int ifindex)
+{
+	struct tc_mirred m_parm = {
+		.action = TC_ACT_PIPE,
+		.eaction = TCA_EGRESS_MIRROR,
+		.ifindex = ifindex,
+	};
+	nl_attr_put(n, datalen, TCA_MIRRED_PARMS, &m_parm, sizeof(m_parm));
+}
+
+/*
+ * TODO: Considering we may not have the next-hop MAC address, we
+ * need to call zapi here to install qdisc, filters and actions
+ */
+int zebra_send_tc_filter_mpls(const struct interface *ifp,
+                                    uint32_t mpls_label)
+{
+#define MPLS_TC_HANDLE 0x0001
+        struct stream *s;
+        struct tc_class cls;
+	struct tc_qdisc *qdisc;
+        /*struct tc_filter f = { .ifindex = ifp->ifindex,
+                               .handle = MPLS_TC_HANDLE,
+                               .priority = 0x1,
+                               .kind = TC_FILTER_FLOWER,
+                               .u.flower.filter_bm = 0 };*/
+
+        s = g_zclient->obuf;
+
+        /*memset(&cls, 0, sizeof(cls));
+        cls.vrf_id = ifp->vrf->vrf_id;
+        cls.ifindex = ifp->ifindex;
+        SET_FLAG(cls.flags, TC_CLASS_FLAG_ROOT);*/
+
+	qdisc.kind = TC_QDISC_INGRESS;
+
+	//TODO: Updates to latest FRR.  Use that for access to zebra_tc_qdisc_install(struct zebra_tc_qdisc *qdisc)
+
+        zapi_tc_qdisc_encode(ZEBRA_TC_QDISC_INSTALL, s, &q);
+        if (zclient_send_message(g_zclient) == ZCLIENT_SEND_FAILURE)
+                return -1;
+/*
+        memset(&cls, 0, sizeof(cls));
+        cls.vrf_id = ifp->vrf->vrf_id;
+        cls.ifindex = ifp->ifindex;
+        cls.handle = 0xbeef0000 + (MPLS_TC_HANDLE + 1);
+        cls.os_id = MPLS_TC_HANDLE + 1;
+        cls.root_id = 0xbeef;
+        cls.parent_id = MPLS_TC_HANDLE;
+        cls.kind = TC_QDISC_INGRESS;
+        SET_FLAG(cls.u.fifo.flags, TC_FIFO_FLAG_PACKETS);
+
+        zapi_tc_class_encode(ZEBRA_TC_CLASS_ADD, s, 0, &cls);
+        if (zclient_send_message(zclient) == ZCLIENT_SEND_FAILURE)
+                return -1;
+
+
+#ifdef ETH_P_IP
+        f.protocol = ETH_P_IP;
+#else
+        f.protocol = 0x0800;
+#endif
+
+        f.u.flower.filter_bm |= TC_FLOWER_IP_PROTOCOL;
+        f.u.flower.ip_proto = ip_proto;
+        f.u.flower.filter_bm |= TC_FLOWER_SRC_IP;
+        prefix_copy(&f.u.flower.src_ip, source);
+        f.u.flower.filter_bm |= TC_FLOWER_DST_IP;
+        prefix_copy(&f.u.flower.dst_ip, destination);
+        f.u.flower.filter_bm |= TC_FLOWER_SRC_PORT;
+        f.u.flower.src_port_min = f.u.flower.src_port_max = src_port;
+        f.u.flower.filter_bm |= TC_FLOWER_DST_PORT;
+        f.u.flower.dst_port_min = f.u.flower.dst_port_max = dst_port;
+
+        f.u.flower.classid = MPLS_TC_HANDLE & 0xffff;
+
+        zapi_tc_filter_encode(ZEBRA_TC_FILTER_ADD, s, &f);
+        if (zclient_send_message(g_zclient) == ZCLIENT_SEND_FAILURE)
+                return -1;
+
+	*/
+        return 0;
+}
+
+
 /*
  * Traffic control filter encoding
  */
@@ -498,7 +664,7 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 	struct nlsock *nl;
 	const char *kind_str = NULL;
 
-	struct rtattr *nest;
+	struct rtattr *nest, *act_nest = NULL, *act_nest1, *act_nest2;
 
 	uint16_t priority;
 	uint16_t protocol;
@@ -566,6 +732,43 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 		default:
 			break;
 		}
+		struct tc_action *action = zfilt->filter.actions;
+
+		if (action)
+			act_nest = nl_attr_nest(&req->n, datalen, TCA_ACT_TAB);
+		for (; action; action = action->next) {
+			act_nest1 = nl_attr_nest(&req->n, datalen, TCA_ACT_TAB);
+			kind_str = tc_action_kind2str(action->kind);
+			nl_attr_put(&req->n, datalen, TCA_ACT_KIND, kind_str,
+                            strlen(kind_str) + 1);
+			act_nest2 = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
+			switch(action->kind) {
+			case TC_ACTION_MPLS_POP:
+				netlink_taction_mpls_pop(&req->n, datalen);
+				break;
+			case TC_ACTION_MPLS_MAC_PUSH:
+		        	netlink_taction_mpls_mac_push(&req->n, datalen, action);
+				break;
+			case TC_ACTION_VLAN_POP_ETH:
+				netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_POP_ETH);
+				break;
+			case TC_ACTION_VLAN_PUSH_ETH:
+				netlink_tcaction_vlan_push(&req->n, datalen,
+							   action->u.vlan_push_eth.dst,
+							   action->u.vlan_push_eth.src);
+				break;
+			case TC_ACTION_MIRRED:
+				netlink_tcaction_mirred_redirect(&req->n, datalen, action->u.mirred.ifindex);
+				break;
+			case TC_ACTION_UNSPEC:
+				break;
+			}
+			nl_attr_nest_end(&req->n, act_nest2);
+			nl_attr_nest_end(&req->n, act_nest1);
+
+		}
+		if (act_nest)
+			nl_attr_nest_end(&req->n, act_nest);
 		nl_attr_nest_end(&req->n, nest);
 	}
 

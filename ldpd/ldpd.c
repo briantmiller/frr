@@ -662,6 +662,8 @@ static void main_dispatch_lde(struct event *event)
 			if (imsg.hdr.len - IMSG_HEADER_SIZE !=
 			    sizeof(struct kroute))
 				fatalx("invalid size of IMSG_KLABEL_CHANGE");
+			//if (imsg.data.nexthop_mac)
+			//	ldp_zebra_neigh_get(
 			if (kr_change(imsg.data))
 				log_warnx("%s: error changing route", __func__);
 			break;

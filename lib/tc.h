@@ -23,9 +23,14 @@ enum tc_qdisc_kind {
 	TC_QDISC_UNSPEC,
 	TC_QDISC_HTB,
 	TC_QDISC_NOQUEUE,
+	TC_QDISC_INGRESS
 };
 
 struct tc_qdisc_htb {
+	/* currently no members */
+};
+
+struct tc_qdisc_ingress {
 	/* currently no members */
 };
 
@@ -35,6 +40,7 @@ struct tc_qdisc {
 	enum tc_qdisc_kind kind;
 	union {
 		struct tc_qdisc_htb htb;
+		struct tc_qdisc_ingress ingress;
 	} u;
 };
 
@@ -67,6 +73,26 @@ enum tc_filter_kind {
 	TC_FILTER_U32,
 };
 
+enum tc_mirred_direction {
+	TC_MIRRED_INGRESS,
+	TC_MIRRED_EGRESS,
+};
+
+enum tc_mirred_mode {
+	TC_MIRRED_MIRROR,
+	TC_MIRRED_REDIRECT,
+};
+
+/* action iknds */
+enum tc_action_kind {
+	TC_ACTION_UNSPEC,
+	TC_ACTION_MPLS_POP,
+	TC_ACTION_MPLS_MAC_PUSH,
+	TC_ACTION_VLAN_POP_ETH,
+	TC_ACTION_VLAN_PUSH_ETH,
+	TC_ACTION_MIRRED,
+};
+
 struct tc_bpf {
 	/* TODO: fill in */
 };
@@ -84,6 +110,7 @@ struct tc_flower {
 #define TC_FLOWER_SRC_PORT (1 << 3)
 #define TC_FLOWER_DST_PORT (1 << 4)
 #define TC_FLOWER_DSFIELD (1 << 5)
+#define TC_FLOWER_MPLS (1 << 6)
 
 	uint32_t filter_bm;
 
@@ -99,10 +126,56 @@ struct tc_flower {
 
 	uint8_t dsfield;
 	uint8_t dsfield_mask;
+
+	uint32_t mpls_label;
+	uint8_t mpls_bos;
 };
 
 struct tc_u32 {
 	/* TODO: fill in */
+};
+
+struct tc_act_mpls_pop {
+	uint16_t protocol;
+};
+
+struct tc_act_mpls_mac_push {
+	uint16_t protocol;
+	uint8_t tc;
+	uint8_t ttl;
+	uint8_t bos;
+	uint32_t label;
+};
+
+struct tc_act_vlan_pop_eth {
+	/* No parameters, just pop eth header */	
+};
+
+struct tc_act_vlan_push_eth {
+	struct ethaddr dst;
+	struct ethaddr src;
+};
+
+struct tc_act_mirred {
+	uint32_t ifindex;
+
+	enum tc_mirred_direction direction;
+	enum tc_mirred_mode mode;
+};
+
+struct tc_action {
+	struct tc_action *next;
+	struct tc_action *prev;
+
+	uint32_t index;
+	enum tc_action_kind kind;
+	union {
+		struct tc_act_mpls_pop mpls_pop;
+		struct tc_act_mpls_mac_push mpls_mac_push;
+		struct tc_act_vlan_pop_eth vlan_pop_eth;
+		struct tc_act_vlan_push_eth vlan_push_eth;
+		struct tc_act_mirred mirred;
+	} u;
 };
 
 struct tc_filter {
@@ -120,6 +193,8 @@ struct tc_filter {
 		struct tc_flower flower;
 		struct tc_u32 u32;
 	} u;
+
+	struct tc_action *actions;
 };
 
 extern int tc_getrate(const char *str, uint64_t *rate);

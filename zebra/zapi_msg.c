@@ -3634,6 +3634,10 @@ static inline void zread_tc_filter(ZAPI_HANDLER_ARGS)
 				STREAM_GETC(
 					s, filter.filter.u.flower.dsfield_mask);
 			}
+			if (filter_bm & TC_FLOWER_MPLS) {
+				STREAM_GETL(s, filter.filter.u.flower.mpls_label);
+				STREAM_GETC(s, filter.filter.u.flower.mpls_bos);
+			}
 			STREAM_GETL(s, filter.filter.u.flower.classid);
 			break;
 		}

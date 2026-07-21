@@ -357,6 +357,24 @@ void zebra_neigh_show(struct vty *vty, enum ipaddr_type_t afi, bool use_json)
 	}
 }
 
+int zebra_neigh_get_mac(ifindex_t ifindex, struct ipaddr *ip, struct ethaddr *mac)
+{
+	struct zebra_neigh_ent *n;
+	char ip_buf[INET6_ADDRSTRLEN];
+	RB_FOREACH (n, zebra_neigh_rb_head, &zneigh_info->neigh_rb_tree)
+	{
+		//ipaddr2str(&n->ip, ip_buf, sizeof(ip_buf));
+		//zlog_info("Checking neighbor %s",ip_buf);
+		if (n->ifindex != ifindex)
+			continue;
+		if (ipaddr_cmp(&n->ip,ip))
+			continue;
+		memcpy(mac, &n->mac, sizeof(*mac));
+		return 0;
+	}
+	return 1;
+}
+
 void zebra_neigh_init(void)
 {
 	zneigh_info = XCALLOC(MTYPE_ZNEIGH_INFO, sizeof(*zrouter.neigh_info));

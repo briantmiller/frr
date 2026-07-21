@@ -151,6 +151,7 @@ enum imsg_type {
 	IMSG_RLFA_UNREG_ALL,
 	IMSG_RLFA_LABELS,
 	IMSG_AGENTX_ENABLED,
+	IMSG_LLADDR_NEW,
 };
 
 struct ldpd_init {
@@ -612,12 +613,14 @@ struct kroute {
 	union ldpd_addr		 prefix;
 	uint8_t			 prefixlen;
 	union ldpd_addr		 nexthop;
+	struct ethaddr		 nexthop_mac;
 	uint32_t		 local_label;
 	uint32_t		 remote_label;
 	ifindex_t		 ifindex;
 	uint8_t			 route_type;
 	uint8_t			 route_instance;
 	uint16_t		 flags;
+
 };
 
 struct kaddr {

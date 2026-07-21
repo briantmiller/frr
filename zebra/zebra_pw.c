@@ -166,6 +166,7 @@ static void zebra_pw_install(struct zebra_pw *pw)
 
 	hook_call(pw_install, pw);
 	if (dplane_pw_install(pw) == ZEBRA_DPLANE_REQUEST_FAILURE) {
+		zlog_info("%s install failure",__func__);
 		/*
 		 * Realistically this is never going to fail passing
 		 * the pw data down to the dplane.  The failure modes
@@ -327,8 +328,9 @@ static int zebra_pw_check_reachability(const struct zebra_pw *pw)
 			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_RECURSIVE))
 				continue;
 
-			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE) &&
-			    nexthop->nh_label != NULL) {
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE) ) { //&&
+			/* Not all pseudowires need labels per next-hop such as Cisco */
+			    //nexthop->nh_label != NULL) {
 				found_p = true;
 				break;
 			}

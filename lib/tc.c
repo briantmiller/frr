@@ -73,3 +73,46 @@ int tc_getrate(const char *str, uint64_t *rate)
 
 	return 0;
 }
+
+const char *tc_qdisc_type2str(enum tc_qdisc_kind kind)
+{
+        const char *str = "Unknown";
+
+        switch (kind) {
+        case TC_QDISC_HTB:
+                str = "HTB";
+                break;
+        case TC_QDISC_HFSC:
+                str = "HFSC";
+                break;
+        case TC_QDISC_SFQ:
+                str = "SFQ";
+                break;
+        case TC_QDISC_FIFO:
+                str = "FIFO";
+                break;
+        case TC_QDISC_UNSPEC:
+                str = "UNSPEC";
+                break;
+        case TC_QDISC_CODEL:
+                str = "CODEL";
+                break;
+        case TC_QDISC_FQ_CODEL:
+                str = "FQ_CODEL";
+                break;
+        case TC_QDISC_PIE:
+                str = "PIE";
+                break;
+        case TC_QDISC_FQ_PIE:
+                str = "FQ_PIE";
+                break;
+        case TC_QDISC_NOQUEUE:
+                str = "NOQUEUE";
+                break;
+        case TC_QDISC_INGRESS:
+                str = "INGRESS";
+                break;
+        }
+
+        return str;
+}
