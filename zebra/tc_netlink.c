@@ -12,6 +12,9 @@
 #include <linux/rtnetlink.h>
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
+#include <linux/tc_act/tc_mpls.h>
+#include <linux/tc_act/tc_mirred.h>
+#include <linux/tc_act/tc_vlan.h>
 #include <netinet/if_ether.h>
 #include <sys/socket.h>
 
@@ -210,6 +213,8 @@ static ssize_t netlink_qdisc_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 			}
 			break;
 		}
+		case TC_QDISC_INGRESS:
+			break;
 		case TC_QDISC_NOQUEUE:
 			break;
 		default:
@@ -220,6 +225,11 @@ static ssize_t netlink_qdisc_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 		nl_attr_nest_end(&req->n, nest);
 	} else {
 		/* ifindex are enough for del/get qdisc */
+	}
+	/* Always set handle and parent for ingress qdisc */
+	if (dplane_ctx_tc_qdisc_get_kind(ctx) == TC_QDISC_INGRESS) {
+		req->t.tcm_parent = TC_H_INGRESS;
+		req->t.tcm_handle = TC_H_MAKE(TC_H_INGRESS, 0);
 	}
 
 	return NLMSG_ALIGN(req->n.nlmsg_len);
@@ -360,7 +370,7 @@ static int netlink_tfilter_flower_port_type(uint8_t ip_proto, bool src)
 }
 
 static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen,
-					      struct zebra_dplane_ctx *ctx)
+					      struct zebra_dplane_ctx *ctx, const uint32_t parent)
 {
 	struct inet_prefix addr;
 	uint32_t flags = 0, classid;
@@ -473,18 +483,65 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 			return 0;
 	}
 
-	classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
-			    dplane_ctx_tc_filter_get_classid(ctx));
-	if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
-		return 0;
+	if (filter_bm & TC_FLOWER_MPLS) {
+		uint32_t label = dplane_ctx_tc_filter_get_mpls_label(ctx);
+		if (!nl_attr_put32(n, datalen, TCA_FLOWER_KEY_MPLS_LABEL,
+			           label))
+			return 0;
+		if (!nl_attr_put8(n, datalen, TCA_FLOWER_KEY_MPLS_BOS,1))
+			return 0;
+	}
+
+	if (parent >= TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,0) && 
+	    parent <= TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,0xFFFFU)) {
+		classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
+				    dplane_ctx_tc_filter_get_classid(ctx));
+		if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
+			return 0;
+	}
+
 
 	if (!nl_attr_put32(n, datalen, TCA_FLOWER_FLAGS, flags))
 		return 0;
 
-	if (!nl_attr_put16(n, datalen, TCA_FLOWER_KEY_ETH_TYPE, protocol))
+	if (protocol && protocol != htons(ETH_P_ALL) && 
+	    !nl_attr_put16(n, datalen, TCA_FLOWER_KEY_ETH_TYPE, protocol))
 		return 0;
 
 	return 1;
+}
+
+static void
+netlink_taction_mpls_put_parm(struct nlmsghdr *n, size_t datalen,
+			      const int mpls_act_type)
+{
+	struct tc_mpls mpls_parm = {
+                .action = TC_ACT_PIPE,
+                .m_action = mpls_act_type,
+        };
+	nl_attr_put(n, datalen, TCA_MPLS_PARMS, &mpls_parm, sizeof(mpls_parm));
+}
+
+static void
+netlink_tcaction_vlan_put_parm(struct nlmsghdr *n, size_t datalen, int vlan_act_type)
+{
+	struct tc_vlan vlan_parm  = {
+		.action = TC_ACT_PIPE,
+		.v_action = vlan_act_type,
+	};
+	nl_attr_put(n, datalen, TCA_VLAN_PARMS, &vlan_parm, sizeof(vlan_parm));
+}
+
+static void
+netlink_tcaction_mirred_redirect(struct nlmsghdr *n, size_t datalen,
+				 const int ifindex, const int eaction)
+{
+	struct tc_mirred m_parm = {
+		.action = TC_ACT_STOLEN,
+		.eaction = eaction,
+		.ifindex = ifindex,
+	};
+	nl_attr_put(n, datalen, TCA_MIRRED_PARMS, &m_parm, sizeof(m_parm));
 }
 
 /*
@@ -498,10 +555,13 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 	struct nlsock *nl;
 	const char *kind_str = NULL;
 
-	struct rtattr *nest;
+	struct rtattr *nest, *act_nest = NULL, *act_nest1, *act_nest2;
 
 	uint16_t priority;
 	uint16_t protocol;
+	uint32_t parent;
+	int act_tab = 0;
+	int eaction;
 
 	struct {
 		struct nlmsghdr n;
@@ -510,6 +570,8 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 	} *req = data;
 
 	ssize_t ret = 0;
+
+	const struct ethaddr *dst, *src;
 
 	if (datalen < sizeof(*req))
 		return 0;
@@ -536,21 +598,24 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 	req->t.tcm_info = TC_H_MAKE(priority << 16, protocol);
 	req->t.tcm_handle = dplane_ctx_tc_filter_get_handle(ctx);
-	req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA, 0);
+
+	parent = dplane_ctx_tc_filter_get_parent(ctx);
+	if (!parent)
+		parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,0);
+	req->t.tcm_parent = parent;
 
 	kind_str = dplane_ctx_tc_filter_get_kind_str(ctx);
+	
+	if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
+		return 0;
 
 	if (op == DPLANE_OP_TC_FILTER_ADD || op == DPLANE_OP_TC_FILTER_UPDATE) {
-		if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
-			return 0;
 
 		zlog_debug(
-			"netlink tfilter encoder: op: %s priority: %u protocol: %u kind: %s handle: %u filter_bm: %u ip_proto: %u",
+			"netlink tfilter encoder: op: %s priority: %u protocol: %u kind: %s handle: %u",
 			op == DPLANE_OP_TC_FILTER_UPDATE ? "update" : "add",
 			priority, protocol, kind_str,
-			dplane_ctx_tc_filter_get_handle(ctx),
-			dplane_ctx_tc_filter_get_filter_bm(ctx),
-			dplane_ctx_tc_filter_get_ip_proto(ctx));
+			dplane_ctx_tc_filter_get_handle(ctx));
 
 		nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
 		if (!nest)
@@ -558,15 +623,109 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 		switch (dplane_ctx_tc_filter_get_kind(ctx)) {
 		case TC_FILTER_FLOWER: {
-			ret = netlink_tfilter_flower_put_options(&req->n, datalen, ctx);
+			ret = netlink_tfilter_flower_put_options(&req->n, datalen, ctx, parent);
 			if (ret <= 0)
 				return 0;
+			act_tab = TCA_FLOWER_ACT;
+			break;
+		}
+		case TC_FILTER_MATCHALL: {
+			/* Nothing to do, match all packets */
+			act_tab = TCA_MATCHALL_ACT;
 			break;
 		}
 		default:
 			break;
 		}
+		uint32_t action_count = dplane_ctx_tc_filter_get_action_count(ctx);
+		if (cmd == RTM_DELTFILTER)
+			action_count = 0;
+		if (action_count)
+			act_nest = nl_attr_nest(&req->n, datalen, act_tab);
+		for (uint32_t i = 0; i < action_count; i++) {
+			act_nest1 = nl_attr_nest(&req->n, datalen, i+1);
+			kind_str = dplane_ctx_tc_filter_get_action_kind_str(ctx, i);
+			nl_attr_put(&req->n, datalen, TCA_ACT_KIND, kind_str,
+				    strlen(kind_str) + 1);
+			act_nest2 = nl_attr_nest(&req->n, datalen, TCA_ACT_OPTIONS | NLA_F_NESTED);
+			switch(dplane_ctx_tc_filter_get_action_kind(ctx,i)) {
+			case TC_ACTION_MPLS:
+				switch(dplane_ctx_tc_filter_get_action_mpls_mode(ctx,i)) {
+				case TC_MPLS_POP:
+					netlink_taction_mpls_put_parm(&req->n,datalen,TCA_MPLS_ACT_POP);
+					nl_attr_put16(&req->n, datalen, TCA_MPLS_PROTO, htons(ETH_P_MPLS_UC));
+					break;
+				case TC_MPLS_PUSH:
+					netlink_taction_mpls_put_parm(&req->n,datalen,TCA_MPLS_ACT_PUSH);
+					nl_attr_put32(&req->n, datalen, TCA_MPLS_LABEL,
+						      dplane_ctx_tc_filter_get_action_mpls_label(ctx,i));
+					nl_attr_put16(&req->n, datalen, TCA_MPLS_PROTO, htons(ETH_P_MPLS_UC));
+					nl_attr_put8(&req->n, datalen, TCA_MPLS_TTL,
+						     dplane_ctx_tc_filter_get_action_mpls_ttl(ctx,i));
+					break;
+				case TC_MPLS_PUSH_MAC:
+					netlink_taction_mpls_put_parm(&req->n,datalen,TCA_MPLS_ACT_MAC_PUSH);
+					nl_attr_put32(&req->n, datalen, TCA_MPLS_LABEL,
+						      dplane_ctx_tc_filter_get_action_mpls_label(ctx,i));
+						      //htonl(dplane_ctx_tc_filter_get_action_mpls_label(ctx,i)));
+					/*nl_attr_put16(&req->n, datalen, TCA_MPLS_PROTO, htons(ETH_P_MPLS_UC));
+					nl_attr_put8(&req->n, datalen, TCA_MPLS_TC,
+						     dplane_ctx_tc_filter_get_action_mpls_tc(ctx,i));
+					nl_attr_put8(&req->n, datalen, TCA_MPLS_TTL,
+						     dplane_ctx_tc_filter_get_action_mpls_ttl(ctx,i));*/
+					nl_attr_put8(&req->n, datalen, TCA_MPLS_BOS, dplane_ctx_tc_filter_get_action_mpls_bos(ctx,i));
+					break;
+				case TC_MPLS_DEC_TTL:
+					netlink_taction_mpls_put_parm(&req->n,datalen,TCA_MPLS_ACT_DEC_TTL);
+					break;
+				}
+				break;
+			case TC_ACTION_VLAN:
+				switch(dplane_ctx_tc_filter_get_action_vlan_mode(ctx,i)) {
+				case TC_VLAN_POP:
+					netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_POP);
+					break;
+				case TC_VLAN_POP_ETH:
+					netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_POP_ETH);
+					break;
+				case TC_VLAN_PUSH:
+					netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_PUSH);
+					break;
+				case TC_VLAN_PUSH_ETH:
+					dst = dplane_ctx_tc_filter_get_action_vlan_dst(ctx, i);
+					src = dplane_ctx_tc_filter_get_action_vlan_src(ctx, i);
+					netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_PUSH_ETH);
+					nl_attr_put(&req->n, datalen, TCA_VLAN_PUSH_ETH_DST, dst->octet, ETH_ALEN);
+					nl_attr_put(&req->n, datalen, TCA_VLAN_PUSH_ETH_SRC, src->octet, ETH_ALEN);
+					break;
+				case TC_VLAN_REPLACE:
+					//netlink_tcaction_vlan_put_parm(&req->n, datalen, TCA_VLAN_ACT_REPLACE);
+					break;
+				}
+				break;
+			case TC_ACTION_MIRRED:
+				eaction = TCA_EGRESS_REDIR;
+				if (dplane_ctx_tc_filter_get_action_mirred_direction(ctx,i) == TC_MIRRED_INGRESS)
+				      eaction = TCA_INGRESS_REDIR;
+				netlink_tcaction_mirred_redirect(&req->n, datalen, dplane_ctx_tc_filter_get_action_mirred_ifindex(ctx,i),eaction);
+				break;
+			case TC_ACTION_UNSPEC:
+				break;
+			}
+			nl_attr_nest_end(&req->n, act_nest2);
+			nl_attr_nest_end(&req->n, act_nest1);
+
+		}
+		if (act_nest)
+			nl_attr_nest_end(&req->n, act_nest);
 		nl_attr_nest_end(&req->n, nest);
+	}
+	if (cmd == RTM_DELTFILTER) {
+		req->n.nlmsg_flags = NLM_F_REQUEST;
+		zlog_debug(
+                        "netlink tfilter encoder: op: delete priority: %u protocol: %u kind: %s handle: %u",
+                        priority, protocol, kind_str,
+                        dplane_ctx_tc_filter_get_handle(ctx));
 	}
 
 	return NLMSG_ALIGN(req->n.nlmsg_len);
@@ -789,6 +948,7 @@ int netlink_tfilter_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void 
 	int len;
 	struct rtattr *tb[TCA_MAX + 1];
 
+
 	frrtrace(3, frr_zebra, netlink_tc_filter_change, h, ns_id, startup);
 
 	len = h->nlmsg_len - NLMSG_LENGTH(sizeof(struct tcmsg));
@@ -802,6 +962,7 @@ int netlink_tfilter_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void 
 
 	tcm = NLMSG_DATA(h);
 	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+
 
 	return 0;
 }

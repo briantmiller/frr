@@ -3545,7 +3545,8 @@ static inline void zread_tc_filter(ZAPI_HANDLER_ARGS)
 {
 	struct zebra_tc_filter filter;
 	struct stream *s;
-	uint32_t total, i;
+	uint32_t total, i, a, action_count, o;
+	struct tc_action *action;
 
 	s = msg;
 	STREAM_GETL(s, total);
@@ -3559,6 +3560,7 @@ static inline void zread_tc_filter(ZAPI_HANDLER_ARGS)
 		STREAM_GETL(s, filter.filter.priority);
 		STREAM_GETL(s, filter.filter.protocol);
 		STREAM_GETL(s, filter.filter.kind);
+		STREAM_GETL(s, action_count);
 		switch (filter.filter.kind) {
 		case TC_FILTER_FLOWER: {
 			STREAM_GETL(s, filter.filter.u.flower.filter_bm);
@@ -3634,14 +3636,54 @@ static inline void zread_tc_filter(ZAPI_HANDLER_ARGS)
 				STREAM_GETC(
 					s, filter.filter.u.flower.dsfield_mask);
 			}
+			if (filter_bm & TC_FLOWER_MPLS) {
+				STREAM_GETL(s, filter.filter.u.flower.mpls_label);
+				STREAM_GETC(s, filter.filter.u.flower.mpls_bos);
+			}
 			STREAM_GETL(s, filter.filter.u.flower.classid);
 			break;
 		}
 		case TC_FILTER_BPF:
 		case TC_FILTER_FLOW:
 		case TC_FILTER_U32:
+		case TC_FILTER_MATCHALL:
 		case TC_FILTER_UNSPEC:
 			break;
+		}
+
+		for(a = 0; a < action_count && a < TC_MAX_ACTIONS; a++) {
+			action = &filter.filter.actions[i];
+			STREAM_GETL(s, action->index);
+			STREAM_GETW(s, action->kind);
+			switch(action->kind) {
+			case TC_ACTION_MPLS:
+				STREAM_GETC(s, action->u.mpls.mode);
+				STREAM_GETW(s, action->u.mpls.protocol);
+				STREAM_GETC(s, action->u.mpls.tc);
+				STREAM_GETC(s, action->u.mpls.ttl);
+				STREAM_GETC(s, action->u.mpls.bos);
+				STREAM_GETL(s, action->u.mpls.label);
+				break;
+			case TC_ACTION_VLAN:
+				STREAM_GETC(s, action->u.vlan.mode);
+				STREAM_GETW(s, action->u.vlan.id);
+				STREAM_GETC(s, action->u.vlan.protocol);
+				STREAM_GETC(s, action->u.vlan.priority);
+				for (o=0; o<ETH_ALEN; o++) {
+					STREAM_GETC(s, action->u.vlan.dst.octet[o]);
+				}
+				for (o=0; o<ETH_ALEN; o++) {
+					STREAM_GETC(s, action->u.vlan.src.octet[o]);
+				}
+				break;
+			case TC_ACTION_MIRRED:
+				STREAM_GETL(s,action->u.mirred.ifindex);
+				STREAM_GETC(s,action->u.mirred.direction);
+				STREAM_GETC(s,action->u.mirred.mode);
+				break;
+			case TC_ACTION_UNSPEC:
+				break;
+			}
 		}
 
 		if (hdr->command == ZEBRA_TC_FILTER_ADD)

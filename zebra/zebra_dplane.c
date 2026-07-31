@@ -65,6 +65,8 @@ const uint32_t DPLANE_DEFAULT_MAX_QUEUED = 200;
 /* Default value for new work per cycle */
 const uint32_t DPLANE_DEFAULT_NEW_WORK = 100;
 
+#define DPLANE_TC_MAX_ACTIONS 8
+
 /* Validation check macro for context blocks */
 /* #define DPLANE_DEBUG 1 */
 
@@ -168,6 +170,7 @@ struct dplane_pw_info {
 	int type;
 	int af;
 	int status;
+	ifindex_t prev_nh_ifindex;
 	uint32_t flags;
 	uint32_t nhg_id;
 	union g_addr dest;
@@ -372,9 +375,34 @@ struct dplane_tc_class_info {
 	uint64_t ceil;
 };
 
+struct dplane_tc_action_info {
+	uint32_t handle;
+	enum tc_action_kind kind;
+	const char *kind_str;
+	/* mpls parameters */
+	enum tc_mpls_mode mpls_mode;
+	uint16_t protocol;
+	uint8_t tc;
+	uint8_t ttl;
+	uint8_t bos;
+	uint32_t label;
+	/* vlan parameters */
+	enum tc_vlan_mode vlan_mode;
+        uint16_t id;
+        enum tc_vlan_proto vlan_protocol;
+        uint8_t priority;
+	struct ethaddr dst;
+	struct ethaddr src;
+	/* mirred parameters */
+	uint32_t mirred_ifindex;
+	enum tc_mirred_direction direction;
+	enum tc_mirred_mode mirred_mode;
+};
+
 struct dplane_tc_filter_info {
 	uint32_t handle;
 	uint16_t priority;
+	uint32_t parent;
 	enum tc_filter_kind kind;
 	const char *kind_str;
 	uint32_t filter_bm;
@@ -389,6 +417,9 @@ struct dplane_tc_filter_info {
 	uint8_t dsfield;
 	uint8_t dsfield_mask;
 	uint32_t classid;
+	uint32_t mpls_label;
+	uint32_t action_count;
+	struct dplane_tc_action_info actions[DPLANE_TC_MAX_ACTIONS];
 };
 
 /*
@@ -2268,6 +2299,13 @@ uint32_t dplane_ctx_tc_filter_get_handle(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.tc_filter.handle;
 }
 
+uint32_t dplane_ctx_tc_filter_get_parent(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.parent;
+}
+
 uint16_t dplane_ctx_tc_filter_get_eth_proto(const struct zebra_dplane_ctx *ctx)
 {
 	DPLANE_CTX_VALID(ctx);
@@ -2359,6 +2397,158 @@ uint32_t dplane_ctx_tc_filter_get_classid(const struct zebra_dplane_ctx *ctx)
 	DPLANE_CTX_VALID(ctx);
 
 	return ctx->u.tc_filter.classid;
+}
+
+uint32_t
+dplane_ctx_tc_filter_get_mpls_label(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.mpls_label;
+}
+
+uint32_t
+dplane_ctx_tc_filter_get_action_count(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.action_count;
+}
+
+enum tc_action_kind
+dplane_ctx_tc_filter_get_action_kind(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].kind;
+}
+
+const char *
+dplane_ctx_tc_filter_get_action_kind_str(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].kind_str;
+}
+
+enum tc_mpls_mode
+dplane_ctx_tc_filter_get_action_mpls_mode(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].mpls_mode;
+}
+
+uint16_t
+dplane_ctx_tc_filter_get_action_mpls_protocol(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].protocol;
+}
+
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_tc(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].tc;
+}
+
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_ttl(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].ttl;
+}
+
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_bos(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].bos;
+}
+
+uint32_t
+dplane_ctx_tc_filter_get_action_mpls_label(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].label;
+}
+
+enum tc_vlan_mode
+dplane_ctx_tc_filter_get_action_vlan_mode(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].vlan_mode;
+}
+
+uint16_t
+dplane_ctx_tc_filter_get_action_vlan_id(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].id;
+}
+
+enum tc_vlan_proto
+dplane_ctx_tc_filter_get_action_vlan_protocol(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].vlan_protocol;
+}
+
+uint8_t
+dplane_ctx_tc_filter_get_action_vlan_priority(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].priority;
+}
+
+const struct ethaddr *
+dplane_ctx_tc_filter_get_action_vlan_dst(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tc_filter.actions[i].dst;
+}
+
+const struct ethaddr *
+dplane_ctx_tc_filter_get_action_vlan_src(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tc_filter.actions[i].src;
+}
+
+uint32_t
+dplane_ctx_tc_filter_get_action_mirred_ifindex(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].mirred_ifindex;
+}
+
+enum tc_mirred_direction
+dplane_ctx_tc_filter_get_action_mirred_direction(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].direction;
+}
+
+enum tc_mirred_mode
+dplane_ctx_tc_filter_get_action_mirred_mode(const struct zebra_dplane_ctx *ctx, uint32_t i)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.actions[i].mirred_mode;
 }
 
 /*
@@ -2730,6 +2920,15 @@ dplane_ctx_get_pw_backup_nhg(const struct zebra_dplane_ctx *ctx)
 
 	return &(ctx->u.pw.backup_nhg);
 }
+
+ifindex_t
+dplane_ctx_get_pw_prev_nh_ifindex(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.pw.prev_nh_ifindex;
+}
+
 
 /* Accessors for interface information */
 uint32_t dplane_ctx_get_intf_metric(const struct zebra_dplane_ctx *ctx)
@@ -4209,6 +4408,7 @@ static int dplane_ctx_tc_filter_init(struct zebra_dplane_ctx *ctx,
 	int ret = EINVAL;
 
 	struct zebra_ns *zns = NULL;
+	struct tc_action *action;
 
 	ctx->zd_op = op;
 	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
@@ -4220,6 +4420,8 @@ static int dplane_ctx_tc_filter_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_filter.kind = filter->filter.kind;
 	ctx->u.tc_filter.kind_str = tc_filter_kind2str(filter->filter.kind);
 
+	ctx->u.tc_filter.parent = filter->filter.parent;
+
 	ctx->u.tc_filter.filter_bm = filter->filter.u.flower.filter_bm;
 	prefix_copy(&ctx->u.tc_filter.src_ip, &filter->filter.u.flower.src_ip);
 	ctx->u.tc_filter.src_port_min = filter->filter.u.flower.src_port_min;
@@ -4230,9 +4432,46 @@ static int dplane_ctx_tc_filter_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_filter.dsfield = filter->filter.u.flower.dsfield;
 	ctx->u.tc_filter.dsfield_mask = filter->filter.u.flower.dsfield_mask;
 	ctx->u.tc_filter.classid = filter->filter.u.flower.classid;
+	ctx->u.tc_filter.mpls_label = filter->filter.u.flower.mpls_label;
 
 	ctx->u.tc_filter.priority = filter->filter.priority;
 	ctx->u.tc_filter.handle = filter->filter.handle;
+
+	ctx->u.tc_filter.action_count = filter->filter.action_count;
+
+	for (uint32_t i = 0; i < filter->filter.action_count; i++ ) {
+		action = &filter->filter.actions[i];
+		//ctx->u.tc_filter.actions[i].index = action->index;
+		ctx->u.tc_filter.actions[i].kind = action->kind;
+		ctx->u.tc_filter.actions[i].kind_str = tc_action_kind2str(action->kind);
+		switch(action->kind) {
+		case TC_ACTION_MPLS:
+			ctx->u.tc_filter.actions[i].mpls_mode = action->u.mpls.mode;
+			ctx->u.tc_filter.actions[i].protocol = action->u.mpls.protocol;
+			ctx->u.tc_filter.actions[i].tc = action->u.mpls.tc;
+			ctx->u.tc_filter.actions[i].ttl = action->u.mpls.ttl;
+			ctx->u.tc_filter.actions[i].bos = action->u.mpls.bos;
+			ctx->u.tc_filter.actions[i].label = action->u.mpls.label;
+			break;
+		case TC_ACTION_VLAN:
+			ctx->u.tc_filter.actions[i].vlan_mode = action->u.vlan.mode;
+			ctx->u.tc_filter.actions[i].id = action->u.vlan.id;
+			ctx->u.tc_filter.actions[i].vlan_protocol = action->u.vlan.protocol;
+			ctx->u.tc_filter.actions[i].priority = action->u.vlan.priority;
+			for (int o=0; o<ETH_ALEN; o++) {
+				ctx->u.tc_filter.actions[i].dst.octet[o] = action->u.vlan.dst.octet[o];
+				ctx->u.tc_filter.actions[i].src.octet[o] = action->u.vlan.src.octet[o];
+			}
+			break;
+		case TC_ACTION_MIRRED:
+			ctx->u.tc_filter.actions[i].mirred_ifindex = action->u.mirred.ifindex;
+			ctx->u.tc_filter.actions[i].direction = action->u.mirred.direction;
+			ctx->u.tc_filter.actions[i].mirred_mode = action->u.mirred.mode;
+			break;
+		case TC_ACTION_UNSPEC:
+			break;
+		}
+	}
 
 	zns = zebra_ns_lookup(NS_DEFAULT);
 
@@ -4480,6 +4719,10 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 	struct route_entry *re;
 	const struct nexthop_group *nhg;
 	struct nexthop *nh, *newnh, *last_nh;
+#ifdef GNU_LINUX
+	struct ipaddr nh_ip;
+	struct interface *pw_ifp, *nh_ifp;
+#endif
 
 	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
 		zlog_debug("init dplane ctx %s: pw '%s', loc %u, rem %u",
@@ -4499,6 +4742,14 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 	/* This name appears to be c-string, so we use string copy. */
 	strlcpy(ctx->zd_ifname, pw->ifname, sizeof(ctx->zd_ifname));
 
+#ifdef GNU_LINUX
+	if (!pw->ifindex) {
+		pw_ifp = if_lookup_by_name_per_ns(zebra_ns_lookup(pw->vrf_id),pw->ifname);         
+		if (pw_ifp)
+			pw->ifindex = pw_ifp->ifindex;
+        }
+#endif
+
 	ctx->zd_vrf_id = pw->vrf_id;
 	ctx->zd_ifindex = pw->ifindex;
 	ctx->u.pw.type = pw->type;
@@ -4510,6 +4761,8 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.pw.dest = pw->nexthop;
 
 	ctx->u.pw.fields = pw->data;
+
+	ctx->u.pw.prev_nh_ifindex = pw->prev_nh_ifindex;
 
 	/* Capture nexthop info for the pw destination. We need to look
 	 * up and use zebra datastructs, but we're running in the zebra
@@ -4551,10 +4804,36 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 
 				newnh = nexthop_dup(nh, NULL);
 
+#ifdef GNU_LINUX
+				memset(&newnh->rmac.octet,0,ETH_ALEN);
+				nh_ifp = zebra_ns_lookup_ifp(zebra_ns_lookup(pw->vrf_id), newnh->ifindex);
+				if (nh_ifp) {
+					memset(&nh_ip, 0, sizeof(nh_ip));
+					switch (pw->af) {
+					case AF_INET:
+			                	nh_ip.ipa_type = IPADDR_V4;
+						nh_ip.ipaddr_v4 = newnh->gate.ipv4;
+						break;
+					case AF_INET6:
+			                	nh_ip.ipa_type = IPADDR_V6;
+						nh_ip.ipaddr_v6 = newnh->gate.ipv6;
+						break;
+					}
+					if(zebra_neigh_get_mac(newnh->ifindex, &nh_ip, &newnh->rmac)) {
+						dplane_neigh_discover(nh_ifp, &nh_ip);
+						memset(&newnh->rmac.octet,0,ETH_ALEN);
+					} else {
+						memcpy(&newnh->smac.octet,nh_ifp->hw_addr,ETH_ALEN);
+					}
+				}
+#endif
+
 				if (last_nh)
 					NEXTHOP_APPEND(last_nh, newnh);
-				else
+				else {
 					ctx->u.pw.fib_nhg.nexthop = newnh;
+					pw->nh_ifindex = newnh->ifindex;
+				}
 				last_nh = newnh;
 			}
 		}

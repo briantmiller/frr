@@ -2152,6 +2152,7 @@ int zapi_tc_class_encode(uint8_t cmd, struct stream *s, struct tc_class *class)
 		stream_putq(s, class->u.htb.rate);
 		stream_putq(s, class->u.htb.ceil);
 		break;
+	case TC_QDISC_INGRESS:
 	case TC_QDISC_UNSPEC:
 	case TC_QDISC_NOQUEUE:
 		/* not implemented */
@@ -2165,6 +2166,8 @@ int zapi_tc_class_encode(uint8_t cmd, struct stream *s, struct tc_class *class)
 int zapi_tc_filter_encode(uint8_t cmd, struct stream *s,
 			  struct tc_filter *filter)
 {
+	struct tc_action *action;
+
 	stream_reset(s);
 	zclient_create_header(s, cmd, VRF_DEFAULT);
 
@@ -2175,6 +2178,7 @@ int zapi_tc_filter_encode(uint8_t cmd, struct stream *s,
 	stream_putl(s, filter->priority);
 	stream_putl(s, filter->protocol);
 	stream_putl(s, filter->kind);
+	stream_putl(s, filter->action_count<TC_MAX_ACTIONS?filter->action_count:TC_MAX_ACTIONS);
 
 	switch (filter->kind) {
 	case TC_FILTER_FLOWER:
@@ -2199,14 +2203,54 @@ int zapi_tc_filter_encode(uint8_t cmd, struct stream *s,
 			stream_putc(s, filter->u.flower.dsfield);
 			stream_putc(s, filter->u.flower.dsfield_mask);
 		}
+		if (filter->u.flower.filter_bm & TC_FLOWER_MPLS) {
+			stream_putl(s, filter->u.flower.mpls_label);
+			stream_putc(s, filter->u.flower.mpls_bos);
+		}
 		stream_putl(s, filter->u.flower.classid);
 		break;
 	case TC_FILTER_UNSPEC:
 	case TC_FILTER_BPF:
 	case TC_FILTER_FLOW:
+	case TC_FILTER_MATCHALL:
 	case TC_FILTER_U32:
 		/* not implemented */
 		break;
+	}
+
+	for(uint32_t i=0; i < filter->action_count && i < TC_MAX_ACTIONS;  i++) {
+		action = &filter->actions[i];
+		stream_putl(s,action->index);
+		stream_putw(s,action->kind);
+		switch(action->kind) {
+		case TC_ACTION_MPLS:
+			stream_putc(s, action->u.mpls.mode);
+			stream_putw(s, action->u.mpls.protocol);
+			stream_putc(s, action->u.mpls.tc);
+			stream_putc(s, action->u.mpls.ttl);
+			stream_putc(s, action->u.mpls.bos);
+			stream_putl(s, action->u.mpls.label);
+			break;
+		case TC_ACTION_VLAN:
+			stream_putc(s, action->u.vlan.mode);
+			stream_putw(s, action->u.vlan.id);
+			stream_putc(s, action->u.vlan.protocol);
+			stream_putc(s, action->u.vlan.priority);
+			for (int o=0; o<ETH_ALEN; o++) {
+				stream_putc(s, action->u.vlan.dst.octet[o]);
+			}
+			for (int o=0; o<ETH_ALEN; o++) {
+				stream_putc(s, action->u.vlan.src.octet[o]);
+			}
+			break;
+		case TC_ACTION_MIRRED:
+			stream_putl(s,action->u.mirred.ifindex);
+			stream_putc(s,action->u.mirred.direction);
+			stream_putc(s,action->u.mirred.mode);
+			break;
+		case TC_ACTION_UNSPEC:
+			break;
+		}
 	}
 
 	stream_putw_at(s, 0, stream_get_endp(s));

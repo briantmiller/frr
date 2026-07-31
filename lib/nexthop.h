@@ -155,6 +155,7 @@ struct nexthop {
 	 * included in hash key.
 	 */
 	struct ethaddr rmac;
+	struct ethaddr smac;
 
 	/* SR-TE color used for matching SR-TE policies */
 	uint32_t srte_color;

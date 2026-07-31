@@ -43,6 +43,12 @@ struct zebra_tc_filter {
 	struct tc_filter filter;
 };
 
+struct zebra_tc_action {
+	int sock;
+
+	struct tc_action action;
+};
+
 const char *tc_qdisc_kind2str(uint32_t type);
 enum tc_qdisc_kind tc_qdisc_str2kind(const char *type);
 
@@ -67,6 +73,9 @@ void zebra_tc_filter_free(struct zebra_tc_filter *filter);
 void zebra_tc_filters_free(void *arg);
 uint32_t zebra_tc_filter_hash_key(const void *arg);
 bool zebra_tc_filter_hash_equal(const void *arg1, const void *arg2);
+
+const char *tc_action_kind2str(uint32_t type);
+enum tc_action_kind tc_action_str2kind(const char *type);
 
 /*
  * Master-pthread handler for kernel-originated TC qdisc notifications

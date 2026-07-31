@@ -593,6 +593,7 @@ const char *
 dplane_ctx_tc_filter_get_kind_str(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_priority(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_handle(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_filter_get_parent(const struct zebra_dplane_ctx *ctx);
 uint16_t dplane_ctx_tc_filter_get_minor(const struct zebra_dplane_ctx *ctx);
 uint16_t dplane_ctx_tc_filter_get_eth_proto(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_filter_bm(const struct zebra_dplane_ctx *ctx);
@@ -613,6 +614,45 @@ uint8_t dplane_ctx_tc_filter_get_dsfield(const struct zebra_dplane_ctx *ctx);
 uint8_t
 dplane_ctx_tc_filter_get_dsfield_mask(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_classid(const struct zebra_dplane_ctx *ctx);
+uint32_t
+dplane_ctx_tc_filter_get_mpls_label(const struct zebra_dplane_ctx *ctx);
+
+uint32_t
+dplane_ctx_tc_filter_get_action_count(const struct zebra_dplane_ctx *ctx);
+enum tc_action_kind
+dplane_ctx_tc_filter_get_action_kind(const struct zebra_dplane_ctx *ctx, uint32_t i);
+const char *
+dplane_ctx_tc_filter_get_action_kind_str(const struct zebra_dplane_ctx *ctx, uint32_t i);
+enum tc_mpls_mode
+dplane_ctx_tc_filter_get_action_mpls_mode(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint16_t
+dplane_ctx_tc_filter_get_action_mpls_protocol(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_tc(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_ttl(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint8_t
+dplane_ctx_tc_filter_get_action_mpls_bos(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint32_t
+dplane_ctx_tc_filter_get_action_mpls_label(const struct zebra_dplane_ctx *ctx, uint32_t i);
+enum tc_vlan_mode
+dplane_ctx_tc_filter_get_action_vlan_mode(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint16_t
+dplane_ctx_tc_filter_get_action_vlan_id(const struct zebra_dplane_ctx *ctx, uint32_t i);
+enum tc_vlan_proto
+dplane_ctx_tc_filter_get_action_vlan_protocol(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint8_t
+dplane_ctx_tc_filter_get_action_vlan_priority(const struct zebra_dplane_ctx *ctx, uint32_t i);
+const struct ethaddr *
+dplane_ctx_tc_filter_get_action_vlan_dst(const struct zebra_dplane_ctx *ctx, uint32_t i);
+const struct ethaddr *
+dplane_ctx_tc_filter_get_action_vlan_src(const struct zebra_dplane_ctx *ctx, uint32_t i);
+uint32_t
+dplane_ctx_tc_filter_get_action_mirred_ifindex(const struct zebra_dplane_ctx *ctx, uint32_t i);
+enum tc_mirred_direction
+dplane_ctx_tc_filter_get_action_mirred_direction(const struct zebra_dplane_ctx *ctx, uint32_t i);
+enum tc_mirred_mode
+dplane_ctx_tc_filter_get_action_mirred_mode(const struct zebra_dplane_ctx *ctx, uint32_t i);
 
 int dplane_ctx_tc_qdisc_notify_get_kind(const struct zebra_dplane_ctx *ctx);
 ifindex_t dplane_ctx_tc_qdisc_notify_get_ifindex(const struct zebra_dplane_ctx *ctx);
@@ -728,6 +768,8 @@ const struct nexthop_group *
 dplane_ctx_get_pw_primary_nhg(const struct zebra_dplane_ctx *ctx);
 const struct nexthop_group *
 dplane_ctx_get_pw_backup_nhg(const struct zebra_dplane_ctx *ctx);
+ifindex_t
+dplane_ctx_get_pw_prev_nh_ifindex(const struct zebra_dplane_ctx *ctx);
 
 /* Accessors for interface information */
 uint32_t dplane_ctx_get_intf_metric(const struct zebra_dplane_ctx *ctx);

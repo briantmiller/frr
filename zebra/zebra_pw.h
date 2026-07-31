@@ -31,6 +31,8 @@ struct zebra_pw {
 	vrf_id_t vrf_id;
 	char ifname[IFNAMSIZ];
 	ifindex_t ifindex;
+	ifindex_t nh_ifindex;
+	ifindex_t prev_nh_ifindex;
 	int type;
 	int af;
 	union g_addr nexthop;

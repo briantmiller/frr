@@ -20,6 +20,7 @@
 #include "zebra/zebra_rnh.h"
 #include "zebra/zebra_vrf.h"
 #include "zebra/zebra_pw.h"
+#include "zebra/interface.h"
 
 DEFINE_MTYPE_STATIC(LIB, PW, "Pseudowire");
 
@@ -50,6 +51,7 @@ struct zebra_pw *zebra_pw_add(struct zebra_vrf *zvrf, const char *ifname,
 			      uint8_t protocol, struct zserv *client)
 {
 	struct zebra_pw *pw;
+	struct interface *ifp;
 
 	if (IS_ZEBRA_DEBUG_PW)
 		zlog_debug("%u: adding pseudowire %s protocol %s",
@@ -59,11 +61,17 @@ struct zebra_pw *zebra_pw_add(struct zebra_vrf *zvrf, const char *ifname,
 	strlcpy(pw->ifname, ifname, sizeof(pw->ifname));
 	pw->protocol = protocol;
 	pw->vrf_id = zvrf_id(zvrf);
+
+	ifp = if_lookup_by_name_per_ns(zebra_ns_lookup(pw->vrf_id),pw->ifname);
+	if (ifp)
+		pw->ifindex = ifp->ifindex;
+
 	pw->client = client;
 	pw->status = PW_NOT_FORWARDING;
 	pw->local_label = MPLS_NO_LABEL;
 	pw->remote_label = MPLS_NO_LABEL;
 	pw->flags = F_PSEUDOWIRE_CWORD;
+	pw->nh_ifindex = 0;
 
 	RB_INSERT(zebra_pw_head, &zvrf->pseudowires, pw);
 	if (pw->protocol == ZEBRA_ROUTE_STATIC) {
@@ -166,6 +174,7 @@ static void zebra_pw_install(struct zebra_pw *pw)
 
 	hook_call(pw_install, pw);
 	if (dplane_pw_install(pw) == ZEBRA_DPLANE_REQUEST_FAILURE) {
+		zlog_info("%s install failure",__func__);
 		/*
 		 * Realistically this is never going to fail passing
 		 * the pw data down to the dplane.  The failure modes
@@ -215,6 +224,7 @@ void zebra_pw_handle_dplane_results(struct zebra_dplane_ctx *ctx)
 			zebra_pw_update_status(pw, PW_FORWARDING);
 		else if (op == DPLANE_OP_PW_UNINSTALL && zebra_pw_enabled(pw))
 			zebra_pw_update_status(pw, PW_NOT_FORWARDING);
+		pw->prev_nh_ifindex = pw->nh_ifindex;	
 	}
 }
 

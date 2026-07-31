@@ -23,6 +23,7 @@ DEFINE_MTYPE_STATIC(ZEBRA, TC_FILTER, "TC filter");
 
 const struct message tc_qdisc_kinds[] = {
 	{TC_QDISC_HTB, "htb"},
+	{TC_QDISC_INGRESS, "ingress"},
 	{TC_QDISC_NOQUEUE, "noqueue"},
 	{0},
 };
@@ -32,7 +33,15 @@ const struct message tc_filter_kinds[] = {
 	{TC_FILTER_FLOW, "flow"},
 	{TC_FILTER_FLOWER, "flower"},
 	{TC_FILTER_U32, "u32"},
+	{TC_FILTER_MATCHALL, "matchall"},
 	{0},
+};
+
+const struct message tc_action_kinds[] = {
+	{ TC_ACTION_MPLS, "mpls" },
+	{ TC_ACTION_VLAN, "vlan" },
+	{ TC_ACTION_MIRRED, "mirred" },
+	{ 0 },
 };
 
 const struct message *tc_class_kinds = tc_qdisc_kinds;
@@ -83,13 +92,23 @@ bool zebra_tc_qdisc_hash_equal(const void *arg1, const void *arg2)
 
 	if (q1->qdisc.ifindex != q2->qdisc.ifindex)
 		return false;
+	if (q1->qdisc.kind != q2->qdisc.kind &&
+	    q1->qdisc.kind != TC_QDISC_INGRESS && 
+	    q2->qdisc.kind != TC_QDISC_INGRESS)
+		return false;
 
 	return true;
 }
 
+enum tc_qdisc_dir {
+	TC_QDISC_DIR_EGRESS,
+	TC_QDISC_DIR_INGRESS,
+};
+
 struct tc_qdisc_ifindex_lookup {
 	struct zebra_tc_qdisc *qdisc;
 	ifindex_t ifindex;
+	enum tc_qdisc_dir dir;
 };
 
 
@@ -98,7 +117,9 @@ static int tc_qdisc_lookup_ifindex_walker(struct hash_bucket *b, void *data)
 	struct tc_qdisc_ifindex_lookup *lookup = data;
 	struct zebra_tc_qdisc *qdisc = b->data;
 
-	if (lookup->ifindex == qdisc->qdisc.ifindex) {
+	if (lookup->ifindex == qdisc->qdisc.ifindex && 
+	   (lookup->dir != TC_QDISC_DIR_INGRESS || 
+	    qdisc->qdisc.kind == TC_QDISC_INGRESS )) {
 		lookup->qdisc = qdisc;
 		return HASHWALK_ABORT;
 	}
@@ -112,6 +133,8 @@ tc_qdisc_lookup_ifindex(struct zebra_tc_qdisc *qdisc)
 	struct tc_qdisc_ifindex_lookup lookup;
 
 	lookup.ifindex = qdisc->qdisc.ifindex;
+	lookup.dir = qdisc->qdisc.kind == TC_QDISC_INGRESS ? 
+		     TC_QDISC_DIR_INGRESS : TC_QDISC_DIR_EGRESS;
 	lookup.qdisc = NULL;
 	hash_walk(zrouter.rules_hash, &tc_qdisc_lookup_ifindex_walker, &lookup);
 
@@ -342,7 +365,8 @@ uint32_t zebra_tc_filter_hash_key(const void *arg)
 
 	filter = arg;
 
-	key = jhash_2words(filter->filter.ifindex, filter->filter.handle, 0);
+	key = jhash_3words(filter->filter.ifindex, 
+			   filter->filter.handle, filter->filter.parent, 0);
 
 	return key;
 }
@@ -359,6 +383,18 @@ bool zebra_tc_filter_hash_equal(const void *arg1, const void *arg2)
 
 	if (f1->filter.handle != f2->filter.handle)
 		return false;
+
+	if (f1->filter.kind != f2->filter.kind)
+		return false;
+
+	if (f1->filter.action_count != f2->filter.action_count)
+		return false;
+
+	for(uint32_t a=0; a<f1->filter.action_count; a++) {
+		if (!tc_action_cmp(&f1->filter.actions[a],
+				   &f2->filter.actions[a]))
+		return false;
+	}
 
 	return true;
 }
@@ -443,6 +479,16 @@ void zebra_tc_filter_delete(struct zebra_tc_filter *filter)
 	if (tc_filter_release(filter, true))
 		zlog_debug("%s: tc filter being deleted we know nothing about",
 			   __func__);
+}
+
+const char *tc_action_kind2str(uint32_t type)
+{
+	return lookup_msg(tc_action_kinds, type, "Unrecognized ACTION Type");
+}
+
+enum tc_action_kind tc_action_str2kind(const char *type)
+{
+	return lookup_key(tc_action_kinds, type, TC_ACTION_UNSPEC);
 }
 
 /*
