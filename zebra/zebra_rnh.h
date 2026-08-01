@@ -37,7 +37,7 @@ extern int zebra_rnh_iterate_prefix(struct prefix *p, vrf_id_t vrfid, safi_t saf
 				    void *ctx);
 extern int zebra_send_rnh_update(struct rnh *rnh, struct zserv *client,
 				 vrf_id_t vrf_id, uint32_t srte_color);
-extern void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw, bool *nht_exists);
+extern void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw, bool nbr_id, bool *nht_exists);
 extern void zebra_deregister_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw);
 extern void zebra_remove_rnh_client(struct rnh *rnh, struct zserv *client);
 extern void zebra_evaluate_rnh(struct zebra_vrf *zvrf, afi_t afi, int force,

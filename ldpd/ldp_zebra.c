@@ -86,6 +86,7 @@ pw2zpw(struct l2vpn_pw *pw, struct zapi_pw *zpw)
 	zpw->ifindex = pw->ifindex;
 	zpw->type = pw->l2vpn->pw_type;
 	zpw->af = pw->af;
+	zpw->nbr_id = pw->lsr_id;
 	zpw->nexthop.ipv6 = pw->addr.v6;
 	zpw->local_label = NO_LABEL;
 	zpw->remote_label = NO_LABEL;

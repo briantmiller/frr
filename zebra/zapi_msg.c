@@ -3204,6 +3204,7 @@ static void zread_pseudowire(ZAPI_HANDLER_ARGS)
 	ifindex_t ifindex;
 	int type;
 	int af;
+	struct in_addr nbr_id;
 	union g_addr nexthop;
 	uint32_t local_label;
 	uint32_t remote_label;
@@ -3219,6 +3220,7 @@ static void zread_pseudowire(ZAPI_HANDLER_ARGS)
 	STREAM_GET(ifname, s, IFNAMSIZ);
 	ifname[IFNAMSIZ - 1] = '\0';
 	STREAM_GETL(s, ifindex);
+	STREAM_GETL(s, nbr_id.s_addr);
 	STREAM_GETL(s, type);
 	STREAM_GETL(s, af);
 	switch (af) {
@@ -3278,7 +3280,7 @@ static void zread_pseudowire(ZAPI_HANDLER_ARGS)
 			break;
 		}
 
-		zebra_pw_change(pw, ifindex, type, af, &nexthop, local_label,
+		zebra_pw_change(pw, ifindex, type, af, &nbr_id, &nexthop, local_label,
 				remote_label, flags, &data);
 		break;
 	}

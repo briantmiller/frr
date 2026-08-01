@@ -108,13 +108,14 @@ void zebra_pw_del(struct zebra_vrf *zvrf, struct zebra_pw *pw)
 }
 
 void zebra_pw_change(struct zebra_pw *pw, ifindex_t ifindex, int type, int af,
-		     union g_addr *nexthop, uint32_t local_label,
+		     struct in_addr *nbr_id, union g_addr *nexthop, uint32_t local_label,
 		     uint32_t remote_label, uint8_t flags,
 		     union pw_protocol_fields *data)
 {
 	pw->ifindex = ifindex;
 	pw->type = type;
 	pw->af = af;
+	pw->nbr_id = *nbr_id;
 	pw->nexthop = *nexthop;
 	pw->local_label = local_label;
 	pw->remote_label = remote_label;
@@ -123,9 +124,14 @@ void zebra_pw_change(struct zebra_pw *pw, ifindex_t ifindex, int type, int af,
 
 	if (zebra_pw_enabled(pw)) {
 		bool nht_exists;
-		zebra_register_rnh_pseudowire(pw->vrf_id, pw, &nht_exists);
+		zebra_register_rnh_pseudowire(pw->vrf_id, pw, false, &nht_exists);
 		if (nht_exists)
 			zebra_pw_update(pw);
+		if (pw->nexthop.ipv4.s_addr != pw->nbr_id.s_addr) {
+			zebra_register_rnh_pseudowire(pw->vrf_id, pw, true, &nht_exists);
+			if (nht_exists)
+				zebra_pw_update(pw);
+		}
 	} else {
 		if (pw->protocol == ZEBRA_ROUTE_STATIC)
 			zebra_deregister_rnh_pseudowire(pw->vrf_id, pw);
@@ -304,12 +310,63 @@ static int zebra_pw_check_reachability_strict(const struct zebra_pw *pw,
 	return 0;
 }
 
+struct nexthop *zebra_pw_find_nexthop(const struct zebra_pw *pw, bool nbr_id) {
+	struct route_entry *re;
+        const struct nexthop *nexthop;
+        const struct nexthop_group *nhg;
+	union g_addr gate;
+
+	zlog_debug("%s: %s looking up nexthop & label for %pI4, nbr ID %pI4",__func__,
+		pw->ifname, &pw->nexthop.ipv4.s_addr, &pw->nbr_id.s_addr);
+
+	/* Find route to the remote end of the pseudowire */
+	if (nbr_id) {
+		gate.ipv4 = pw->nbr_id;
+		re = rib_match(AFI_IP, SAFI_UNICAST, pw->vrf_id,
+			       &gate, NULL);
+	} else
+		re = rib_match(family2afi(pw->af), SAFI_UNICAST, pw->vrf_id,
+			       &pw->nexthop, NULL);
+	if (!re) {
+			zlog_info("%s: no route found for %s", __func__,
+				   pw->ifname);
+			return -1;
+	}
+
+	/* There must be at least one installed labelled nexthop;
+	 * look at primary and backup fib lists, in case there's been
+	 * a backup nexthop activation.
+	 */
+	nhg = rib_get_fib_nhg(re);
+	if (nhg && nhg->nexthop) {
+		for (ALL_NEXTHOPS_PTR(nhg, nexthop)) {
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_RECURSIVE))
+				continue;
+
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE) &&
+			    nexthop->nh_label != NULL &&
+			    (nexthop->gate.ipv4.s_addr == pw->nexthop.ipv4.s_addr || !nbr_id))
+				return nexthop;
+		}
+	}
+
+	if (pw->nexthop.ipv4.s_addr != pw->nbr_id.s_addr && !nbr_id)
+		return zebra_pw_find_nexthop(pw, true);
+	return NULL;
+}
+
 static int zebra_pw_check_reachability(const struct zebra_pw *pw)
 {
 	struct route_entry *re;
-	const struct nexthop *nexthop;
+	const struct nexthop *nexthop;;
 	const struct nexthop_group *nhg;
 	bool found_p = false;
+
+	if (!mpls_pw_reach_strict) {
+		if (zebra_pw_find_nexthop(pw,false))
+			return 0;
+		return -1;
+	}
 
 	/* TODO: consider GRE/L2TPv3 tunnels in addition to MPLS LSPs */
 
@@ -337,8 +394,8 @@ static int zebra_pw_check_reachability(const struct zebra_pw *pw)
 			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_RECURSIVE))
 				continue;
 
-			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE) &&
-			    nexthop->nh_label != NULL) {
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE)
+			    && nexthop->nh_label != NULL) {
 				found_p = true;
 				break;
 			}
@@ -481,7 +538,7 @@ DEFUN (pseudowire_labels,
 		remote_label = atoi(argv[idx + 1]->arg);
 	}
 
-	zebra_pw_change(pw, pw->ifindex, pw->type, pw->af, &pw->nexthop,
+	zebra_pw_change(pw, pw->ifindex, pw->type, pw->af, &pw->nbr_id, &pw->nexthop,
 			local_label, remote_label, pw->flags, &pw->data);
 
 	return CMD_SUCCESS;
@@ -518,7 +575,7 @@ DEFUN (pseudowire_neighbor,
 		}
 	}
 
-	zebra_pw_change(pw, pw->ifindex, pw->type, af, &nexthop,
+	zebra_pw_change(pw, pw->ifindex, pw->type, af, &pw->nbr_id, &nexthop,
 			pw->local_label, pw->remote_label, pw->flags,
 			&pw->data);
 
@@ -545,7 +602,7 @@ DEFUN (pseudowire_control_word,
 			flags = F_PSEUDOWIRE_CWORD;
 	}
 
-	zebra_pw_change(pw, pw->ifindex, pw->type, pw->af, &pw->nexthop,
+	zebra_pw_change(pw, pw->ifindex, pw->type, pw->af, &pw->nbr_id, &pw->nexthop,
 			pw->local_label, pw->remote_label, flags, &pw->data);
 
 	return CMD_SUCCESS;
@@ -608,6 +665,7 @@ static void vty_show_mpls_pseudowire_detail(struct vty *vty)
 		inet_ntop(pw->af, &pw->nexthop, buf_nbr, sizeof(buf_nbr));
 		vty_out(vty, "  Neighbor: %s\n",
 			(pw->af != AF_UNSPEC) ? buf_nbr : "-");
+		vty_out(vty, "  Neighbor ID: %pI4\n", &pw->nbr_id);
 		if (pw->local_label != MPLS_NO_LABEL)
 			vty_out(vty, "  Local Label: %u\n", pw->local_label);
 		else

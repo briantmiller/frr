@@ -176,7 +176,7 @@ enum netlink_msg_status netlink_put_pw_update_msg(struct nl_batch *bth,
 	filter.filter.actions[aidx].u.mirred.direction = TC_MIRRED_EGRESS;
 	filter.filter.actions[aidx].u.mirred.ifindex = nexthop->ifindex;
 
-	if (prev_nh_ifindex)
+	//if (prev_nh_ifindex)
 		zebra_tc_filter_delete(&filter);
 	zebra_tc_filter_add(&filter);
 
@@ -195,8 +195,8 @@ enum netlink_msg_status netlink_put_pw_update_msg(struct nl_batch *bth,
 		filter.filter.u.flower.mpls_label = local_label;
 		filter.filter.u.flower.filter_bm = TC_FLOWER_MPLS;
 		zebra_tc_filter_delete(&filter);
-		qdisc.qdisc.ifindex = prev_nh_ifindex;
-		zebra_tc_qdisc_uninstall(&qdisc);
+		//qdisc.qdisc.ifindex = prev_nh_ifindex;
+		//zebra_tc_qdisc_uninstall(&qdisc);
 	}
 	memset(&filter, 0, sizeof(filter));
 	filter.filter.ifindex = nexthop->ifindex;

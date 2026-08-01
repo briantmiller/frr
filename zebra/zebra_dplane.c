@@ -4837,6 +4837,35 @@ static int dplane_ctx_pw_init(struct zebra_dplane_ctx *ctx,
 				last_nh = newnh;
 			}
 		}
+		if (last_nh == NULL && pw->nexthop.ipv4.s_addr != pw->nbr_id.s_addr) {
+			nh = zebra_pw_find_nexthop(pw,true);
+			if (nh) {
+				newnh = nexthop_dup(nh, NULL);
+				memset(&newnh->rmac.octet,0,ETH_ALEN);
+				nh_ifp = zebra_ns_lookup_ifp(zebra_ns_lookup(pw->vrf_id), newnh->ifindex);
+				if (nh_ifp) {
+					memset(&nh_ip, 0, sizeof(nh_ip));
+					switch (pw->af) {
+					case AF_INET:
+						nh_ip.ipa_type = IPADDR_V4;
+						nh_ip.ipaddr_v4 = newnh->gate.ipv4;
+						break;
+					case AF_INET6:
+						nh_ip.ipa_type = IPADDR_V6;
+						nh_ip.ipaddr_v6 = newnh->gate.ipv6;
+						break;
+					}
+					if(zebra_neigh_get_mac(newnh->ifindex, &nh_ip, &newnh->rmac)) {
+						dplane_neigh_discover(nh_ifp, &nh_ip);
+						memset(&newnh->rmac.octet,0,ETH_ALEN);
+					} else {
+						memcpy(&newnh->smac.octet,nh_ifp->hw_addr,ETH_ALEN);
+					}
+				}
+				ctx->u.pw.fib_nhg.nexthop = newnh;
+				pw->nh_ifindex = newnh->ifindex;
+			}
+		}
 
 		/* Copy primary nexthops; recursive info is included too */
 		assert(re->nhe != NULL); /* SA warning */

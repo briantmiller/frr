@@ -684,6 +684,7 @@ struct zapi_pw {
 	ifindex_t ifindex;
 	int type;
 	int af;
+	struct in_addr nbr_id;
 	union g_addr nexthop;
 	uint32_t local_label;
 	uint32_t remote_label;

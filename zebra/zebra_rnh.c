@@ -417,7 +417,7 @@ static void addr2hostprefix(int af, const union g_addr *addr,
 	}
 }
 
-void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw,
+void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw, bool nbr_id,
 				   bool *nht_exists)
 {
 	struct prefix nh;
@@ -431,7 +431,12 @@ void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw,
 	if (!zvrf)
 		return;
 
-	addr2hostprefix(pw->af, &pw->nexthop, &nh);
+	if (nbr_id) {
+		nh.family = AF_INET;
+		nh.prefixlen = IPV4_MAX_BITLEN;
+		nh.u.prefix4 = pw->nbr_id;
+	} else
+		addr2hostprefix(pw->af, &pw->nexthop, &nh);
 	/* Pseudowires use NULL client */
 	rnh = zebra_add_rnh(&nh, vrf_id, SAFI_UNICAST, NULL, &exists);
 	if (!rnh)
@@ -439,9 +444,15 @@ void zebra_register_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw,
 
 	if (!listnode_lookup(rnh->zebra_pseudowire_list, pw)) {
 		listnode_add(rnh->zebra_pseudowire_list, pw);
-		pw->rnh = rnh;
-		zebra_evaluate_rnh(zvrf, family2afi(pw->af), 1, &nh,
-				   SAFI_UNICAST);
+		if (nbr_id) {
+			pw->rnh_nbr = rnh;
+			zebra_evaluate_rnh(zvrf, family2afi(AF_INET), 1, &nh,
+					   SAFI_UNICAST);
+		} else {
+			pw->rnh = rnh;
+			zebra_evaluate_rnh(zvrf, family2afi(pw->af), 1, &nh,
+					   SAFI_UNICAST);
+		}
 	} else
 		*nht_exists = true;
 }
@@ -458,6 +469,14 @@ void zebra_deregister_rnh_pseudowire(vrf_id_t vrf_id, struct zebra_pw *pw)
 	pw->rnh = NULL;
 
 	zebra_delete_rnh(rnh);
+
+	rnh = pw->rnh_nbr;
+	if (!rnh)
+		return;
+	listnode_delete(rnh->zebra_pseudowire_list, pw);
+        pw->rnh_nbr = NULL;
+
+        zebra_delete_rnh(rnh);
 }
 
 int zebra_rnh_iterate_prefix(struct prefix *p, vrf_id_t vrfid, safi_t safi, rnh_iter_cb cb,

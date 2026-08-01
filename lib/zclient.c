@@ -4444,6 +4444,9 @@ enum zclient_send_status zebra_send_pw(struct zclient *zclient, int command,
 	stream_write(s, pw->ifname, IFNAMSIZ);
 	stream_putl(s, pw->ifindex);
 
+	/* Put nbr ID */
+	stream_putl(s, pw->nbr_id.s_addr);
+
 	/* Put type */
 	stream_putl(s, pw->type);
 
