@@ -1099,6 +1099,7 @@ void nhg_ctx_free(struct nhg_ctx **ctx)
 	nexthop_del_labels(nh);
 	nexthop_del_srv6_seg6local(nh);
 	nexthop_del_srv6_seg6(nh);
+	nexthop_free_res_info(nh);
 
 done:
 	XFREE(MTYPE_NHG_CTX, *ctx);
@@ -1381,17 +1382,12 @@ static int nhg_ctx_process_new(struct nhg_ctx *ctx)
 	SET_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED);
 
 	/*
-	 * On startup Zebra is creating the nexthop group cache entry
-	 * after the router has it's startup time set.  This is because
-	 * the process of grabbing routes and nexthops is now *after*
-	 * the dataplane starts up, which is after the routers startup
-	 * time is set.  So let's just cheat a tiny bit on the time
-	 * and set the nexthop group hash entry startup time to be
-	 * slightly before the zrouter.startup_time.  Then graceful
-	 * restart sweeping will work properly for these nexthop entries
+	 * The startup boundary is recorded after kernel nexthops are read.
+	 * Use zero to mark an entry imported before that boundary.  A later
+	 * protocol update replaces it with the current monotonic time.
 	 */
 	if (startup) {
-		nhe->uptime = zrouter.startup_time - 1;
+		nhe->uptime = 0;
 		/* tag stale FDB NH/NHG and reserve its bitmap bit; sweep
 		 * releases the bit via zebra_evpn_mh_release_stale_nhid()
 		 */
@@ -1582,6 +1578,7 @@ static struct nhg_hash_entry *depends_find_singleton(const struct nexthop *nh,
 	nexthop_del_labels(&lookup);
 	nexthop_del_srv6_seg6local(&lookup);
 	nexthop_del_srv6_seg6(&lookup);
+	nexthop_free_res_info(&lookup);
 
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: nh %pNHv => %p (%pNG)", __func__, nh, nhe, nhe);
@@ -1886,6 +1883,9 @@ static void zebra_nhg_timer(struct event *event)
 
 void zebra_nhg_decrement_ref(struct nhg_hash_entry *nhe)
 {
+	bool unrefreshed_stale_fdb = CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_STALE_FDB) &&
+				     nhe->uptime == 0;
+
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: nhe %p (%pNG) %d => %d", __func__, nhe, nhe,
 			   nhe->refcnt, nhe->refcnt - 1);
@@ -1895,7 +1895,8 @@ void zebra_nhg_decrement_ref(struct nhg_hash_entry *nhe)
 	if (!zebra_router_in_shutdown() && nhe->refcnt <= 0 &&
 	    (CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED) ||
 	     CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_QUEUED)) &&
-	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND)) {
+	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND) &&
+	    !unrefreshed_stale_fdb) {
 		nhe->refcnt = 1;
 		SET_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND);
 		event_add_timer(zrouter.master, zebra_nhg_timer, nhe,
@@ -1941,7 +1942,8 @@ static struct nexthop *nexthop_set_resolved(afi_t afi, const struct nexthop *new
 	resolved_hop = nexthop_new();
 	SET_FLAG(resolved_hop->flags, NEXTHOP_FLAG_ACTIVE);
 
-	resolved_hop->vrf_id = nexthop->vrf_id;
+	/* Use newhop's VRF - it reflects where the egress interface lives. */
+	resolved_hop->vrf_id = newhop->vrf_id;
 
 	/* Using weighted ECMP, we should respect the weight and use
 	 * the same value for non-recursive next-hop.
@@ -2345,6 +2347,37 @@ zebra_nhg_connected_ifindex(struct route_node *rn, struct route_entry *match,
 }
 
 /*
+ * Locate NHG info for use as the "resolver" for a recursive route. This
+ * may mean navigating some of the NHG hierarchy; some levels of the NHG hierarchy
+ * are not installed through the dataplane, and aren't "visible" outside zebra.
+ */
+static void set_resolving_info(struct nexthop *nh, const struct route_node *rn,
+			       const struct route_entry *match)
+{
+	uint32_t id = match->nhe_id;
+	const struct nhg_hash_entry *nhe;
+	const struct nhg_connected *node;
+
+	nhe = match->nhe;
+
+	/* If the resolving nhg is itself recursive, it won't be installed. Walk
+	 * down the tree a bit to find the installed id value.
+	 */
+	if (CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_RECURSIVE) &&
+	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED)) {
+		frr_each (nhg_connected_tree_const, &nhe->nhg_depends, node) {
+			if (CHECK_FLAG(node->nhe->flags, NEXTHOP_GROUP_INSTALLED)) {
+				id = node->nhe->id;
+				break;
+			}
+		}
+	}
+
+	/* Capture resolving prefix */
+	nexthop_set_res_info(nh, id, &(rn->p));
+}
+
+/*
  * Given a nexthop we need to properly recursively resolve,
  * do a table lookup to find and match if at all possible.
  * Set the nexthop->ifindex and resolution info as appropriate.
@@ -2610,6 +2643,9 @@ static int nexthop_active(struct nexthop *nexthop, struct nhg_hash_entry *nhe,
 					"%s: CONNECT match %p (%pNG), newhop %pNHv",
 					__func__, match, match->nhe, newhop);
 
+			/* TODO -- resolving info for this path too? */
+			set_resolving_info(nexthop, rn, match);
+
 			return 1;
 		} else if (match && CHECK_FLAG(flags, ZEBRA_FLAG_ALLOW_RECURSION)) {
 			struct nexthop_group *nhg;
@@ -2672,6 +2708,11 @@ static int nexthop_active(struct nexthop *nexthop, struct nhg_hash_entry *nhe,
 				SET_FLAG(nexthop->flags,
 					 NEXTHOP_FLAG_RECURSIVE);
 				resolver = nexthop_set_resolved(afi, newhop, nexthop, NULL, flags);
+
+				/* Capture the NHG info used to resolve the nexthop. */
+				if (!resolved)
+					set_resolving_info(nexthop, rn, match);
+
 				resolved = 1;
 
 				/* If there are backup nexthops, capture
@@ -3733,13 +3774,11 @@ static int zebra_nhg_sweep_entry(struct hash_bucket *bucket, void *arg)
 	}
 
 	/*
-	 * same logic as with routes.
-	 *
-	 * If older than startup time, we know we read them in from the
-	 * kernel and have not gotten and update for them since startup
-	 * from an upper level proto.
+	 * Entries imported from the kernel during startup have an uptime of
+	 * zero.  An upper-level protocol refresh gives the entry a nonzero
+	 * timestamp.
 	 */
-	if (zrouter.startup_time < nhe->uptime)
+	if (nhe->uptime != 0)
 		return HASHWALK_CONTINUE;
 
 	/*

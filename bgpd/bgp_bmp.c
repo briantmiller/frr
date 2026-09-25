@@ -466,13 +466,22 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 	struct stream *s;
 	size_t len;
 	struct timeval uptime, uptime_real;
+	struct timeval *uptime_tv = NULL;
 	uint8_t peer_type;
 	bool is_locrib = false;
 	uint64_t peer_distinguisher = 0;
 
-	uptime.tv_sec = peer->uptime;
-	uptime.tv_usec = 0;
-	monotime_to_realtime(&uptime, &uptime_real);
+	/* peer->uptime is monotonic and is 0 when the session has never
+	 * established; converting 0 to realtime would yield the machine's
+	 * boot time.  RFC 7854 says a zero timestamp means the time is
+	 * unavailable, which bmp_per_peer_hdr emits for a NULL timeval.
+	 */
+	if (peer->uptime) {
+		uptime.tv_sec = peer->uptime;
+		uptime.tv_usec = 0;
+		monotime_to_realtime(&uptime, &uptime_real);
+		uptime_tv = &uptime_real;
+	}
 
 	peer_type = bmp_get_peer_type(peer);
 	if (peer_type == BMP_PEER_TYPE_LOC_RIB_INSTANCE)
@@ -493,7 +502,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_UP_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, &uptime_real);
+		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, uptime_tv);
 
 		/* Local Address (16 bytes) */
 		if (is_locrib)
@@ -558,7 +567,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_DOWN_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, &uptime_real);
+		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, uptime_tv);
 
 		type_pos = stream_get_endp(s);
 		stream_putc(s, 0);	/* placeholder for down reason */
@@ -1417,6 +1426,35 @@ static void bmp_update_syncro(struct bmp *bmp, afi_t afi, safi_t safi, struct bg
 	}
 }
 
+/*
+ * True if any session on this target other than `self` still needs to
+ * synchronize this afi/safi (its table walk has not completed yet).
+ *
+ * The `bgp_request_sync` flags below are per-target (shared by every BMP
+ * session of the target), but the sync progress (afistate) is per-session.
+ * Clearing the shared flag as soon as the *first* (fastest) session finishes
+ * an afi/safi would make bmp_get_next_bgp() return NULL for any slower session
+ * that only reaches that afi/safi afterwards, silently abandoning the rest of
+ * its table walk (e.g. the whole IPv6 dump once IPv4 is done). So the flags
+ * must only be cleared once every session is done with the afi/safi.
+ */
+static bool bmp_targets_afi_needs_sync(const struct bmp_targets *bt,
+				       const struct bmp *self, afi_t afi,
+				       safi_t safi)
+{
+	const struct bmp *bmp;
+
+	for (bmp = bmp_session_const_first(&bt->sessions); bmp;
+	     bmp = bmp_session_const_next(&bt->sessions, bmp)) {
+		if (bmp == self)
+			continue;
+		if (bmp->afistate[afi][safi] == BMP_AFI_NEEDSYNC ||
+		    bmp->afistate[afi][safi] == BMP_AFI_SYNC)
+			return true;
+	}
+	return false;
+}
+
 static void bmp_update_syncro_set(struct bmp *bmp, afi_t afi, safi_t safi, struct bgp *bgp,
 				  enum bmp_afi_state state)
 {
@@ -1425,6 +1463,13 @@ static void bmp_update_syncro_set(struct bmp *bmp, afi_t afi, safi_t safi, struc
 	bmp->afistate[afi][safi] = state;
 	bmp->syncafi = AFI_MAX;
 	bmp->syncsafi = SAFI_MAX;
+
+	/* keep the shared request-sync flags set while slower sessions still
+	 * need to walk this afi/safi (see comment above)
+	 */
+	if (bmp_targets_afi_needs_sync(bmp->targets, bmp, afi, safi))
+		return;
+
 	if (bgp == NULL || bmp->targets->bgp == bmp->sync_bgp)
 		bmp->targets->bgp_request_sync[afi][safi] = false;
 

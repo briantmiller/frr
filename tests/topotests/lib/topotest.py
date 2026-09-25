@@ -408,7 +408,7 @@ def json_cmp(output, expected, exact=False):
       order when it is compared to an Array in output
     """
 
-    (errors_n, errors) = gen_json_diff_report(
+    errors_n, errors = gen_json_diff_report(
         deepcopy(output), deepcopy(expected), exact=exact
     )
 
@@ -1343,6 +1343,14 @@ def _sysctl_atleast(commander, variable, min_value):
         min_value = list(min_value)
     is_list = isinstance(min_value, list)
 
+    path = "/proc/sys/" + variable.replace(".", "/")
+    try:
+        # In some tests commander is actually a TopoGear which only has cmd_raises
+        commander.cmd_raises(f"test -e {path}", warn=False)
+    except subprocess.CalledProcessError:
+        logging.debug("%s sysctl file not present", path)
+        return
+
     sval = commander.cmd_raises("sysctl -n " + variable).strip()
     if is_list:
         cur_val = [int(x) for x in sval.split()]
@@ -1372,6 +1380,14 @@ def _sysctl_assure(commander, variable, value):
     if isinstance(value, tuple):
         value = list(value)
     is_list = isinstance(value, list)
+
+    path = "/proc/sys/" + variable.replace(".", "/")
+    try:
+        # In some tests commander is actually a TopoGear which only has cmd_raises
+        commander.cmd_raises(f"test -e {path}", warn=False)
+    except subprocess.CalledProcessError:
+        logging.debug("%s sysctl file not present", path)
+        return
 
     sval = commander.cmd_raises("sysctl -n " + variable).strip()
     if is_list:
@@ -1512,30 +1528,34 @@ def fix_host_limits():
     sysctl_assure(None, "fs.suid_dumpable", 1)
 
     # Maximum connection backlog
-    sysctl_atleast(None, "net.core.netdev_max_backlog", 4 * 1024)
+    sysctl_atleast(None, "net.core.netdev_max_backlog", 4 * 1024)  # NSF
 
     # Maximum read and write socket buffer sizes
-    sysctl_atleast(None, "net.core.rmem_max", 16 * 2**20)
-    sysctl_atleast(None, "net.core.wmem_max", 16 * 2**20)
+    sysctl_atleast(None, "net.core.rmem_max", 16 * 2**20)  # NSF
+    sysctl_atleast(None, "net.core.wmem_max", 16 * 2**20)  # NSF
 
     # Garbage Collection Settings for ARP and Neighbors
-    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh2", 4 * 1024)
-    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh3", 8 * 1024)
-    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh2", 4 * 1024)
-    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh3", 8 * 1024)
+    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh2", 4 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh3", 8 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh2", 4 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh3", 8 * 1024)  # NSF
     # Hold entries for 10 minutes
-    sysctl_assure(None, "net.ipv4.neigh.default.base_reachable_time_ms", 10 * 60 * 1000)
-    sysctl_assure(None, "net.ipv6.neigh.default.base_reachable_time_ms", 10 * 60 * 1000)
+    sysctl_assure(
+        None, "net.ipv4.neigh.default.base_reachable_time_ms", 10 * 60 * 1000
+    )  # NSF
+    sysctl_assure(
+        None, "net.ipv6.neigh.default.base_reachable_time_ms", 10 * 60 * 1000
+    )  # NSF
 
     # igmp
-    sysctl_assure(None, "net.ipv4.neigh.default.mcast_solicit", 10)
+    sysctl_assure(None, "net.ipv4.neigh.default.mcast_solicit", 10)  # NSF
 
     # MLD
-    sysctl_atleast(None, "net.ipv6.mld_max_msf", 512)
+    sysctl_atleast(None, "net.ipv6.mld_max_msf", 512)  # NSF
 
     # Increase routing table size to 128K
-    sysctl_atleast(None, "net.ipv4.route.max_size", 128 * 1024)
-    sysctl_atleast(None, "net.ipv6.route.max_size", 128 * 1024)
+    sysctl_atleast(None, "net.ipv4.route.max_size", 128 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.route.max_size", 128 * 1024)  # NSF??
 
 
 def setup_node_tmpdir(logdir, name):
@@ -1562,7 +1582,8 @@ class Router(Node):
     # Daemon stop order, mirroring the production init scripts
     # (tools/frrcommon.sh.in). all_stop() there signals daemons in the reverse
     # of the $DAEMONS start order, so this is that reversed list. Daemons not
-    # present here (e.g. fpm_listener, snmpd) sort before everything else.
+    # present here (e.g. fpm_listener, bfd_dplane_listener, snmpd) sort
+    # before everything else.
     # Keep this in sync with $DAEMONS in tools/frrcommon.sh.in.
     FRR_DAEMON_STOP_ORDER = {
         name: index
@@ -1667,6 +1688,7 @@ class Router(Node):
             "mgmtd": 0,
             "snmptrapd": 0,
             "fpm_listener": 0,
+            "bfd_dplane_listener": 0,
         }
         self.daemon_instances = {"ospfd": []}
         self.daemons_options = {"zebra": ""}
@@ -1767,28 +1789,30 @@ class Router(Node):
         return ret
 
     def stopRouter(self, assertOnError=True):
-        # fpm_listener writes its PID file to the gear log directory (next to
-        # its data dump), not to /var/run/frr/, so listDaemons() can't see it.
-        # Send it SIGTERM first and give it a brief moment to run its atexit
-        # handlers (in particular gcov flush under --enable-gcov) before the
-        # namespace teardown SIGKILLs it. This must happen before listDaemons()
-        # below sends SIGTERM to the FRR daemons because once zebra exits the
-        # FPM client side closes the socket and we want fpm_listener's last
-        # accept loop iteration to be reflected in coverage.
-        fpm_pidfile = "{}/{}/fpm_listener.pid".format(self.logdir, self.name)
-        try:
-            with open(fpm_pidfile) as f:
-                fpm_pid = int(f.read().strip())
+        # The listener helpers write their PID files to the gear log
+        # directory (next to their data dumps), not to /var/run/frr/, so
+        # listDaemons() can't see them. Send SIGTERM first and give them a
+        # brief moment to run their atexit handlers (in particular gcov flush
+        # under --enable-gcov) before the namespace teardown SIGKILLs them.
+        # This must happen before listDaemons() below sends SIGTERM to the FRR
+        # daemons because once the daemon exits its client side closes the
+        # socket, and we want the listener's last accept loop iteration to be
+        # reflected in coverage.
+        for listener in ("fpm_listener", "bfd_dplane_listener"):
+            pidfile = "{}/{}/{}.pid".format(self.logdir, self.name, listener)
             try:
-                os.kill(fpm_pid, signal.SIGTERM)
-                logger.debug(
-                    "%s: sent SIGTERM to fpm_listener pid %d", self.name, fpm_pid
-                )
-            except OSError:
+                with open(pidfile) as f:
+                    pid = int(f.read().strip())
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    logger.debug(
+                        "%s: sent SIGTERM to %s pid %d", self.name, listener, pid
+                    )
+                except OSError:
+                    pass
+                time.sleep(0.1)
+            except (FileNotFoundError, ValueError):
                 pass
-            time.sleep(0.1)
-        except (FileNotFoundError, ValueError):
-            pass
 
         # Stop Running FRR Daemons
         running = self.listDaemons()
@@ -1818,7 +1842,7 @@ class Router(Node):
 
         running = self.listDaemons()
         if running:
-            for _ in range(0, 30):
+            for _ in range(0, 60):
                 sleep(
                     0.5,
                     "{}: waiting for daemons stopping: {}".format(
@@ -1831,19 +1855,20 @@ class Router(Node):
 
         if running:
             logger.warning(
-                "%s: sending SIGBUS to: %s",
+                "%s: sending SIGXCPU to: %s",
                 self.name,
                 ", ".join([x[0] for x in running]),
             )
             for name, pid in running:
                 pidfile = "/var/run/{}/{}.pid".format(self.routertype, name)
                 logger.info("%s: killing %s", self.name, name)
-                self.cmd("kill -SIGBUS %d" % pid)
+                self.cmd("kill -SIGXCPU %d" % pid)
                 self.cmd("rm -- " + pidfile)
 
             sleep(
                 0.5,
-                "%s: waiting for daemons to exit/core after initial SIGBUS" % self.name,
+                "%s: waiting for daemons to exit/core after initial SIGXCPU"
+                % self.name,
             )
 
         errors = self.checkRouterCores(reportOnce=True)
@@ -2195,6 +2220,10 @@ class Router(Node):
                 binary = "/usr/lib/frr/fpm_listener"
                 cmdenv = ""
                 cmdopt = "-d {}".format(daemon_opts)
+            elif daemon == "bfd_dplane_listener":
+                binary = os.path.join(self.daemondir, "bfd_dplane_listener")
+                cmdenv = ""
+                cmdopt = "-d {}".format(daemon_opts)
             elif daemon == "snmpd":
                 binary = "/usr/sbin/snmpd"
                 cmdenv = ""
@@ -2484,6 +2513,7 @@ class Router(Node):
                     daemon != "snmpd"
                     and daemon != "snmptrapd"
                     and daemon != "fpm_listener"
+                    and daemon != "bfd_dplane_listener"
                 ):
                     cmdopt += " -d "
                 cmdopt += rediropt
@@ -2619,6 +2649,13 @@ class Router(Node):
             start_daemon("fpm_listener")
             while "fpm_listener" in daemons_list:
                 daemons_list.remove("fpm_listener")
+
+        if "bfd_dplane_listener" in daemons_list:
+            # bfdd connects to the listener as a client, so it has to be
+            # accepting before bfdd starts or the first connect fails.
+            start_daemon("bfd_dplane_listener")
+            while "bfd_dplane_listener" in daemons_list:
+                daemons_list.remove("bfd_dplane_listener")
 
         # Now start all the other daemons
         for daemon in daemons_list:
@@ -2895,6 +2932,8 @@ class Router(Node):
                 continue
             if daemon == "fpm_listener":
                 continue
+            if daemon == "bfd_dplane_listener":
+                continue
             if (self.daemons[daemon] == 1) and not (daemon in daemonsRunning):
                 sys.stderr.write("%s: Daemon %s not running\n" % (self.name, daemon))
                 if daemon == "staticd":
@@ -2996,7 +3035,7 @@ class Router(Node):
                 interface = m.group(1)
                 ll_per_if_count = 0
             m = re.search(
-                "inet6 (fe80::[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+)[/0-9]* scope link",
+                r"inet6 (fe80:[0-9a-f:]*)(?:/\d+)? scope link",
                 line,
             )
             if m:

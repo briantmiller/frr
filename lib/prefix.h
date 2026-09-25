@@ -76,6 +76,7 @@ typedef struct esi_t_ {
 	uint8_t val[ESI_BYTES];
 } esi_t;
 
+/* Ethernet Auto-Discovery (A-D) route (EVPN route type 1) */
 struct evpn_ead_addr {
 	esi_t esi;
 	uint32_t eth_tag;
@@ -83,6 +84,7 @@ struct evpn_ead_addr {
 	uint16_t frag_id;
 };
 
+/* MAC/IP Advertisement route (EVPN route type 2) */
 struct evpn_macip_addr {
 	uint32_t eth_tag;
 	uint8_t ip_prefix_length;
@@ -90,18 +92,21 @@ struct evpn_macip_addr {
 	struct ipaddr ip;
 };
 
+/* Inclusive Multicast Ethernet Tag route (EVPN route type 3) */
 struct evpn_imet_addr {
 	uint32_t eth_tag;
 	uint8_t ip_prefix_length;
 	struct ipaddr ip;
 };
 
+/* Ethernet Segment route (EVPN route type 4) */
 struct evpn_es_addr {
 	esi_t esi;
 	uint8_t ip_prefix_length;
 	struct ipaddr ip;
 };
 
+/* IP Prefix route (EVPN route type 5) */
 struct evpn_prefix_addr {
 	uint32_t eth_tag;
 	uint8_t ip_prefix_length;
@@ -112,11 +117,11 @@ struct evpn_prefix_addr {
 struct evpn_addr {
 	uint8_t route_type;
 	union {
-		struct evpn_ead_addr _ead_addr;
-		struct evpn_macip_addr _macip_addr;
-		struct evpn_imet_addr _imet_addr;
-		struct evpn_es_addr _es_addr;
-		struct evpn_prefix_addr _prefix_addr;
+		struct evpn_ead_addr _ead_addr;	      /* route type 1 */
+		struct evpn_macip_addr _macip_addr;   /* route type 2 */
+		struct evpn_imet_addr _imet_addr;     /* route type 3 */
+		struct evpn_es_addr _es_addr;	      /* route type 4 */
+		struct evpn_prefix_addr _prefix_addr; /* route type 5 */
 	} u;
 #define ead_addr u._ead_addr
 #define macip_addr u._macip_addr
@@ -332,25 +337,6 @@ union prefixconstptr {
  */
 #define PREFIX_SG_STR_LEN (INET6_ADDRSTRLEN * 2 + 3 + 1)
 
-/* Max bit/byte length of IPv4 address. */
-#define IPV4_MAX_BYTELEN    4
-#define IPV4_MAX_BITLEN    32
-#define IPV4_ADDR_CMP(D,S)   memcmp ((D), (S), IPV4_MAX_BYTELEN)
-
-static inline bool ipv4_addr_same(const struct in_addr *a,
-				  const struct in_addr *b)
-{
-	return (a->s_addr == b->s_addr);
-}
-#define IPV4_ADDR_SAME(A,B)  ipv4_addr_same((A), (B))
-
-static inline void ipv4_addr_copy(struct in_addr *dst,
-				  const struct in_addr *src)
-{
-	dst->s_addr = src->s_addr;
-}
-#define IPV4_ADDR_COPY(D,S)  ipv4_addr_copy((D), (S))
-
 #define IPV4_NET0(a) ((((uint32_t)(a)) & 0xff000000) == 0x00000000)
 #define IPV4_NET127(a) ((((uint32_t)(a)) & 0xff000000) == 0x7f000000)
 #define IPV4_NET127_16(a)    ((((uint32_t)(a)) & 0xffff0000) == 0x7f000000)
@@ -359,13 +345,6 @@ static inline void ipv4_addr_copy(struct in_addr *dst,
 #define IPV4_CLASS_E(a) ((((uint32_t)(a)) & 0xf0000000) == 0xf0000000)
 #define IPV4_CLASS_DE(a) ((((uint32_t)(a)) & 0xe0000000) == 0xe0000000)
 #define IPV4_MC_LINKLOCAL(a) ((((uint32_t)(a)) & 0xffffff00) == 0xe0000000)
-
-/* Max bit/byte length of IPv6 address. */
-#define IPV6_MAX_BYTELEN    16
-#define IPV6_MAX_BITLEN    128
-#define IPV6_ADDR_CMP(D,S)   memcmp ((D), (S), IPV6_MAX_BYTELEN)
-#define IPV6_ADDR_SAME(D,S)  (memcmp ((D), (S), IPV6_MAX_BYTELEN) == 0)
-#define IPV6_ADDR_COPY(D,S)  memcpy ((D), (S), IPV6_MAX_BYTELEN)
 
 /* Count prefix size from mask length */
 #define PSIZE(a) (((a) + 7) / (8))

@@ -2401,10 +2401,10 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	bgp_size_t update_len;
 	bgp_size_t withdraw_len;
 	enum NLRI_TYPES {
-		NLRI_UPDATE,
 		NLRI_WITHDRAW,
-		NLRI_MP_UPDATE,
 		NLRI_MP_WITHDRAW,
+		NLRI_UPDATE,
+		NLRI_MP_UPDATE,
 		NLRI_TYPE_MAX
 	};
 	struct bgp_nlri nlris[NLRI_TYPE_MAX];
@@ -2559,7 +2559,7 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 			   withdraw_len, attribute_len, update_len);
 
 	/* Parse any given NLRIs */
-	for (int i = NLRI_UPDATE; i < NLRI_TYPE_MAX; i++) {
+	for (int i = NLRI_WITHDRAW; i < NLRI_TYPE_MAX; i++) {
 		if (!nlris[i].nlri)
 			continue;
 
@@ -2596,9 +2596,8 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 			flog_err(EC_BGP_UPDATE_RCV,
 				 "%s [Error] Error parsing NLRI", peer->host);
 			if (peer_established(connection))
-				bgp_notify_send(connection,
-						BGP_NOTIFY_UPDATE_ERR,
-						i <= NLRI_WITHDRAW
+				bgp_notify_send(connection, BGP_NOTIFY_UPDATE_ERR,
+						(i == NLRI_WITHDRAW || i == NLRI_UPDATE)
 							? BGP_NOTIFY_UPDATE_INVAL_NETWORK
 							: BGP_NOTIFY_UPDATE_OPT_ATTR_ERR);
 			bgp_attr_unintern_sub(&attr);
@@ -3500,8 +3499,7 @@ static void bgp_dynamic_capability_orf(uint8_t *pnt, int action,
 	}
 }
 
-static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
-					struct capability_header *hdr,
+static bool bgp_dynamic_capability_role(uint8_t *pnt, int action, struct capability_header *hdr,
 					struct peer *peer)
 {
 	uint8_t role;
@@ -3511,7 +3509,7 @@ static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
 			flog_err(EC_BGP_CAPABILITY_INVALID_LENGTH,
 				 "%pBP: ROLE Capability length error: got %u, expected %zu",
 				 peer, hdr->length, sizeof(role));
-			return;
+			return false;
 		}
 		SET_FLAG(peer->cap, PEER_CAP_ROLE_RCV);
 		memcpy(&role, pnt + 3, sizeof(role));
@@ -3519,8 +3517,9 @@ static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
 		peer->remote_role = role;
 	} else {
 		UNSET_FLAG(peer->cap, PEER_CAP_ROLE_RCV);
-		peer->remote_role = ROLE_UNDEFINED;
 	}
+
+	return true;
 }
 
 static void bgp_dynamic_capability_fqdn(uint8_t *pnt, int action,
@@ -4031,7 +4030,13 @@ static int bgp_capability_msg_parse(struct peer_connection *connection, uint8_t 
 			bgp_dynamic_capability_enhe(pnt, action, hdr, peer);
 			break;
 		case CAPABILITY_CODE_ROLE:
-			bgp_dynamic_capability_role(pnt, action, hdr, peer);
+			if (!bgp_dynamic_capability_role(pnt, action, hdr, peer)) {
+				bgp_notify_send(connection, BGP_NOTIFY_OPEN_ERR,
+						BGP_NOTIFY_OPEN_MALFORMED_ATTR);
+				return BGP_Stop;
+			}
+			if (bgp_role_violation(connection))
+				return BGP_Stop;
 			break;
 		default:
 			flog_warn(EC_BGP_UNRECOGNIZED_CAPABILITY,

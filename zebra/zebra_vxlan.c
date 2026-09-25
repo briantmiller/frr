@@ -465,20 +465,21 @@ static void zevpn_print_mac_hash_all_evpn(struct hash_bucket *bucket, void *ctxt
 		frr_json_set_open(json_evpn);
 		frr_json_set_open(json_mac);
 
+		/* Add numMacs before the open "macs" container: an incremental
+		 * flush during the MAC walk would otherwise print it inside "macs".
+		 */
+		if (!CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP))
+			json_object_int_add(json_evpn, "numMacs", num_macs);
 		json_object_object_add(json_evpn, "macs", json_mac);
 		json_object_object_add(json, vni_str, json_evpn);
 	}
 
-	if (!CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP)) {
-		if (json == NULL) {
-			vty_out(vty, "\nVNI %u #MACs (local and remote) %u\n\n",
-				zevpn->vni, num_macs);
-			vty_out(vty,
-				"Flags: N=sync-neighs, I=local-inactive, P=peer-active, X=peer-proxy\n");
-			vty_out(vty, "%-17s %-6s %-5s %-39s %-5s %s\n", "MAC", "Type", "Flags",
-				"Intf/Remote ES/VTEP", "VLAN", "Seq #'s");
-		} else
-			json_object_int_add(json_evpn, "numMacs", num_macs);
+	if (json == NULL && !CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP)) {
+		vty_out(vty, "\nVNI %u #MACs (local and remote) %u\n\n", zevpn->vni, num_macs);
+		vty_out(vty,
+			"Flags: N=sync-neighs, I=local-inactive, P=peer-active, X=peer-proxy\n");
+		vty_out(vty, "%-17s %-6s %-5s %-39s %-5s %s\n", "MAC", "Type", "Flags",
+			"Intf/Remote ES/VTEP", "VLAN", "Seq #'s");
 	}
 
 	if (!num_macs) {
@@ -559,17 +560,17 @@ static void zevpn_print_mac_hash_all_evpn_detail(struct hash_bucket *bucket,
 		frr_json_set_open(json_evpn);
 		frr_json_set_open(json_mac);
 
+		/* Add numMacs before the open "macs" container: an incremental
+		 * flush during the MAC walk would otherwise print it inside "macs".
+		 */
+		if (!CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP))
+			json_object_int_add(json_evpn, "numMacs", num_macs);
 		json_object_object_add(json_evpn, "macs", json_mac);
 		json_object_object_add(json, vni_str, json_evpn);
 	}
 
-	if (!CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP)) {
-		if (json == NULL) {
-			vty_out(vty, "\nVNI %u #MACs (local and remote) %u\n\n",
-				zevpn->vni, num_macs);
-		} else
-			json_object_int_add(json_evpn, "numMacs", num_macs);
-	}
+	if (json == NULL && !CHECK_FLAG(wctx->flags, SHOW_REMOTE_MAC_FROM_VTEP))
+		vty_out(vty, "\nVNI %u #MACs (local and remote) %u\n\n", zevpn->vni, num_macs);
 	/* assign per-evpn to wctx->json object to fill macs
 	 * under the evpn. Re-assign primary json object to fill
 	 * next evpn information.
@@ -2901,8 +2902,11 @@ void zebra_vxlan_print_rmacs_l3vni(struct vty *vty, vni_t l3vni, bool use_json)
 		return;
 	}
 	num_rmacs = hashcount(zl3vni->rmac_table);
-	if (!num_rmacs)
+	if (!num_rmacs) {
+		if (use_json)
+			vty_json_empty(vty, json);
 		return;
+	}
 
 	memset(&wctx, 0, sizeof(wctx));
 	wctx.vty = vty;
@@ -3186,8 +3190,11 @@ void zebra_vxlan_print_neigh_vni(struct vty *vty, struct zebra_vrf *zvrf,
 		return;
 	}
 	num_neigh = zebra_neigh_db_count(zevpn->neigh_table);
-	if (!num_neigh)
+	if (!num_neigh) {
+		if (use_json)
+			vty_json_empty(vty, json);
 		return;
+	}
 
 	/* Since we have IPv6 addresses to deal with which can vary widely in
 	 * size, we try to be a bit more elegant in display by first computing
@@ -3308,9 +3315,10 @@ void zebra_vxlan_print_specific_neigh_vni(struct vty *vty,
 	}
 	n = zebra_evpn_neigh_lookup(zevpn, ip);
 	if (!n) {
-		if (!use_json)
-			vty_out(vty,
-				"%% Requested neighbor does not exist in VNI %u\n",
+		if (use_json)
+			vty_json_empty(vty, json);
+		else
+			vty_out(vty, "%% Requested neighbor does not exist in VNI %u\n",
 				vni);
 		return;
 	}
@@ -3352,8 +3360,11 @@ void zebra_vxlan_print_neigh_vni_vtep(struct vty *vty, struct zebra_vrf *zvrf, v
 		return;
 	}
 	num_neigh = zebra_neigh_db_count(zevpn->neigh_table);
-	if (!num_neigh)
+	if (!num_neigh) {
+		if (use_json)
+			vty_json_empty(vty, json);
 		return;
+	}
 
 	memset(&wctx, 0, sizeof(wctx));
 	wctx.zevpn = zevpn;
@@ -3409,12 +3420,18 @@ void zebra_vxlan_print_neigh_vni_dad(struct vty *vty,
 	}
 
 	num_neigh = zebra_neigh_db_count(zevpn->neigh_table);
-	if (!num_neigh)
+	if (!num_neigh) {
+		if (use_json)
+			vty_json_empty(vty, json);
 		return;
+	}
 
 	num_neigh = num_dup_detected_neighs(zevpn);
-	if (!num_neigh)
+	if (!num_neigh) {
+		if (use_json)
+			vty_json_empty(vty, json);
 		return;
+	}
 
 	/* Since we have IPv6 addresses to deal with which can vary widely in
 	 * size, we try to be a bit more elegant in display by first computing
@@ -5766,17 +5783,14 @@ void zebra_vxlan_advertise_svi_macip(ZAPI_HANDLER_ARGS)
 			return;
 
 
-		if (advertise) {
-			zvrf->advertise_svi_macip = advertise;
+		zvrf->advertise_svi_macip = advertise;
+		if (advertise)
 			hash_iterate(zvrf->evpn_table,
 				     zebra_evpn_gw_macip_add_for_evpn_hash,
 				     NULL);
-		} else {
-			hash_iterate(zvrf->evpn_table,
-				     zebra_evpn_svi_macip_del_for_evpn_hash,
+		else
+			hash_iterate(zvrf->evpn_table, zebra_evpn_svi_macip_del_for_evpn_hash,
 				     NULL);
-			zvrf->advertise_svi_macip = advertise;
-		}
 
 	} else {
 		struct zebra_if *zif = NULL;
@@ -5827,7 +5841,7 @@ void zebra_vxlan_advertise_svi_macip(ZAPI_HANDLER_ARGS)
 		if (advertise) {
 			/* Add primary SVI MAC-IP */
 			zebra_evpn_add_macip_for_intf(vlan_if, zevpn);
-		} else {
+		} else if (!advertise_gw_macip_enabled(zevpn)) {
 			/* Del primary SVI MAC-IP */
 			zebra_evpn_del_macip_for_intf(vlan_if, zevpn);
 		}
@@ -5940,7 +5954,10 @@ void zebra_vxlan_advertise_gw_macip(ZAPI_HANDLER_ARGS)
 
 		zvrf->advertise_gw_macip = advertise;
 
-		if (advertise_gw_macip_enabled(zevpn))
+		/* zevpn is NULL in the global branch; the walkers re-check
+		 * the per-EVPN override themselves.
+		 */
+		if (advertise_gw_macip_enabled(NULL))
 			hash_iterate(zvrf->evpn_table,
 				     zebra_evpn_gw_macip_add_for_evpn_hash,
 				     NULL);
@@ -6005,6 +6022,10 @@ void zebra_vxlan_advertise_gw_macip(ZAPI_HANDLER_ARGS)
 		} else {
 			/* Del primary MAC-IP */
 			zebra_evpn_del_macip_for_intf(vlan_if, zevpn);
+
+			/* Re-advertise it as an SVI route, if enabled. */
+			if (advertise_svi_macip_enabled(zevpn))
+				zebra_evpn_add_macip_for_intf(vlan_if, zevpn);
 
 			/* Del VRR MAC-IP - if any*/
 			vrr_if = zebra_get_vrr_intf_for_svi(vlan_if);
