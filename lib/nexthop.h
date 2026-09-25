@@ -52,6 +52,13 @@ enum nh_encap_type {
 /* Backup index value is limited */
 #define NEXTHOP_BACKUP_IDX_MAX 255
 
+struct nh_res_info {
+	/* If resolved (by zebra typically), the resolving NHG ID and prefix */
+	uint32_t id;
+	struct ipaddr addr;
+	uint8_t pfxlen;
+};
+
 /* Nexthop structure. */
 struct nexthop {
 	struct nexthop *next;
@@ -135,6 +142,9 @@ struct nexthop {
 	/* Recursive parent */
 	struct nexthop *rparent;
 
+	/* If resolved (by zebra typically), the resolving NHG ID and prefix */
+	struct nh_res_info *res_info;
+
 	/* Label(s) associated with this nexthop. */
 	struct mpls_label_stack *nh_label;
 
@@ -208,7 +218,8 @@ void nexthop_add_srv6_seg6local(struct nexthop *nexthop, uint32_t action,
 				const struct seg6local_context *ctx);
 void nexthop_del_srv6_seg6local(struct nexthop *nexthop);
 void nexthop_add_srv6_seg6(struct nexthop *nexthop, const struct in6_addr *seg, int num_segs,
-			   enum srv6_headend_behavior encap_behavior);
+			   enum srv6_headend_behavior encap_behavior,
+			   const struct in6_addr *encap_source);
 void nexthop_del_srv6_seg6(struct nexthop *nexthop);
 
 /*
@@ -291,6 +302,10 @@ extern bool nexthop_is_blackhole(const struct nexthop *nh);
  */
 int nexthop_str2backups(const char *str, int *num_backups,
 			uint8_t *backups);
+
+/* Maintain recursive resolution data */
+void nexthop_set_res_info(struct nexthop *nh, uint32_t id, const struct prefix *pfx);
+void nexthop_free_res_info(struct nexthop *nexthop);
 
 void nexthop_json_helper(struct json_object *json_nexthop, const struct nexthop *nexthop,
 			 bool display_vrfid, uint8_t rn_family, bool brief);

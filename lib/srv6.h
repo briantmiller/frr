@@ -112,6 +112,10 @@ struct seg6local_flavors_info {
 
 struct seg6_seg_stack {
 	enum srv6_headend_behavior encap_behavior;
+
+	/* optional encapsulation source address */
+	struct in6_addr encap_source;
+
 	uint8_t num_segs;
 	struct in6_addr seg[0]; /* 1 or more segs */
 };
@@ -161,6 +165,10 @@ struct srv6_locator {
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(srv6_locator);
+
+#define SRV6_LOCATOR_PREFIX_IS_SET(loc)                                                           \
+	(!IPV6_ADDR_SAME(&(loc)->prefix.prefix, &in6addr_any) || (loc)->prefix.prefixlen ||       \
+	 (loc)->block_bits_length || (loc)->node_bits_length || (loc)->function_bits_length)
 
 struct srv6_locator_chunk {
 	char locator_name[SRV6_LOCNAME_SIZE];

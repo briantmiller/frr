@@ -56,7 +56,11 @@ extern struct in_addr router_id_zebra;
 
 int eigrp_master_hash_cmp(const struct eigrp *a, const struct eigrp *b)
 {
-	return a->vrf_id - b->vrf_id;
+	if (a->vrf_id > b->vrf_id)
+		return 1;
+	if (a->vrf_id < b->vrf_id)
+		return -1;
+	return 0;
 }
 
 uint32_t eigrp_master_hash_hash(const struct eigrp *a)
@@ -263,7 +267,11 @@ void eigrp_finish_final(struct eigrp *eigrp)
 			nbr = eigrp_nbr_hash_first(&ei->nbr_hash_head);
 			eigrp_nbr_delete(nbr);
 		}
-		eigrp_if_delete_hook(ei->ifp);
+		/*
+		 * The instance is going away, not the interface, so drop the
+		 * running state but leave the interface configuration alone.
+		 */
+		eigrp_if_free_all(ei->ifp);
 	}
 
 	event_cancel(&eigrp->t_write);

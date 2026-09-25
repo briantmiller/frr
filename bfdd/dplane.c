@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "lib/hook.h"
+#include "lib/keychain.h"
 #include "lib/network.h"
 #include "lib/printfrr.h"
 #include "lib/stream.h"
@@ -101,6 +102,7 @@ static bool bfd_dplane_client_connecting(struct bfd_dplane_ctx *bdc);
 static void bfd_dplane_ctx_free(struct bfd_dplane_ctx *bdc);
 static int _bfd_dplane_add_session(struct bfd_dplane_ctx *bdc,
 				   struct bfd_session *bs);
+static int _bfd_dplane_update_session(struct bfd_session *bs, bool detach);
 
 /*
  * BFD data plane helper functions.
@@ -122,6 +124,8 @@ static const char *bfd_dplane_messagetype2str(enum bfddp_message_type bmt)
 		return "DP_REQUEST_SESSION_COUNTERS";
 	case BFD_SESSION_COUNTERS:
 		return "BFD_SESSION_COUNTERS";
+	case DP_SESSION_AUTH:
+		return "DP_SESSION_AUTH";
 	default:
 		return "UNKNOWN";
 	}
@@ -190,6 +194,15 @@ static void bfd_dplane_debug_message(const struct bfddp_message *msg)
 			msg->data.session.detect_mult,
 			ntohl(msg->data.session.ifindex),
 			msg->data.session.ifname);
+		break;
+
+	case DP_SESSION_AUTH:
+		/*
+		 * Key material is deliberately absent: this is written to
+		 * the log at debug level.
+		 */
+		zlog_debug("  [lid=%u keys=%u]", ntohl(msg->data.session_auth.lid),
+			   ntohs(msg->data.session_auth.key_count));
 		break;
 
 	case BFD_STATE_CHANGE:
@@ -325,6 +338,34 @@ static void bfd_dplane_write(struct event *t)
 	bfd_dplane_flush(bdc);
 }
 
+/*
+ * RFC 5880 Section 6.8.9: echo packets must not be transmitted faster
+ * than the interval the peer advertises it is able to receive them at.
+ *
+ * The data plane performs echo transmission but does not process control
+ * packets, so it never sees the peer's Required Min Echo RX. The daemon
+ * performs the negotiation on its behalf and pushes the result down
+ * whenever it changes.
+ */
+void bfd_dplane_echo_negotiate(struct bfd_session *bs)
+{
+	uint32_t negotiated;
+
+	if (bs->bdc == NULL || !CHECK_FLAG(bs->flags, BFD_SESS_FLAG_ECHO))
+		return;
+
+	negotiated = bs->remote_timers.required_min_echo >
+				     bs->timers.desired_min_echo_tx
+			     ? bs->remote_timers.required_min_echo
+			     : bs->timers.desired_min_echo_tx;
+
+	if (bs->echo_xmt_TO == negotiated)
+		return;
+
+	bs->echo_xmt_TO = negotiated;
+	bfd_dplane_update_session(bs);
+}
+
 static void
 bfd_dplane_session_state_change(struct bfd_dplane_ctx *bdc,
 				const struct bfddp_state_change *state)
@@ -352,10 +393,18 @@ bfd_dplane_session_state_change(struct bfd_dplane_ctx *bdc,
 	bs->remote_diag = state->diagnostics;
 	bs->discrs.remote_discr = ntohl(state->rid);
 	bs->remote_cbit = !!(flags & RBIT_CPI);
+	/*
+	 * Only the peer's Demand bit is recorded here. The data plane
+	 * owns transmission and detection for offloaded sessions, so
+	 * demand mode is reported as configured rather than active.
+	 */
+	bs->remote_demand_mode = !!(flags & RBIT_DEMAND);
 	bs->remote_detect_mult = state->detection_multiplier;
 	bs->remote_timers.desired_min_tx = ntohl(state->desired_tx);
 	bs->remote_timers.required_min_rx = ntohl(state->required_rx);
 	bs->remote_timers.required_min_echo = ntohl(state->required_echo_rx);
+
+	bfd_dplane_echo_negotiate(bs);
 
 	/* Notify and update counters. */
 	ptm_bfd_notify(bs, bs->ses_state);
@@ -416,6 +465,25 @@ static int bfd_dplane_enqueue(struct bfd_dplane_ctx *bdc, const void *buf,
 	/* Handle not connected yet client. */
 	if (bdc->client && bdc->sock == -1)
 		return -1;
+
+	/*
+	 * Not enough space: the buffer may simply not have been drained
+	 * yet, e.g. the initial session registration burst enqueues all
+	 * sessions before the write event ever runs. Try flushing
+	 * synchronously before giving up: the socket is normally
+	 * writable. Skip clients still connecting (flush would spin on
+	 * EAGAIN until the connection finishes).
+	 */
+	if (buflen > STREAM_WRITEABLE(bdc->outbuf) &&
+	    !(bdc->client && bdc->connecting)) {
+		/*
+		 * On socket failure or close the context is freed by
+		 * the flush. The buffer is non empty here, so a zero
+		 * return means exactly that: don't touch `bdc` again.
+		 */
+		if (bfd_dplane_flush(bdc) == 0)
+			return -1;
+	}
 
 	/* Not enough space. */
 	if (buflen > STREAM_WRITEABLE(bdc->outbuf)) {
@@ -493,6 +561,7 @@ static void bfd_dplane_handle_message(struct bfddp_message *msg, void *arg)
 	case DP_ADD_SESSION:
 	case DP_DELETE_SESSION:
 	case DP_REQUEST_SESSION_COUNTERS:
+	case DP_SESSION_AUTH:
 		/* NOTHING: we are not supposed to receive this. */
 		break;
 	case BFD_SESSION_COUNTERS:
@@ -527,6 +596,16 @@ static int bfd_dplane_expect(struct bfd_dplane_ctx *bdc, uint16_t id,
 	ssize_t rv;
 
 	/*
+	 * Reclaim space consumed by previous calls. Synchronous callers
+	 * (e.g. the counters request) consume one message per call, so the
+	 * `reads`-based pulldown below never runs for them and consumed
+	 * bytes would otherwise accumulate until the buffer artificially
+	 * fills mid-message and a zero-length read is misdiagnosed as the
+	 * peer closing the connection.
+	 */
+	stream_pulldown(bdc->inbuf);
+
+	/*
 	 * Don't attempt to read if buffer is full, otherwise we'll get a
 	 * bogus 'connection closed' signal (rv == 0).
 	 */
@@ -534,6 +613,28 @@ static int bfd_dplane_expect(struct bfd_dplane_ctx *bdc, uint16_t id,
 		goto skip_read;
 
 read_again:
+	/*
+	 * Never issue a zero-length read: `read()` returns 0 and would be
+	 * misdiagnosed below as the peer closing the connection. If there
+	 * is no headroom, reclaim consumed space first; a buffer that is
+	 * still full after that holds a message larger than the buffer,
+	 * which is a protocol violation.
+	 */
+	if (STREAM_WRITEABLE(bdc->inbuf) == 0) {
+		stream_pulldown(bdc->inbuf);
+		if (STREAM_WRITEABLE(bdc->inbuf) == 0) {
+			/*
+			 * A single message larger than the whole buffer:
+			 * protocol violation, this peer cannot be parsed.
+			 * Tear the connection down like the other fatal
+			 * paths do.
+			 */
+			zlog_err("%s: input buffer full with incomplete message", __func__);
+			bfd_dplane_ctx_free(bdc);
+			return -1;
+		}
+	}
+
 	/* Attempt to read message from client. */
 	rv = stream_read_try(bdc->inbuf, bdc->sock,
 			     STREAM_WRITEABLE(bdc->inbuf));
@@ -640,7 +741,19 @@ static void _bfd_session_register_dplane(struct hash_bucket *hb, void *arg)
 	bfd_session_disable(bs);
 
 	/* Move session to data plane. */
-	_bfd_dplane_add_session(bdc, bs);
+	if (_bfd_dplane_add_session(bdc, bs) != 0) {
+		/*
+		 * The data plane didn't take the session (e.g. output
+		 * buffer full): return it to the software
+		 * implementation instead of leaving it implemented by
+		 * neither. Same recovery as data plane detach
+		 * (`_bfd_session_unregister_dplane`).
+		 */
+		zlog_warn(
+			"%s: failed to register session with data plane, keeping it in software",
+			__func__);
+		bfd_session_enable(bs);
+	}
 }
 
 static struct bfd_dplane_ctx *bfd_dplane_ctx_new(int sock)
@@ -679,6 +792,49 @@ static void _bfd_session_unregister_dplane(struct hash_bucket *hb, void *arg)
 	bfd_session_enable(bs);
 }
 
+/*
+ * Best-effort synchronous drain of the output buffer during shutdown.
+ *
+ * At shutdown every session enqueues a `DP_DELETE_SESSION` message, but
+ * the event loop never runs again to service the write event, so anything
+ * still buffered when the context is freed would be silently lost. Write
+ * it out here with a bounded retry so the data plane learns about all
+ * teardowns.
+ *
+ * This must not call `bfd_dplane_flush()`: its error path frees the
+ * context, and we are called from inside `bfd_dplane_ctx_free()`.
+ */
+static void bfd_dplane_ctx_shutdown_drain(struct bfd_dplane_ctx *bdc)
+{
+	size_t remaining;
+	ssize_t rv;
+
+	/* Nothing to write or nowhere to write it. */
+	if (bdc->sock == -1 || bdc->connecting)
+		return;
+
+	/*
+	 * Best-effort flush of the queued session deletions. The event
+	 * loop is already gone at shutdown and the socket is owned by the
+	 * frrevent machinery, so we do not re-arm a write event or block
+	 * waiting on it: a single pass writing whatever the socket will
+	 * take, and if it would block or errors we give up. Any unsent
+	 * deletions are simply timed out by the data plane instead.
+	 */
+	while ((remaining = STREAM_READABLE(bdc->outbuf)) > 0) {
+		rv = write(bdc->sock, stream_pnt(bdc->outbuf), remaining);
+		if (rv <= 0)
+			break;
+		bdc->out_bytes += (uint64_t)rv;
+		stream_forward_getp(bdc->outbuf, (size_t)rv);
+	}
+
+	remaining = STREAM_READABLE(bdc->outbuf);
+	if (remaining)
+		zlog_warn("%s: %zu bytes of data plane messages lost on shutdown", __func__,
+			  remaining);
+}
+
 static void bfd_dplane_ctx_free(struct bfd_dplane_ctx *bdc)
 {
 	if (bglobal.debug_dplane)
@@ -710,6 +866,10 @@ free_resources:
 	/* Detach all associated sessions. */
 	if (bglobal.bg_shutdown == false)
 		bfd_key_iterate(_bfd_session_unregister_dplane, bdc);
+
+	/* Deliver pending messages (e.g. session deletions) on shutdown. */
+	if (bglobal.bg_shutdown)
+		bfd_dplane_ctx_shutdown_drain(bdc);
 
 	/* Free resources. */
 	socket_close(&bdc->sock);
@@ -752,8 +912,12 @@ static void _bfd_dplane_session_fill(const struct bfd_session *bs,
 		msg->data.session.flags |= SESSION_ECHO;
 	if (bs->flags & BFD_SESS_FLAG_CBIT)
 		msg->data.session.flags |= SESSION_CBIT;
+	if (bs->flags & BFD_SESS_FLAG_DEMAND)
+		msg->data.session.flags |= SESSION_DEMAND;
 	if (bs->flags & BFD_SESS_FLAG_PASSIVE)
 		msg->data.session.flags |= SESSION_PASSIVE;
+	if (bs->kc)
+		msg->data.session.flags |= SESSION_AUTH;
 	if (bs->flags & BFD_SESS_FLAG_SHUTDOWN)
 		msg->data.session.flags |= SESSION_SHUTDOWN;
 
@@ -761,7 +925,15 @@ static void _bfd_dplane_session_fill(const struct bfd_session *bs,
 	msg->data.session.lid = htonl(bs->discrs.my_discr);
 	msg->data.session.min_tx = htonl(bs->timers.desired_min_tx);
 	msg->data.session.min_rx = htonl(bs->timers.required_min_rx);
-	msg->data.session.min_echo_tx = htonl(bs->timers.desired_min_echo_tx);
+	/*
+	 * Echo transmission is performed by the data plane, but only bfdd
+	 * sees the peer's Required Min Echo RX in control packets, so send
+	 * the negotiated interval rather than the configured one. Before
+	 * negotiation `echo_xmt_TO` is zero and the configured value stands.
+	 */
+	msg->data.session.min_echo_tx =
+		htonl(bs->echo_xmt_TO ? bs->echo_xmt_TO
+				      : bs->timers.desired_min_echo_tx);
 	msg->data.session.min_echo_rx = htonl(bs->timers.required_min_echo_rx);
 }
 
@@ -779,7 +951,7 @@ static int _bfd_dplane_add_session(struct bfd_dplane_ctx *bdc,
 	bs->ses_state = PTM_BFD_DOWN;
 
 	/* Enqueue message to data plane client. */
-	rv = bfd_dplane_update_session(bs);
+	rv = _bfd_dplane_update_session(bs, false);
 	if (rv != 0)
 		bs->bdc = NULL;
 
@@ -987,7 +1159,7 @@ static void bfd_dplane_client_init(const struct sockaddr *sa, socklen_t salen)
 	bdc = bfd_dplane_ctx_new(-1);
 	if (salen <= sizeof(bdc->addr)) {
 		memcpy(&bdc->addr, sa, salen);
-		bdc->addrlen = sizeof(bdc->addr);
+		bdc->addrlen = salen;
 	} else {
 		memcpy(&bdc->addr, sa, sizeof(bdc->addr));
 		bdc->addrlen = sizeof(bdc->addr);
@@ -1111,9 +1283,273 @@ int bfd_dplane_add_session(struct bfd_session *bs)
 	return -1;
 }
 
-int bfd_dplane_update_session(const struct bfd_session *bs)
+/*
+ * Whether this data plane connection can be trusted with a shared secret.
+ *
+ * A UNIX socket is bounded by the file system, and the documentation already
+ * tells an operator to set its permissions. A TCP connection to the loopback
+ * never leaves the host. Anything else is a plain TCP session with no
+ * transport security and no peer authentication: bfdd cannot tell who
+ * accepted it, and cannot stop anyone on the path from reading it.
+ *
+ * Every other message in this protocol describes a session. This one carries
+ * the key that protects it, which is the one thing that must not be given
+ * away, so the test is on the connection rather than on the operator.
+ */
+static bool bfd_dplane_addr_is_confined(const struct sockaddr *sa)
+{
+	const struct sockaddr_in6 *sin6;
+	const struct sockaddr_in *sin;
+	uint32_t v4;
+
+	switch (sa->sa_family) {
+	case AF_UNIX:
+		return true;
+	case AF_INET:
+		sin = (const struct sockaddr_in *)sa;
+		/* The whole of 127.0.0.0/8, not just 127.0.0.1. */
+		return IPV4_NET127(ntohl(sin->sin_addr.s_addr));
+	case AF_INET6:
+		sin6 = (const struct sockaddr_in6 *)sa;
+		if (IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr))
+			return true;
+		/*
+		 * A v4 client on a dual stack listener arrives mapped, and
+		 * the whole of 127.0.0.0/8 maps.
+		 */
+		if (IN6_IS_ADDR_V4MAPPED(&sin6->sin6_addr)) {
+			memcpy(&v4, &sin6->sin6_addr.s6_addr[12], sizeof(v4));
+			return IPV4_NET127(ntohl(v4));
+		}
+		return false;
+	default:
+		return false;
+	}
+}
+
+static bool bfd_dplane_transport_is_confined(const struct bfd_dplane_ctx *bdc)
+{
+	union {
+		struct sockaddr sa;
+		struct sockaddr_in sin;
+		struct sockaddr_in6 sin6;
+		struct sockaddr_storage ss;
+	} peer = {};
+	socklen_t peerlen = sizeof(peer);
+
+	/*
+	 * In client mode the address bfdd was told to connect to is the one
+	 * to judge, and it is known before the connection completes. That
+	 * matters: sessions are registered while the connect is still in
+	 * flight, which `bfd_dplane_enqueue` has its own case for, and
+	 * `getpeername` on a socket that is still connecting fails. Asking
+	 * the socket here would refuse every session registered during a
+	 * connect, which is how a data plane that starts with bfdd looks.
+	 */
+	if (bdc->client)
+		return bfd_dplane_addr_is_confined(&bdc->addr.sa);
+
+	/*
+	 * In server mode `bdc->addr` is what bfdd bound, which says nothing
+	 * about who reached it, so ask the socket instead. An accepted socket
+	 * is connected by definition, so this does not have the problem
+	 * above.
+	 */
+	if (getpeername(bdc->sock, &peer.sa, &peerlen) == -1)
+		return false;
+
+	return bfd_dplane_addr_is_confined(&peer.sa);
+}
+
+/* How a key stands relative to the moment it is being offloaded. */
+enum bfd_dplane_key_class {
+	/* Cannot go on the wire at all. */
+	BFD_DPLANE_KEY_UNUSABLE,
+	/* Its accept period has closed; it can never verify anything again. */
+	BFD_DPLANE_KEY_CLOSED,
+	/* Acceptable now, so the data plane needs it now. */
+	BFD_DPLANE_KEY_LIVE,
+	/* Its accept period has not opened yet; it is a future rollover. */
+	BFD_DPLANE_KEY_FUTURE,
+};
+
+/*
+ * Decide whether a key can be offloaded and, if so, whether it is needed
+ * now or is one the chain has yet to roll on to.
+ *
+ * The periods are read the way `key_valid` reads them: a key is stored
+ * zeroed, so a zero start means no lifetime was configured and the key is
+ * always acceptable. Only a key that was given a period can be outside one.
+ *
+ * `warn` is set on the pass that visits every key once, so a key is only
+ * ever complained about once per message.
+ */
+static enum bfd_dplane_key_class bfd_dplane_classify_key(const struct bfd_session *bs,
+							 const struct key *key, time_t now,
+							 enum bfd_auth_type *type, size_t *keylen,
+							 bool warn)
+{
+	if (key->string == NULL)
+		return BFD_DPLANE_KEY_UNUSABLE;
+
+	/* A key whose algorithm has no BFD equivalent is unusable. */
+	*type = map_keychain_algo_to_bfd_auth_type(key->hash_algo, bs->auth_meticulous);
+	if (*type == BFD_AUTH_TYPE_RESERVED) {
+		if (warn)
+			zlog_warn("%s: %s: key id %u has no BFD authentication type, not offloaded",
+				  __func__, bs->kc->name, key->index);
+		return BFD_DPLANE_KEY_UNUSABLE;
+	}
+
+	*keylen = strlen(key->string);
+	if (*keylen == 0 || *keylen > BFDDP_AUTH_KEY_MAX) {
+		if (warn)
+			zlog_warn("%s: %s: key id %u is %zu bytes, outside 1..%u, not offloaded",
+				  __func__, bs->kc->name, key->index, *keylen, BFDDP_AUTH_KEY_MAX);
+		return BFD_DPLANE_KEY_UNUSABLE;
+	}
+
+	/*
+	 * RFC 5880 gives the Auth Key ID eight bits, so a key chain index
+	 * above that cannot be put on the wire. Skipping it keeps the data
+	 * plane's view of the key chain honest; truncating would give two
+	 * keys the same identifier.
+	 */
+	if (key->index > UINT8_MAX) {
+		if (warn)
+			zlog_warn("%s: %s: key id %u does not fit the eight bit Auth Key ID, not offloaded",
+				  __func__, bs->kc->name, key->index);
+		return BFD_DPLANE_KEY_UNUSABLE;
+	}
+
+	if (key->accept.start == 0)
+		return BFD_DPLANE_KEY_LIVE;
+	if (key->accept.start > now)
+		return BFD_DPLANE_KEY_FUTURE;
+	if (key->accept.end != -1 && key->accept.end < now)
+		return BFD_DPLANE_KEY_CLOSED;
+
+	return BFD_DPLANE_KEY_LIVE;
+}
+
+/*
+ * The end of a period as the protocol spells it. The key chain stores a key
+ * never given a period zeroed and reads a zero start as always valid,
+ * whatever the end says; bfddp_packet.h promises a data plane a zero start
+ * with an end of -1 instead, so it need not know the key chain's convention.
+ */
+static int64_t bfd_dplane_key_end(const struct key_range *range)
+{
+	return range->start == 0 ? -1 : (int64_t)range->end;
+}
+
+/*
+ * Send every key the session's key chain holds, with the lifetimes that
+ * say when each may be used.
+ *
+ * The data plane picks the key, not us. It has the packets, so it is the
+ * only side that can tell which key applies to one, and pushing a new key
+ * at every rollover would put the BFD daemon back in a path that
+ * offloading exists to keep it out of.
+ *
+ * Only sent for a session that has a key chain. `SESSION_AUTH` in the
+ * session message is what says whether the session authenticates at all,
+ * so a data plane drops the keys it holds when that flag goes away.
+ */
+static int bfd_dplane_send_session_auth(const struct bfd_session *bs)
 {
 	struct bfddp_message msg = {};
+	struct bfddp_auth_key *keys = msg.data.session_auth.keys;
+	struct listnode *node;
+	struct key *key;
+	uint16_t count = 0;
+	uint16_t msglen;
+	time_t now = time(NULL);
+	bool truncated = false;
+	int pass;
+
+	if (!bfd_dplane_transport_is_confined(bs->bdc)) {
+		zlog_err("%s: [%s] refusing to send authentication keys over an unprotected data plane connection; use a UNIX socket or a loopback address",
+			 __func__, bs_to_string(bs));
+		return -1;
+	}
+
+	/*
+	 * Two passes, because the message holds fewer keys than a chain may.
+	 *
+	 * A key that is acceptable now is one the data plane needs to verify
+	 * the packets arriving at it, so those go in first and cannot be
+	 * displaced. Whatever room is left goes to the keys the chain has yet
+	 * to roll on to, in chain order, so the next handover is covered
+	 * before a distant one. Taking the list as it comes would let key ids
+	 * that sorted early spend every slot on rollovers years away.
+	 *
+	 * Only the first pass warns, so each key is complained about once.
+	 */
+	for (pass = 0; pass < 2; pass++) {
+		enum bfd_dplane_key_class want = pass == 0 ? BFD_DPLANE_KEY_LIVE
+							   : BFD_DPLANE_KEY_FUTURE;
+
+		for (ALL_LIST_ELEMENTS_RO(bs->kc->key, node, key)) {
+			enum bfd_auth_type type;
+			size_t keylen;
+
+			if (bfd_dplane_classify_key(bs, key, now, &type, &keylen, pass == 0) !=
+			    want)
+				continue;
+
+			if (count == BFDDP_AUTH_KEY_COUNT_MAX) {
+				if (!truncated) {
+					truncated = true;
+					zlog_warn("%s: %s: more keys are usable than the %u a message holds, the rest are not offloaded",
+						  __func__, bs->kc->name, BFDDP_AUTH_KEY_COUNT_MAX);
+				}
+				break;
+			}
+
+			keys[count].type = type;
+			keys[count].key_id = (uint8_t)key->index;
+			keys[count].key_len = (uint8_t)keylen;
+			keys[count].send.start = htobe64((uint64_t)key->send.start);
+			keys[count].send.end = htobe64((uint64_t)bfd_dplane_key_end(&key->send));
+			keys[count].accept.start = htobe64((uint64_t)key->accept.start);
+			keys[count].accept.end =
+				htobe64((uint64_t)bfd_dplane_key_end(&key->accept));
+			memcpy(keys[count].key, key->string, keylen);
+			count++;
+		}
+	}
+
+	/*
+	 * Only the keys that are present go on the wire, so the message is
+	 * shorter than the structure it was built in.
+	 */
+	msglen = sizeof(msg.header) + offsetof(struct bfddp_session_auth, keys) +
+		 (uint16_t)(count * sizeof(*keys));
+
+	msg.header.version = BFD_DP_VERSION;
+	msg.header.length = htons(msglen);
+	msg.header.type = htons(DP_SESSION_AUTH);
+
+	msg.data.session_auth.lid = htonl(bs->discrs.my_discr);
+	msg.data.session_auth.key_count = htons(count);
+
+	return bfd_dplane_enqueue(bs->bdc, &msg, msglen);
+}
+
+/*
+ * `detach` says whether this call is allowed to take the session back from
+ * the data plane when its keys cannot be sent.
+ *
+ * Registration must not: `bfd_session_enable` is what calls
+ * `bfd_dplane_add_session` in the first place, so falling back from
+ * underneath it would call it again with the association already cleared
+ * and recurse. That path has its own handling, in `_bfd_dplane_add_session`.
+ */
+static int _bfd_dplane_update_session(struct bfd_session *bs, bool detach)
+{
+	struct bfddp_message msg = {};
+	int rv;
 
 	if (bs->bdc == NULL)
 		return 0;
@@ -1124,7 +1560,59 @@ int bfd_dplane_update_session(const struct bfd_session *bs)
 		 ntohl(msg.data.session.flags), msg.data.session.detect_mult, msg.data.session.ttl);
 
 	/* Enqueue message to data plane client. */
-	return bfd_dplane_enqueue(bs->bdc, &msg, ntohs(msg.header.length));
+	rv = bfd_dplane_enqueue(bs->bdc, &msg, ntohs(msg.header.length));
+	if (rv != 0)
+		return rv;
+
+	if (bs->kc == NULL)
+		return rv;
+
+	rv = bfd_dplane_send_session_auth(bs);
+	if (rv == 0)
+		return rv;
+
+	/*
+	 * The session and its keys are separate messages and the queue can
+	 * take the first and refuse the second, which would leave the data
+	 * plane running a session whose keys no longer match what is
+	 * configured. There is no transaction here to roll back with, so
+	 * withdraw the session: `bfd_dplane_delete_session` asks the data
+	 * plane to drop it, best effort on the same queue, and clears the
+	 * association whether or not that message fits.
+	 *
+	 * The withdrawal is not conditional on `detach`. Registration has
+	 * already queued `DP_ADD_SESSION` by the time the keys are refused,
+	 * so clearing only the local association would leave the data plane
+	 * holding a session bfdd believes it never offloaded, and a data
+	 * plane that ignores `SESSION_AUTH` would run it unprotected. That is
+	 * the downgrade the confinement check above exists to prevent, and it
+	 * would happen every time on a connection that check rejects.
+	 *
+	 * Losing the fast path is the smaller harm. The alternative is a
+	 * session the data plane believes it is protecting with keys that are
+	 * no longer the configured ones.
+	 */
+	zlog_err("%s: [%s] authentication keys did not reach the data plane, withdrawing the session",
+		 __func__, bs_to_string(bs));
+
+	bfd_dplane_delete_session(bs);
+
+	/*
+	 * Only an update may start the session in the daemon from here.
+	 * `bfd_session_enable` is what calls `bfd_dplane_add_session` in the
+	 * first place, so doing it on the registration path would re-enter it
+	 * with the association already cleared and recurse; that caller opens
+	 * a socket itself once this returns non-zero.
+	 */
+	if (detach)
+		bfd_session_enable(bs);
+
+	return rv;
+}
+
+int bfd_dplane_update_session(struct bfd_session *bs)
+{
+	return _bfd_dplane_update_session(bs, true);
 }
 
 int bfd_dplane_delete_session(struct bfd_session *bs)

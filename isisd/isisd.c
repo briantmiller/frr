@@ -5,6 +5,7 @@
  * Copyright (C) 2001,2002   Sampo Saaristo
  *                           Tampere University of Technology
  *                           Institute of Communications Engineering
+ * Copyright (C) 2003        Ofer Wald, Hannes Gredler
  */
 
 #include <zebra.h>
@@ -3498,7 +3499,7 @@ void isis_area_lsp_refresh_set(struct isis_area *area, int level,
 DEFUN (log_adj_changes,
        log_adj_changes_cmd,
        "log-adjacency-changes",
-       "Log changes in adjacency state\n")
+       LOG_ADJ_CHANGES_STR)
 {
 	VTY_DECLVAR_CONTEXT(isis_area, area);
 

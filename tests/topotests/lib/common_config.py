@@ -1826,11 +1826,12 @@ def interface_status(tgen, topo, input_dict):
     return True
 
 
-def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75):
+def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75, retry_sleep=2):
     """
     Fixture: Retries function while it's return value is an errormsg (str), False, or it raises an exception.
 
     * `retry_timeout`: Retry for at least this many seconds; after waiting initial_wait seconds
+    * `retry_sleep`: amount in seconds to sleep between attempts
     * `initial_wait`: Sleeps for this many seconds before first executing function
     * `expected`: if False then the return logic is inverted, except for exceptions,
                       (i.e., a False or errmsg (str) function return ends the retry loop,
@@ -1848,8 +1849,6 @@ def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75):
             # We will continue to retry diag_pct of the timeout value to see if test would have passed with a
             # longer retry timeout value.
             saved_failure = None
-
-            retry_sleep = 2
 
             # Allow the wrapped function's args to override the fixtures
             _retry_timeout = kwargs.pop("retry_timeout", retry_timeout)
@@ -1882,7 +1881,7 @@ def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75):
                     negative_result = ret is False or is_string(ret)
                     if negative_result == invert_logic:
                         # Simple case, successful result in time
-                        if not saved_failure:
+                        if saved_failure is None:
                             return ret
 
                         # Positive result, but happened after timeout failure, very important to
@@ -1900,7 +1899,9 @@ def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75):
                     logger.info('Function raised exception: "%s"', repr(error))
                     ret = error
 
-                if seconds_left < 0 and saved_failure:
+                # Use "is not None" so a boolean False failure is preserved; truthiness
+                # checks treat False as unset and re-extend the timeout forever.
+                if seconds_left < 0 and saved_failure is not None:
                     logger.info(
                         "RETRY DIAGNOSTIC: Retry timeout reached, still failing"
                     )
@@ -1927,7 +1928,7 @@ def retry(retry_timeout, initial_wait=0, expected=True, diag_pct=0.75):
                             raise saved_failure
                         return saved_failure
 
-                if saved_failure:
+                if saved_failure is not None:
                     logger.debug(
                         "RETRY DIAG: [failure] Sleeping %ds until next retry with %.1f retry time left - too see if timeout was too short",
                         retry_sleep,

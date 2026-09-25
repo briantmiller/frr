@@ -341,7 +341,7 @@ static int bgp_router_id_set(struct bgp *bgp, const struct in_addr *id,
 
 	vpn_handle_router_id_update(bgp, true, is_config);
 
-	if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
 		bgp_ls_withdraw_all(bgp);
 
 	hook_call(bgp_routerid_update, bgp, true);
@@ -363,7 +363,7 @@ static int bgp_router_id_set(struct bgp *bgp, const struct in_addr *id,
 
 	vpn_handle_router_id_update(bgp, false, is_config);
 
-	if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
 		bgp_ls_export_bgp_topology(bgp);
 
 	hook_call(bgp_routerid_update, bgp, false);
@@ -840,6 +840,22 @@ bool bgp_confederation_peers_check(struct bgp *bgp, as_t as)
 			return true;
 
 	return false;
+}
+
+/*
+ * Return the AS this peer's session should present as our local AS —
+ * the confederation ID for peers outside the confederation, the local
+ * sub-AS for iBGP and confederation-member peers (already tracked in
+ * peer->local_as), or an explicit "neighbor X local-as Y" override
+ * when one is configured and confederation is not. Mirrors the AS
+ * selection in bgp_packet_attribute()'s AS_PATH construction.
+ */
+as_t bgp_local_as_for_peer(struct peer *peer)
+{
+	if (!CHECK_FLAG(peer->bgp->config, BGP_CONFIG_CONFEDERATION) && peer->change_local_as)
+		return peer->change_local_as;
+
+	return peer->local_as;
 }
 
 /* Add an AS to the confederation set.  */
@@ -1770,8 +1786,6 @@ struct peer *peer_new(struct bgp *bgp, union sockunion *su, enum connection_dire
 	peer->cur_event = peer->last_event = peer->last_major_event = 0;
 	peer->bgp = bgp_lock(bgp);
 	peer = peer_lock(peer); /* initial reference */
-	peer->local_role = ROLE_UNDEFINED;
-	peer->remote_role = ROLE_UNDEFINED;
 	peer->password = NULL;
 	peer->max_packet_size = BGP_STANDARD_MESSAGE_MAX_PACKET_SIZE;
 	peer->last_reset = PEER_DOWN_NONE;
@@ -2407,6 +2421,10 @@ void peer_as_change(struct peer *peer, as_t as, enum peer_asn_type as_type,
 		UNSET_FLAG(peer->af_flags[AFI_L2VPN][SAFI_EVPN],
 			   PEER_FLAG_REFLECTOR_CLIENT);
 	}
+
+	/* local-role reset, BGP Roles are for eBGP sessions only */
+	if (newtype != BGP_PEER_EBGP)
+		peer_role_unset(peer);
 }
 
 /* If peer does not exist, create new one.  If peer already exists,
@@ -2460,7 +2478,7 @@ int peer_remote_as(struct bgp *bgp, union sockunion *su, const char *conf_if,
 	return 0;
 }
 
-const char *bgp_get_name_by_role(uint8_t role)
+static const char *bgp_get_name_by_role(uint8_t role)
 {
 	switch (role) {
 	case ROLE_PROVIDER:
@@ -2473,10 +2491,24 @@ const char *bgp_get_name_by_role(uint8_t role)
 		return "customer";
 	case ROLE_PEER:
 		return "peer";
-	case ROLE_UNDEFINED:
-		return "undefined";
 	}
 	return "unknown";
+}
+
+const char *bgp_get_local_role_name(const struct peer *peer)
+{
+	if (!CHECK_FLAG(peer->flags, PEER_FLAG_ROLE))
+		return "undefined";
+
+	return bgp_get_name_by_role(peer->local_role);
+}
+
+const char *bgp_get_remote_role_name(const struct peer *peer)
+{
+	if (!CHECK_FLAG(peer->cap, PEER_CAP_ROLE_RCV))
+		return "undefined";
+
+	return bgp_get_name_by_role(peer->remote_role);
 }
 
 enum asnotation_mode bgp_get_asnotation(struct bgp *bgp)
@@ -4169,12 +4201,32 @@ peer_init:
 	memset(&bgp->ebgprequirespolicywarning, 0,
 	       sizeof(bgp->ebgprequirespolicywarning));
 
-	/* Init peer connection error info */
-	pthread_mutex_init(&bgp->peer_errs_mtx, NULL);
+	/*
+	 * Init peer connection error info.  On the hidden revival path the
+	 * tombstoned instance was never freed: bgp_free(), the only place
+	 * peer_errs_mtx is destroyed, is not reached because bgp_delete()
+	 * keeps the initial reference (skips bgp_unlock()) for a hidden
+	 * instance.  The mutex is therefore still initialized, and
+	 * re-initializing it would be a double pthread_mutex_init() on a live
+	 * mutex - undefined behavior per POSIX, and a leak where
+	 * pthread_mutex_t is heap-allocated (e.g. FreeBSD libthr).
+	 */
+	if (!hidden)
+		pthread_mutex_init(&bgp->peer_errs_mtx, NULL);
 	bgp_peer_conn_errlist_init(&bgp->peer_conn_errlist);
 	bgp_clearing_info_init(&bgp->clearing_list);
 
-	if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+	/*
+	 * The non-hidden path above records the first default instance as the
+	 * EVPN instance (bm->bgp_evpn). That block is skipped on the hidden
+	 * revival path ("goto peer_init"), and bgp_delete() cleared
+	 * bm->bgp_evpn when the instance was tombstoned. Re-record the revived
+	 * default so bgp_get_evpn() keeps returning it.
+	 */
+	if (hidden && inst_type == BGP_INSTANCE_TYPE_DEFAULT && !bgp_get_evpn())
+		bgp_set_evpn(bgp);
+
+	if (bgp->ls_info && bgp->ls_info->enable_distribution)
 		bgp_ls_originate_bgp_node(bgp);
 
 	return bgp;
@@ -4330,7 +4382,7 @@ int bgp_lookup_by_as_name_type(struct bgp **bgp_val, as_t *as, const char *as_pr
 		bgp = bgp_get_default();
 
 	if (bgp) {
-		if (IS_BGP_INSTANCE_HIDDEN(bgp) && *as != AS_UNSPECIFIED)
+		if (IS_BGP_INSTANCE_HIDDEN(bgp) && *as != BGP_AS_ZERO)
 			hidden = true;
 		/* Handle AS number change */
 		if (bgp->as != *as) {
@@ -4992,6 +5044,17 @@ void bgp_free(struct bgp *bgp)
 			bgp_table_finish(&bgp->static_routes[afi][safi]);
 		if (bgp->aggregate[afi][safi])
 			bgp_table_finish(&bgp->aggregate[afi][safi]);
+
+		/* Clean up UPA tracking hash */
+		if (bgp->upa_routes[afi][safi].hh.count > 0) {
+			struct bgp_upa_prefix_entry *entry;
+
+			while ((entry = bgp_upa_prefix_hash_pop(&bgp->upa_routes[afi][safi])))
+				XFREE(MTYPE_BGP_AGGREGATE, entry);
+
+			bgp_upa_prefix_hash_fini(&bgp->upa_routes[afi][safi]);
+		}
+
 		if (bgp->rib[afi][safi])
 			bgp_table_finish(&bgp->rib[afi][safi]);
 		rmap = &bgp->table_map[afi][safi];
@@ -5574,7 +5637,7 @@ static const struct peer_flag_action peer_flag_action_list[] = {
 	{ PEER_FLAG_ROLE_STRICT_MODE, 0, peer_change_none },
 	{ PEER_FLAG_ROLE, 0, peer_change_none },
 	{ PEER_FLAG_PORT, 0, peer_change_reset },
-	{ PEER_FLAG_AIGP, 0, peer_change_none },
+	{ PEER_FLAG_AIGP, 0, peer_change_reset },
 	{ PEER_FLAG_GRACEFUL_SHUTDOWN, 0, peer_change_none },
 	{ PEER_FLAG_CAPABILITY_SOFT_VERSION_OLD, 0, peer_change_none },
 	{ PEER_FLAG_CAPABILITY_SOFT_VERSION_NEW, 0, peer_change_none },
@@ -5627,6 +5690,7 @@ static const struct peer_flag_action peer_af_flag_action_list[] = {
 	{ PEER_FLAG_CONFIG_ENCAPSULATION_SRV6, 0, peer_change_best_path },
 	{ PEER_FLAG_CONFIG_ENCAPSULATION_SRV6_RELAX, 0, peer_change_best_path },
 	{ PEER_FLAG_CONFIG_ENCAPSULATION_MPLS, 0, peer_change_best_path },
+	{ PEER_FLAG_UPA, 1, peer_change_reset_out },
 	{ 0, 0, 0 }
 };
 
@@ -5751,7 +5815,7 @@ static void peer_flag_modify_action(struct peer *peer, uint64_t flag)
 }
 
 /* Enable global administrative shutdown of all peers of BGP instance */
-void bgp_shutdown_enable(struct bgp *bgp, const char *msg)
+void bgp_shutdown_enable(struct bgp *bgp, const char *msg, bool send_notify)
 {
 	struct peer *peer;
 	struct listnode *node;
@@ -5768,14 +5832,22 @@ void bgp_shutdown_enable(struct bgp *bgp, const char *msg)
 
 	/* iterate through peers of BGP instance */
 	for (ALL_LIST_ELEMENTS_RO(bgp->peer, node, peer)) {
-		peer_set_last_reset(peer, PEER_DOWN_USER_SHUTDOWN);
-
 		/* continue, if peer is already in administrative shutdown. */
 		if (CHECK_FLAG(peer->flags, PEER_FLAG_SHUTDOWN))
 			continue;
 
-		/* send a RFC 4486 notification message if necessary */
-		if (BGP_IS_VALID_STATE_FOR_NOTIF(peer->connection->status)) {
+		/*
+		 * Send a RFC 4486 notification message if necessary.
+		 *
+		 * Note that BGP_NOTIFY_CEASE_ADMIN_SHUTDOWN may be converted
+		 * to BGP_NOTIFY_CEASE_HARD_RESET in the notification, and
+		 * would result in GR termination on the receiver.
+		 *
+		 * In a active/standby HA setup, when the node becomes standby,
+		 * the BGP notification should not be sent out in order to
+		 * preserve BGP Graceful Restart state on the receiver.
+		 */
+		if (send_notify && BGP_IS_VALID_STATE_FOR_NOTIF(peer->connection->status)) {
 			if (msg) {
 				size_t datalen = strlen(msg);
 
@@ -5801,10 +5873,16 @@ void bgp_shutdown_enable(struct bgp *bgp, const char *msg)
 
 		/* trigger a RFC 4271 ManualStop event */
 		BGP_EVENT_ADD(peer->connection, BGP_Stop);
+		peer_set_last_reset(peer, PEER_DOWN_USER_SHUTDOWN);
 	}
 
 	/* set the BGP instances shutdown flag */
 	SET_FLAG(bgp->flags, BGP_FLAG_SHUTDOWN);
+
+	if (!send_notify)
+		SET_FLAG(bgp->flags, BGP_FLAG_SHUTDOWN_NO_NOTIFY);
+	else
+		UNSET_FLAG(bgp->flags, BGP_FLAG_SHUTDOWN_NO_NOTIFY);
 }
 
 /* Disable global administrative shutdown of all peers of BGP instance */
@@ -6065,9 +6143,13 @@ static int peer_af_flag_modify(struct peer *peer, afi_t afi, safi_t safi,
 	/* Execute action when peer is established.  */
 	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP) &&
 	    peer_established(peer->connection)) {
-		if (!set && flag == PEER_FLAG_SOFT_RECONFIG)
-			bgp_clear_adj_in(peer, afi, safi);
-		else {
+		if (!set && flag == PEER_FLAG_SOFT_RECONFIG) {
+			/* keep the Adj-RIB-In while another consumer (BMP
+			 * pre-policy monitoring) still needs it
+			 */
+			if (!bgp_adj_in_needed(peer, afi, safi))
+				bgp_clear_adj_in(peer, afi, safi);
+		} else {
 			if (flag == PEER_FLAG_REFLECTOR_CLIENT)
 				peer_set_last_reset(peer, PEER_DOWN_RR_CLIENT_CHANGE);
 			else if (flag == PEER_FLAG_RSERVER_CLIENT)
@@ -6128,9 +6210,14 @@ static int peer_af_flag_modify(struct peer *peer, afi_t afi, safi_t safi,
 
 			/* Execute flag action on peer-group member. */
 			if (peer_established(member->connection)) {
-				if (!set && flag == PEER_FLAG_SOFT_RECONFIG)
-					bgp_clear_adj_in(member, afi, safi);
-				else {
+				if (!set && flag == PEER_FLAG_SOFT_RECONFIG) {
+					/* keep the Adj-RIB-In while another
+					 * consumer (BMP pre-policy monitoring)
+					 * still needs it
+					 */
+					if (!bgp_adj_in_needed(member, afi, safi))
+						bgp_clear_adj_in(member, afi, safi);
+				} else {
 					if (flag == PEER_FLAG_REFLECTOR_CLIENT)
 						peer_set_last_reset(member,
 								    PEER_DOWN_RR_CLIENT_CHANGE);
@@ -6313,102 +6400,59 @@ int peer_role_set(struct peer *peer, uint8_t role, bool strict_mode)
 	struct peer *member;
 	struct listnode *node, *nnode;
 
-	peer_flag_set(peer, PEER_FLAG_ROLE);
-
 	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {
 		if (peer->sort != BGP_PEER_EBGP)
 			return BGP_ERR_INVALID_INTERNAL_ROLE;
 
-		if (peer->local_role == role) {
-			if (CHECK_FLAG(peer->flags,
-				       PEER_FLAG_ROLE_STRICT_MODE) &&
-			    !strict_mode)
-				/* TODO: Is session restart needed if it was
-				 * down?
-				 */
-				UNSET_FLAG(peer->flags,
-					   PEER_FLAG_ROLE_STRICT_MODE);
-			if (!CHECK_FLAG(peer->flags,
-					PEER_FLAG_ROLE_STRICT_MODE) &&
-			    strict_mode) {
-				SET_FLAG(peer->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-				/* Restart session to throw Role Mismatch
-				 * Notification
-				 */
-				if (peer->remote_role == ROLE_UNDEFINED)
-					bgp_session_reset(peer);
-			}
-		} else {
-			peer->local_role = role;
-			if (strict_mode)
-				SET_FLAG(peer->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-			else
-				UNSET_FLAG(peer->flags,
-					   PEER_FLAG_ROLE_STRICT_MODE);
-		}
+		/* Restart the session to throw a Role Mismatch Notification if
+		 * strict mode is being turned on while the peer did not send
+		 * us a Role. Decided before the flag is changed.
+		 */
+		if (strict_mode && !CHECK_FLAG(peer->flags, PEER_FLAG_ROLE_STRICT_MODE) &&
+		    !CHECK_FLAG(peer->cap, PEER_CAP_ROLE_RCV))
+			bgp_session_reset(peer);
+
+		peer_flag_set(peer, PEER_FLAG_ROLE);
+		peer->local_role = role;
+
+		if (strict_mode)
+			peer_flag_set(peer, PEER_FLAG_ROLE_STRICT_MODE);
+		else
+			peer_flag_unset(peer, PEER_FLAG_ROLE_STRICT_MODE);
 
 		return CMD_SUCCESS;
 	}
 
-	peer->local_role = role;
-	for (ALL_LIST_ELEMENTS(peer->group->peer, node, nnode, member)) {
+	/* Validate every member up front, so that a rejected member does not
+	 * leave the group half configured.
+	 */
+	for (ALL_LIST_ELEMENTS(peer->group->peer, node, nnode, member))
 		if (member->sort != BGP_PEER_EBGP)
 			return BGP_ERR_INVALID_INTERNAL_ROLE;
 
-		if (member->local_role == role) {
-			if (CHECK_FLAG(member->flags,
-				       PEER_FLAG_ROLE_STRICT_MODE) &&
-			    !strict_mode)
-				/* TODO: Is session restart needed if it was
-				 * down?
-				 */
-				UNSET_FLAG(member->flags,
-					   PEER_FLAG_ROLE_STRICT_MODE);
-			if (!CHECK_FLAG(member->flags,
-					PEER_FLAG_ROLE_STRICT_MODE) &&
-			    strict_mode) {
-				SET_FLAG(peer->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-				SET_FLAG(member->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-				/* Restart session to throw Role Mismatch
-				 * Notification
-				 */
-				if (member->remote_role == ROLE_UNDEFINED)
-					bgp_session_reset(member);
-			}
-		} else {
-			member->local_role = role;
+	for (ALL_LIST_ELEMENTS(peer->group->peer, node, nnode, member)) {
+		member->local_role = role;
 
-			if (strict_mode) {
-				SET_FLAG(peer->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-				SET_FLAG(member->flags,
-					 PEER_FLAG_ROLE_STRICT_MODE);
-			} else {
-				UNSET_FLAG(member->flags,
-					   PEER_FLAG_ROLE_STRICT_MODE);
-			}
-		}
+		if (strict_mode && !CHECK_FLAG(member->flags, PEER_FLAG_ROLE_STRICT_MODE) &&
+		    !CHECK_FLAG(member->cap, PEER_CAP_ROLE_RCV))
+			bgp_session_reset(member);
 	}
+
+	peer_flag_set(peer, PEER_FLAG_ROLE);
+	peer->local_role = role;
+
+	if (strict_mode)
+		peer_flag_set(peer, PEER_FLAG_ROLE_STRICT_MODE);
+	else
+		peer_flag_unset(peer, PEER_FLAG_ROLE_STRICT_MODE);
 
 	return CMD_SUCCESS;
 }
 
 int peer_role_unset(struct peer *peer)
 {
-	struct peer *member;
-	struct listnode *node, *nnode;
-
 	peer_flag_unset(peer, PEER_FLAG_ROLE);
-
-	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP))
-		return peer_role_set(peer, ROLE_UNDEFINED, 0);
-
-	for (ALL_LIST_ELEMENTS(peer->group->peer, node, nnode, member))
-		peer_role_set(member, ROLE_UNDEFINED, 0);
+	peer_flag_unset(peer, PEER_FLAG_ROLE_STRICT_MODE);
 
 	return CMD_SUCCESS;
 }
@@ -6952,8 +6996,14 @@ void peer_on_policy_change(struct peer *peer, afi_t afi, safi_t safi,
 			return;
 
 		if (CHECK_FLAG(peer->cap, PEER_CAP_REFRESH_RCV))
-			bgp_route_refresh_send(peer->connection, afi, safi, 0, 0, 0,
-					       BGP_ROUTE_REFRESH_NORMAL);
+			/*
+			 * Use the ORF-aware soft-clear so that if this peer
+			 * previously sent an ORF (PEER_STATUS_ORF_PREFIX_SEND)
+			 * and the inbound prefix-list has just been removed, a
+			 * REMOVE_ALL ORF is sent to the remote peer instead of
+			 * a plain route-refresh.
+			 */
+			peer_clear_soft(peer, afi, safi, BGP_CLEAR_SOFT_IN_ORF_PREFIX);
 	}
 }
 
@@ -9389,11 +9439,7 @@ int peer_clear_soft(struct peer *peer, afi_t afi, safi_t safi,
 		    CHECK_FLAG(peer->af_cap[afi][safi],
 			       PEER_CAP_ORF_PREFIX_RM_RCV)) {
 			struct bgp_filter *filter = &peer->filter[afi][safi];
-			uint8_t prefix_type;
-
-			if (CHECK_FLAG(peer->af_cap[afi][safi],
-				       PEER_CAP_ORF_PREFIX_RM_RCV))
-				prefix_type = ORF_TYPE_PREFIX;
+			uint8_t prefix_type = ORF_TYPE_PREFIX;
 
 			if (filter->plist[FILTER_IN].plist) {
 				if (CHECK_FLAG(peer->af_sflags[afi][safi],

@@ -73,7 +73,11 @@ struct vrf *vrf_lookup_by_name(const char *name)
 
 static __inline int vrf_id_compare(const struct vrf *a, const struct vrf *b)
 {
-	return (a->vrf_id - b->vrf_id);
+	if (a->vrf_id > b->vrf_id)
+		return 1;
+	if (a->vrf_id < b->vrf_id)
+		return -1;
+	return 0;
 }
 
 static int vrf_name_compare(const struct vrf *a, const struct vrf *b)
@@ -937,9 +941,13 @@ static int lib_vrf_destroy(struct nb_cb_destroy_args *args)
 	switch (args->event) {
 	case NB_EV_VALIDATE:
 		vrfp = nb_running_get_entry(args->dnode, NULL, true);
-		if (CHECK_FLAG(vrfp->status, VRF_ACTIVE)) {
+		/* Kernel-backed VRFs are unconfigured in APPLY, not rejected
+		 * here. Reject only the default VRF: it is always active and
+		 * vrf_delete() must not run against it.
+		 */
+		if (vrfp && strcmp(vrfp->name, VRF_DEFAULT_NAME) == 0) {
 			snprintf(args->errmsg, args->errmsg_len,
-				 "Only inactive VRFs can be deleted");
+				 "Default VRF cannot be deleted");
 			return NB_ERR_VALIDATION;
 		}
 		break;
@@ -948,9 +956,18 @@ static int lib_vrf_destroy(struct nb_cb_destroy_args *args)
 		break;
 	case NB_EV_APPLY:
 		vrfp = nb_running_unset_entry(args->dnode);
+		if (!vrfp)
+			return NB_OK;
 
-		/* Clear configured flag and invoke delete. */
 		UNSET_FLAG(vrfp->status, VRF_CONFIGURED);
+		/* vrf_delete() calls vrf_disable() when the VRF is enabled.
+		 * That must not run while the kernel device is still up:
+		 * drop FRR configuration only and leave the object in place.
+		 */
+		if (CHECK_FLAG(vrfp->status, VRF_ACTIVE) ||
+		    vrf_is_enabled(vrfp))
+			return NB_OK;
+
 		vrf_delete(vrfp);
 		break;
 	}

@@ -32,11 +32,8 @@
 #include "pcep_utils_logging.h"
 #include "pcep_utils_memory.h"
 
-void write_tlv_header(struct pcep_object_tlv_header *tlv_hdr,
-		      uint16_t tlv_length, struct pcep_versioning *versioning,
-		      uint8_t *buf);
-void pcep_decode_tlv_hdr(const uint8_t *tlv_buf,
-			 struct pcep_object_tlv_header *tlv_hdr);
+void write_tlv_header(struct pcep_object_tlv_header *tlv_hdr, uint16_t tlv_length,
+		      struct pcep_versioning *versioning, uint8_t *buf);
 
 /*
  * forward declarations for initialize_tlv_encoders()
@@ -81,6 +78,9 @@ uint16_t
 pcep_encode_tlv_path_setup_type_capability(struct pcep_object_tlv_header *tlv,
 					   struct pcep_versioning *versioning,
 					   uint8_t *tlv_body_buf);
+static uint16_t pcep_encode_tlv_te_path_binding(struct pcep_object_tlv_header *tlv,
+						struct pcep_versioning *versioning,
+						uint8_t *tlv_body_buf);
 uint16_t pcep_encode_tlv_pol_id(struct pcep_object_tlv_header *tlv,
 				struct pcep_versioning *versioning,
 				uint8_t *tlv_body_buf);
@@ -111,32 +111,24 @@ typedef uint16_t (*tlv_encoder_funcptr)(struct pcep_object_tlv_header *,
 #define PCEP_TLV_ENCODERS_ARGS                                                 \
 	struct pcep_object_tlv_header *, struct pcep_versioning *versioning,   \
 		uint8_t *tlv_body_buf
-uint16_t (*const tlv_encoders[MAX_TLV_ENCODER_INDEX])(
-	PCEP_TLV_ENCODERS_ARGS) = {
+uint16_t (*const tlv_encoders[MAX_TLV_ENCODER_INDEX])(PCEP_TLV_ENCODERS_ARGS) = {
 	[PCEP_OBJ_TLV_TYPE_NO_PATH_VECTOR] = pcep_encode_tlv_no_path_vector,
-	[PCEP_OBJ_TLV_TYPE_STATEFUL_PCE_CAPABILITY] =
-		pcep_encode_tlv_stateful_pce_capability,
-	[PCEP_OBJ_TLV_TYPE_SYMBOLIC_PATH_NAME] =
-		pcep_encode_tlv_symbolic_path_name,
-	[PCEP_OBJ_TLV_TYPE_IPV4_LSP_IDENTIFIERS] =
-		pcep_encode_tlv_ipv4_lsp_identifiers,
-	[PCEP_OBJ_TLV_TYPE_IPV6_LSP_IDENTIFIERS] =
-		pcep_encode_tlv_ipv6_lsp_identifiers,
+	[PCEP_OBJ_TLV_TYPE_STATEFUL_PCE_CAPABILITY] = pcep_encode_tlv_stateful_pce_capability,
+	[PCEP_OBJ_TLV_TYPE_SYMBOLIC_PATH_NAME] = pcep_encode_tlv_symbolic_path_name,
+	[PCEP_OBJ_TLV_TYPE_IPV4_LSP_IDENTIFIERS] = pcep_encode_tlv_ipv4_lsp_identifiers,
+	[PCEP_OBJ_TLV_TYPE_IPV6_LSP_IDENTIFIERS] = pcep_encode_tlv_ipv6_lsp_identifiers,
 	[PCEP_OBJ_TLV_TYPE_LSP_ERROR_CODE] = pcep_encode_tlv_lsp_error_code,
 	[PCEP_OBJ_TLV_TYPE_RSVP_ERROR_SPEC] = pcep_encode_tlv_rsvp_error_spec,
 	[PCEP_OBJ_TLV_TYPE_LSP_DB_VERSION] = pcep_encode_tlv_lsp_db_version,
-	[PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID] =
-		pcep_encode_tlv_speaker_entity_id,
-	[PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY] =
-		pcep_encode_tlv_sr_pce_capability,
+	[PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID] = pcep_encode_tlv_speaker_entity_id,
+	[PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY] = pcep_encode_tlv_sr_pce_capability,
 	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE] = pcep_encode_tlv_path_setup_type,
-	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY] =
-		pcep_encode_tlv_path_setup_type_capability,
+	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY] = pcep_encode_tlv_path_setup_type_capability,
+	[PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING] = pcep_encode_tlv_te_path_binding,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_ID] = pcep_encode_tlv_pol_id,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_NAME] = pcep_encode_tlv_pol_name,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_ID] = pcep_encode_tlv_cpath_id,
-	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_PREFERENCE] =
-		pcep_encode_tlv_cpath_preference,
+	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_PREFERENCE] = pcep_encode_tlv_cpath_preference,
 	[PCEP_OBJ_TLV_TYPE_VENDOR_INFO] = pcep_encode_tlv_vendor_info,
 	[PCEP_OBJ_TLV_TYPE_ARBITRARY] = pcep_encode_tlv_arbitrary,
 	[PCEP_OBJ_TLV_TYPE_OBJECTIVE_FUNCTION_LIST] = pcep_encode_tlv_of_list,
@@ -180,8 +172,10 @@ pcep_decode_tlv_path_setup_type(struct pcep_object_tlv_header *tlv_hdr,
 struct pcep_object_tlv_header *pcep_decode_tlv_path_setup_type_capability(
 	struct pcep_object_tlv_header *tlv_hdr, const uint8_t *tlv_body_buf);
 struct pcep_object_tlv_header *
-pcep_decode_tlv_pol_id(struct pcep_object_tlv_header *tlv_hdr,
-		       const uint8_t *tlv_body_buf);
+pcep_decode_tlv_te_path_binding(struct pcep_object_tlv_header *tlv_hdr,
+				const uint8_t *tlv_body_buf);
+struct pcep_object_tlv_header *pcep_decode_tlv_pol_id(struct pcep_object_tlv_header *tlv_hdr,
+						      const uint8_t *tlv_body_buf);
 struct pcep_object_tlv_header *
 pcep_decode_tlv_pol_name(struct pcep_object_tlv_header *tlv_hdr,
 			 const uint8_t *tlv_body_buf);
@@ -211,29 +205,22 @@ typedef struct pcep_object_tlv_header *(*tlv_decoder_funcptr)(
 struct pcep_object_tlv_header *(*const tlv_decoders[MAX_TLV_ENCODER_INDEX])(
 	PCEP_TLV_DECODERS_ARGS) = {
 	[PCEP_OBJ_TLV_TYPE_NO_PATH_VECTOR] = pcep_decode_tlv_no_path_vector,
-	[PCEP_OBJ_TLV_TYPE_STATEFUL_PCE_CAPABILITY] =
-		pcep_decode_tlv_stateful_pce_capability,
-	[PCEP_OBJ_TLV_TYPE_SYMBOLIC_PATH_NAME] =
-		pcep_decode_tlv_symbolic_path_name,
-	[PCEP_OBJ_TLV_TYPE_IPV4_LSP_IDENTIFIERS] =
-		pcep_decode_tlv_ipv4_lsp_identifiers,
-	[PCEP_OBJ_TLV_TYPE_IPV6_LSP_IDENTIFIERS] =
-		pcep_decode_tlv_ipv6_lsp_identifiers,
+	[PCEP_OBJ_TLV_TYPE_STATEFUL_PCE_CAPABILITY] = pcep_decode_tlv_stateful_pce_capability,
+	[PCEP_OBJ_TLV_TYPE_SYMBOLIC_PATH_NAME] = pcep_decode_tlv_symbolic_path_name,
+	[PCEP_OBJ_TLV_TYPE_IPV4_LSP_IDENTIFIERS] = pcep_decode_tlv_ipv4_lsp_identifiers,
+	[PCEP_OBJ_TLV_TYPE_IPV6_LSP_IDENTIFIERS] = pcep_decode_tlv_ipv6_lsp_identifiers,
 	[PCEP_OBJ_TLV_TYPE_LSP_ERROR_CODE] = pcep_decode_tlv_lsp_error_code,
 	[PCEP_OBJ_TLV_TYPE_RSVP_ERROR_SPEC] = pcep_decode_tlv_rsvp_error_spec,
 	[PCEP_OBJ_TLV_TYPE_LSP_DB_VERSION] = pcep_decode_tlv_lsp_db_version,
-	[PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID] =
-		pcep_decode_tlv_speaker_entity_id,
-	[PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY] =
-		pcep_decode_tlv_sr_pce_capability,
+	[PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID] = pcep_decode_tlv_speaker_entity_id,
+	[PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY] = pcep_decode_tlv_sr_pce_capability,
 	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE] = pcep_decode_tlv_path_setup_type,
-	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY] =
-		pcep_decode_tlv_path_setup_type_capability,
+	[PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY] = pcep_decode_tlv_path_setup_type_capability,
+	[PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING] = pcep_decode_tlv_te_path_binding,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_ID] = pcep_decode_tlv_pol_id,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_NAME] = pcep_decode_tlv_pol_name,
 	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_ID] = pcep_decode_tlv_cpath_id,
-	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_PREFERENCE] =
-		pcep_decode_tlv_cpath_preference,
+	[PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_PREFERENCE] = pcep_decode_tlv_cpath_preference,
 	[PCEP_OBJ_TLV_TYPE_VENDOR_INFO] = pcep_decode_tlv_vendor_info,
 	[PCEP_OBJ_TLV_TYPE_ARBITRARY] = pcep_decode_tlv_arbitrary,
 	[PCEP_OBJ_TLV_TYPE_OBJECTIVE_FUNCTION_LIST] = pcep_decode_tlv_of_list,
@@ -630,14 +617,15 @@ uint16_t pcep_encode_tlv_path_setup_type(struct pcep_object_tlv_header *tlv,
 	return LENGTH_1WORD;
 }
 
-uint16_t
-pcep_encode_tlv_path_setup_type_capability(struct pcep_object_tlv_header *tlv,
-					   struct pcep_versioning *versioning,
-					   uint8_t *tlv_body_buf)
+uint16_t pcep_encode_tlv_path_setup_type_capability(struct pcep_object_tlv_header *tlv,
+						    struct pcep_versioning *vers,
+						    uint8_t *tlv_body_buf)
 {
-	(void)versioning;
+	uint16_t pst_length;
 	struct pcep_object_tlv_path_setup_type_capability *pst_cap =
 		(struct pcep_object_tlv_path_setup_type_capability *)tlv;
+	(void)vers;
+
 	if (pst_cap->pst_list == NULL) {
 		return 0;
 	}
@@ -651,28 +639,68 @@ pcep_encode_tlv_path_setup_type_capability(struct pcep_object_tlv_header *tlv,
 		tlv_body_buf[index++] = *((uint8_t *)node->data);
 	}
 
-	uint16_t pst_length = normalize_pcep_tlv_length(
-		LENGTH_1WORD + pst_cap->pst_list->num_entries);
-	if (pst_cap->sub_tlv_list == NULL) {
+	/* If there are no sub-TLVS, any padding needed for the PSTs
+	 * should not be included in the tlv header length
+	 */
+	pst_length = LENGTH_1WORD + pst_cap->pst_list->num_entries;
+	if (pst_cap->sub_tlv_list == NULL || pst_cap->sub_tlv_list->num_entries == 0) {
 		return pst_length;
 	}
 
-	/* Any padding used for the PSTs should not be included in the tlv
-	 * header length */
-	index = normalize_pcep_tlv_length(index);
-	uint16_t sub_tlvs_length = 0;
+	/* Pad PST list, then start sub-TLVs */
+	pst_length = normalize_pcep_tlv_length(pst_length);
+
+	index = pst_length;
+	uint16_t sub_tlvs_total = 0;
 	node = pst_cap->sub_tlv_list->head;
 	for (; node != NULL; node = node->next_node) {
-		struct pcep_object_tlv_header *sub_tlv =
-			(struct pcep_object_tlv_header *)node->data;
-		uint16_t sub_tlv_length = pcep_encode_tlv(sub_tlv, versioning,
-							  tlv_body_buf + index);
-		index += sub_tlv_length;
-		sub_tlvs_length += sub_tlv_length;
+		struct pcep_object_tlv_header *sub_tlv = node->data;
+		uint16_t sub_length = pcep_encode_tlv(sub_tlv, vers, tlv_body_buf + index);
+
+		/* Each sub-TLV is padded - except the last one */
+		if (node->next_node) {
+			sub_length = normalize_pcep_tlv_length(sub_length);
+			index += sub_length;
+			sub_tlvs_total += sub_length;
+		} else {
+			index += sub_length;
+			sub_tlvs_total += sub_length;
+		}
 	}
 
-	return sub_tlvs_length + pst_length;
+	return sub_tlvs_total + pst_length;
 }
+
+uint16_t pcep_encode_tlv_te_path_binding(struct pcep_object_tlv_header *tlv,
+					 struct pcep_versioning *versioning, uint8_t *tlv_body_buf)
+{
+	(void)versioning;
+	struct pcep_object_tlv_te_path_binding *binding =
+		(struct pcep_object_tlv_te_path_binding *)tlv;
+
+	memset(tlv_body_buf, 0, 4);
+	tlv_body_buf[0] = binding->type;
+	tlv_body_buf[1] = binding->flags;
+
+	mpls_label_t label;
+
+	switch (binding->type) {
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS:
+		label = binding->value.label;
+		label = label << 12;
+		label = htonl(label);
+		memcpy(tlv_body_buf + 4, &label, 4);
+		return 7;
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6:
+		memcpy(tlv_body_buf + 4, &binding->value.segment, sizeof(binding->value.segment));
+		return 20;
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS_ENTRY:
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6_BEHAVIOR:
+	default:
+		return 0;
+	}
+}
+
 uint16_t pcep_encode_tlv_pol_id(struct pcep_object_tlv_header *tlv,
 				struct pcep_versioning *versioning,
 				uint8_t *tlv_body_buf)
@@ -720,7 +748,7 @@ uint16_t pcep_encode_tlv_cpath_id(struct pcep_object_tlv_header *tlv,
 	encode_ipv6(&cpath_id_tlv->orig_addres, &uint32_ptr[2]);
 	uint32_ptr[6] = htonl(cpath_id_tlv->discriminator);
 
-	return sizeof(cpath_id_tlv->proto) + sizeof(cpath_id_tlv->orig_asn)
+	return sizeof(uint32_t) + sizeof(cpath_id_tlv->orig_asn)
 	       + sizeof(cpath_id_tlv->orig_addres)
 	       + sizeof(cpath_id_tlv->discriminator);
 }
@@ -762,7 +790,7 @@ uint16_t pcep_encode_tlv_arbitrary(struct pcep_object_tlv_header *tlv,
 	struct pcep_object_tlv_arbitrary *tlv_arbitrary =
 		(struct pcep_object_tlv_arbitrary *)tlv;
 	memcpy(tlv_body_buf, tlv_arbitrary->data, tlv_arbitrary->data_length);
-	tlv->type = tlv_arbitrary->arbitraty_type;
+	tlv->type = tlv_arbitrary->arbitrary_type;
 
 	return tlv_arbitrary->data_length;
 }
@@ -860,9 +888,14 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_no_path_vector(struct pcep_object_tlv_header *tlv_hdr,
 			       const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_nopath_vector *tlv =
-		(struct pcep_object_tlv_nopath_vector *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_nopath_vector));
+	struct pcep_object_tlv_nopath_vector *tlv;
+
+	/* RFC5440, section 7.5 */
+	if (tlv_hdr->encoded_tlv_length != LENGTH_1WORD)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_nopath_vector));
 
 	tlv->error_code = ntohl(*((uint32_t *)tlv_body_buf));
 
@@ -873,12 +906,14 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_stateful_pce_capability(struct pcep_object_tlv_header *tlv_hdr,
 					const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_stateful_pce_capability *tlv =
-		(struct pcep_object_tlv_stateful_pce_capability *)
-			common_tlv_create(
-				tlv_hdr,
-				sizeof(struct
-				       pcep_object_tlv_stateful_pce_capability));
+	struct pcep_object_tlv_stateful_pce_capability *tlv;
+
+	/* RFC8231, section 7.1.1 */
+	if (tlv_hdr->encoded_tlv_length != LENGTH_1WORD)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_stateful_pce_capability));
 
 	tlv->flag_f_triggered_initial_sync =
 		(tlv_body_buf[3] & TLV_STATEFUL_PCE_CAP_FLAG_F);
@@ -900,12 +935,16 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_symbolic_path_name(struct pcep_object_tlv_header *tlv_hdr,
 				   const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_symbolic_path_name *tlv =
-		(struct pcep_object_tlv_symbolic_path_name *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_symbolic_path_name));
-
+	struct pcep_object_tlv_symbolic_path_name *tlv;
 	uint16_t length = tlv_hdr->encoded_tlv_length;
+
+	/* RFC8231 7.3.2 */
+	if (length == 0)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_symbolic_path_name));
+
 	if (length > MAX_SYMBOLIC_PATH_NAME) {
 		/* TODO should we also reset the tlv_hdr->encoded_tlv_length ?
 		 */
@@ -924,15 +963,75 @@ pcep_decode_tlv_symbolic_path_name(struct pcep_object_tlv_header *tlv_hdr,
 }
 
 struct pcep_object_tlv_header *
+pcep_decode_tlv_te_path_binding(struct pcep_object_tlv_header *tlv_hdr, const uint8_t *tlv_body_buf)
+{
+	struct pcep_object_tlv_te_path_binding *tlv = (struct pcep_object_tlv_te_path_binding *)
+		common_tlv_create(tlv_hdr, sizeof(struct pcep_object_tlv_te_path_binding));
+
+	uint16_t length = tlv_hdr->encoded_tlv_length;
+
+	// Invalid TLV, missing data
+	if (length < LENGTH_1WORD) {
+		pcep_log(LOG_INFO, "%s: Decoding PATH BINDING Error Spec TLV, invalid length [%d]",
+			 __func__, length);
+		pcep_obj_free_tlv((struct pcep_object_tlv_header *)tlv);
+		return NULL;
+	}
+
+	tlv->type = tlv_body_buf[0];
+	tlv->tlv_length = length;
+	tlv->flags = tlv_body_buf[1];
+	const uint8_t *data = tlv_body_buf + LENGTH_1WORD;
+
+	switch (tlv->type) {
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS:
+		if (length != 7) {
+			pcep_log(LOG_INFO,
+				 "%s: Decoding PATH BINDING Error Spec TLV for type [%d], invalid length [%d]",
+				 __func__, tlv->type, length);
+			pcep_obj_free_tlv((struct pcep_object_tlv_header *)tlv);
+			return NULL;
+		}
+		memcpy(&tlv->value.label, data, sizeof(tlv->value.label));
+		tlv->value.label = ntohl(tlv->value.label);
+		tlv->value.label = (tlv->value.label >> 12);
+		break;
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6:
+		if (length != 20) {
+			pcep_log(LOG_INFO,
+				 "%s: Decoding PATH BINDING Error Spec TLV for type [%d], invalid length [%d]",
+				 __func__, tlv->type, length);
+			pcep_obj_free_tlv((struct pcep_object_tlv_header *)tlv);
+			return NULL;
+		}
+		memcpy(&tlv->value.segment, data, sizeof(tlv->value.segment));
+		break;
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS_ENTRY:
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6_BEHAVIOR:
+		/* Unsupported, skip */
+		break;
+	}
+
+	pcep_log(LOG_INFO, "%s: Decoded Path binding TLV, with binding type %u.", __func__,
+		 tlv->type);
+
+	return (struct pcep_object_tlv_header *)tlv;
+}
+
+struct pcep_object_tlv_header *
 pcep_decode_tlv_ipv4_lsp_identifiers(struct pcep_object_tlv_header *tlv_hdr,
 				     const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_ipv4_lsp_identifier *tlv =
-		(struct pcep_object_tlv_ipv4_lsp_identifier *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_ipv4_lsp_identifier));
-
+	struct pcep_object_tlv_ipv4_lsp_identifier *tlv;
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
+
+	/* RFC8231, section 7.3.1 */
+	if (tlv_hdr->encoded_tlv_length != 4 * LENGTH_1WORD)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_ipv4_lsp_identifier));
+
 	tlv->ipv4_tunnel_sender.s_addr = uint32_ptr[0];
 	/* uint32_t[1] is lsp_id and tunnel_id, below */
 	tlv->extended_tunnel_id.s_addr = uint32_ptr[2];
@@ -949,12 +1048,16 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_ipv6_lsp_identifiers(struct pcep_object_tlv_header *tlv_hdr,
 				     const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_ipv6_lsp_identifier *tlv =
-		(struct pcep_object_tlv_ipv6_lsp_identifier *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_ipv6_lsp_identifier));
-
+	struct pcep_object_tlv_ipv6_lsp_identifier *tlv;
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
+
+	/* RFC8231, section 7.3.1 */
+	if (tlv_hdr->encoded_tlv_length != 13 * LENGTH_1WORD)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_ipv6_lsp_identifier));
+
 	decode_ipv6(uint32_ptr, &tlv->ipv6_tunnel_sender);
 	decode_ipv6(uint32_ptr + 5, &tlv->extended_tunnel_id);
 	decode_ipv6(uint32_ptr + 9, &tlv->ipv6_tunnel_endpoint);
@@ -970,9 +1073,14 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_lsp_error_code(struct pcep_object_tlv_header *tlv_hdr,
 			       const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_lsp_error_code *tlv =
-		(struct pcep_object_tlv_lsp_error_code *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_lsp_error_code));
+	struct pcep_object_tlv_lsp_error_code *tlv;
+
+	/* RFC8231, section 7.3.3 */
+	if (tlv_hdr->encoded_tlv_length != LENGTH_1WORD)
+		return NULL;
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_lsp_error_code));
 
 	tlv->lsp_error_code = ntohl(*((uint32_t *)tlv_body_buf));
 
@@ -983,8 +1091,20 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_rsvp_error_spec(struct pcep_object_tlv_header *tlv_hdr,
 				const uint8_t *tlv_body_buf)
 {
-	uint8_t class_num = tlv_body_buf[2];
-	uint8_t ctype = tlv_body_buf[3];
+	struct pcep_object_tlv_rsvp_error_spec *tlv;
+	uint8_t class_num, ctype;
+
+	/* RFC8231 7.3.4
+	 * Must include the RSVP object header (4)
+	 */
+	if (tlv_hdr->encoded_tlv_length < LENGTH_1WORD) {
+		pcep_log(LOG_INFO, "%s: Decoding RSVP Error Spec TLV, invalid length [%d]",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	class_num = tlv_body_buf[2];
+	ctype = tlv_body_buf[3];
 
 	if (class_num != RSVP_ERROR_SPEC_CLASS_NUM) {
 		pcep_log(
@@ -1002,22 +1122,36 @@ pcep_decode_tlv_rsvp_error_spec(struct pcep_object_tlv_header *tlv_hdr,
 		return NULL;
 	}
 
-	struct pcep_object_tlv_rsvp_error_spec *tlv =
-		(struct pcep_object_tlv_rsvp_error_spec *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_rsvp_error_spec));
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_rsvp_error_spec));
 
 	tlv->class_num = class_num;
 	tlv->c_type = ctype;
 
 	uint32_t *uint32_ptr = (uint32_t *)(tlv_body_buf + LENGTH_1WORD);
+
 	if (ctype == RSVP_ERROR_SPEC_IPV4_CTYPE) {
+		if (tlv_hdr->encoded_tlv_length != 12) {
+			pcep_log(LOG_INFO,
+				 "%s: Decoding RSVP Error Spec TLV, type %d, invalid length [%d]",
+				 __func__, ctype, tlv_hdr->encoded_tlv_length);
+			pcep_obj_free_tlv((struct pcep_object_tlv_header *)tlv);
+			return NULL;
+		}
+
 		tlv->error_spec_ip.ipv4_error_node_address.s_addr = *uint32_ptr;
 		tlv->error_code = tlv_body_buf[LENGTH_2WORDS + 1];
 		tlv->error_value = ntohs(
 			*((uint16_t *)(tlv_body_buf + LENGTH_2WORDS + 2)));
-	} else /* RSVP_ERROR_SPEC_IPV6_CTYPE */
-	{
+	} else { /* RSVP_ERROR_SPEC_IPV6_CTYPE */
+		if (tlv_hdr->encoded_tlv_length != 24) {
+			pcep_log(LOG_INFO,
+				 "%s: Decoding RSVP Error Spec TLV, type %d, invalid length [%d]",
+				 __func__, ctype, tlv_hdr->encoded_tlv_length);
+			pcep_obj_free_tlv((struct pcep_object_tlv_header *)tlv);
+			return NULL;
+		}
+
 		decode_ipv6(uint32_ptr,
 			    &tlv->error_spec_ip.ipv6_error_node_address);
 		tlv->error_code = tlv_body_buf[LENGTH_5WORDS + 1];
@@ -1032,9 +1166,17 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_lsp_db_version(struct pcep_object_tlv_header *tlv_hdr,
 			       const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_lsp_db_version *tlv =
-		(struct pcep_object_tlv_lsp_db_version *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_lsp_db_version));
+	struct pcep_object_tlv_lsp_db_version *tlv;
+
+	/* RFC8232, 3.3.1 */
+	if (tlv_hdr->encoded_tlv_length != 8) {
+		pcep_log(LOG_INFO, "%s: Decoding LSP DB Version TLV, invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_lsp_db_version));
 
 	tlv->lsp_db_version = be64toh(*((uint64_t *)tlv_body_buf));
 
@@ -1045,12 +1187,19 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_speaker_entity_id(struct pcep_object_tlv_header *tlv_hdr,
 				  const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_speaker_entity_identifier *tlv =
-		(struct pcep_object_tlv_speaker_entity_identifier *)
-			common_tlv_create(
-				tlv_hdr,
-				sizeof(struct
-				       pcep_object_tlv_speaker_entity_identifier));
+	struct pcep_object_tlv_speaker_entity_identifier *tlv;
+	int i;
+
+	/* RFC8232, 3.3.2 */
+	if (tlv_hdr->encoded_tlv_length == 0) {
+		pcep_log(LOG_INFO,
+			 "%s: Decode Speaker Entity ID, invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_speaker_entity_identifier));
 
 	uint8_t num_entity_ids = tlv_hdr->encoded_tlv_length / LENGTH_1WORD;
 	if (num_entity_ids > MAX_ITERATIONS) {
@@ -1063,7 +1212,7 @@ pcep_decode_tlv_speaker_entity_id(struct pcep_object_tlv_header *tlv_hdr,
 
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
 	tlv->speaker_entity_id_list = dll_initialize();
-	int i;
+
 	for (i = 0; i < num_entity_ids; i++) {
 		uint32_t *entity_id =
 			pceplib_malloc(PCEPLIB_MESSAGES, sizeof(uint32_t));
@@ -1078,10 +1227,18 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_sr_pce_capability(struct pcep_object_tlv_header *tlv_hdr,
 				  const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_sr_pce_capability *tlv =
-		(struct pcep_object_tlv_sr_pce_capability *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_sr_pce_capability));
+	struct pcep_object_tlv_sr_pce_capability *tlv;
+
+	/* RFC8664, 4.1.2 */
+	if (tlv_hdr->encoded_tlv_length != 4) {
+		pcep_log(LOG_INFO,
+			 "%s: Decode SR PCE Capability TLV, invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_sr_pce_capability));
 
 	tlv->flag_n = (tlv_body_buf[2] & TLV_SR_PCE_CAP_FLAG_N);
 	tlv->flag_x = (tlv_body_buf[2] & TLV_SR_PCE_CAP_FLAG_X);
@@ -1094,10 +1251,19 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_path_setup_type(struct pcep_object_tlv_header *tlv_hdr,
 				const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_path_setup_type *tlv =
-		(struct pcep_object_tlv_path_setup_type *)common_tlv_create(
-			tlv_hdr,
-			sizeof(struct pcep_object_tlv_path_setup_type));
+	struct pcep_object_tlv_path_setup_type *tlv;
+
+
+	/* RFC8408, section 4 */
+	if (tlv_hdr->encoded_tlv_length != 4) {
+		pcep_log(LOG_INFO,
+			 "%s: Decode Path Setup Type TLV, invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_path_setup_type));
 
 	tlv->path_setup_type = tlv_body_buf[3];
 
@@ -1107,18 +1273,18 @@ pcep_decode_tlv_path_setup_type(struct pcep_object_tlv_header *tlv_hdr,
 struct pcep_object_tlv_header *pcep_decode_tlv_path_setup_type_capability(
 	struct pcep_object_tlv_header *tlv_hdr, const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_path_setup_type_capability *tlv =
-		(struct pcep_object_tlv_path_setup_type_capability *)
-			common_tlv_create(
-				tlv_hdr,
-				sizeof(struct
-				       pcep_object_tlv_path_setup_type_capability));
+	struct pcep_object_tlv_path_setup_type_capability *tlv = (void *)
+		common_tlv_create(tlv_hdr,
+				  sizeof(struct pcep_object_tlv_path_setup_type_capability));
 	bool error_p = false;
 	uint16_t len = tlv->header.encoded_tlv_length;
 	int i;
 	uint8_t num_psts;
 	uint16_t buf_index;
 	uint8_t num_iterations;
+	struct pcep_object_tlv_header sub_hdr;
+	struct pcep_object_tlv_header *sub_tlv;
+	uint16_t norm_len;
 
 	/* RFC 8408 Section 3, RFC 8664 Section 4.1.1, 4.1.2 */
 
@@ -1162,32 +1328,71 @@ struct pcep_object_tlv_header *pcep_decode_tlv_path_setup_type_capability(
 		dll_append(tlv->pst_list, pst);
 	}
 
-	/* If no sub-tlvs, all done */
-	if (tlv->header.encoded_tlv_length == (LENGTH_1WORD + num_psts))
+	/* If no sub-tlvs follow the PSTs, all done
+	 * RFC8408, section 3
+	 */
+	if (tlv->header.encoded_tlv_length == LENGTH_1WORD + num_psts)
 		goto done;
 
-	/* Compute padded length for start of subtlvs */
+	/* Compute padded length of types for start of sub-TLVs */
 	buf_index = normalize_pcep_tlv_length(LENGTH_1WORD + num_psts);
-	num_iterations = 0;
 
-	/* If we have sub-TLVs, they must be included in the overall length */
-	if (buf_index > tlv->header.encoded_tlv_length) {
+	/* If we have sub-TLVs, they must be included in the overall length; there
+	 * must be room for at least one sub-tlv header
+	 */
+	if (buf_index > tlv->header.encoded_tlv_length ||
+	    tlv->header.encoded_tlv_length - buf_index < TLV_HEADER_LENGTH) {
 		pcep_log(LOG_INFO, "%s: Path Setup Type Capability length invalid", __func__);
 		error_p = true;
 		goto done;
 	}
 
-	/* Must have one sub-TLV per PST value, no more */
+	/* Must have zero or one sub-TLV per PST value, no more ((RFC8408, section 3)*/
+	num_iterations = 0;
 	tlv->sub_tlv_list = dll_initialize();
-	while ((tlv->header.encoded_tlv_length - buf_index) > TLV_HEADER_LENGTH &&
-	       num_iterations < num_psts &&
+	while ((tlv->header.encoded_tlv_length - buf_index) >= TLV_HEADER_LENGTH &&
 	       num_iterations++ < MAX_ITERATIONS) {
-		struct pcep_object_tlv_header *sub_tlv =
-			pcep_decode_tlv(tlv_body_buf + buf_index);
-		if (sub_tlv == NULL) {
+		/*
+		 * RFC8408, section 3
+		 */
+		if (num_iterations > num_psts) {
+			pcep_log(LOG_INFO, "PathSetupType Capability TLV: too many sub-TLVs");
+			error_p = true;
+			goto done;
+		}
+
+		/* Examine the sub-tlv header, validate length
+		 * RFC5440, 7.1
+		 */
+		pcep_decode_tlv_hdr(tlv_body_buf + buf_index, &sub_hdr);
+
+		/* Check for over-size length value that will wrap uint16_t
+		 * when normalized
+		 */
+		if (sub_hdr.encoded_tlv_length > 0xFFF8) {
 			pcep_log(LOG_INFO,
-				 "%s: Decode PathSetupType Capability sub-TLV decode returned NULL",
+				 "%s: PathSetupType Capability sub-TLV length too large",
 				 __func__);
+			error_p = true;
+			goto done;
+		}
+
+		/* Test the full, padded length */
+		norm_len = normalize_pcep_tlv_length(
+			sub_hdr.encoded_tlv_length + TLV_HEADER_LENGTH);
+
+		if (norm_len > tlv->header.encoded_tlv_length - buf_index) {
+			pcep_log(LOG_INFO,
+				 "%s: PathSetupType Capability sub-TLV invalid length %d",
+				 __func__, sub_hdr.encoded_tlv_length);
+			error_p = true;
+			goto done;
+		}
+
+		sub_tlv = pcep_decode_tlv(tlv_body_buf + buf_index);
+		if (sub_tlv == NULL) {
+			pcep_log(LOG_INFO, "%s: sub-TLV decode returned NULL", __func__);
+			error_p = true;
 			goto done;
 		}
 
@@ -1197,7 +1402,7 @@ struct pcep_object_tlv_header *pcep_decode_tlv_path_setup_type_capability(
 		 * _except_ for the last sub-TLV; the padding bytes are not included
 		 * for the last sub-TLV. What were they thinking?
 		 */
-		buf_index += normalize_pcep_tlv_length(sub_tlv->encoded_tlv_length);
+		buf_index += norm_len;
 	}
 
 done:
@@ -1214,9 +1419,18 @@ pcep_decode_tlv_pol_id(struct pcep_object_tlv_header *tlv_hdr,
 		       const uint8_t *tlv_body_buf)
 {
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
-	struct pcep_object_tlv_srpag_pol_id *ipv4 =
-		(struct pcep_object_tlv_srpag_pol_id *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_srpag_pol_id));
+	struct pcep_object_tlv_srpag_pol_id *ipv4;
+
+	/* RFC9862, 4.4 */
+	if (tlv_hdr->encoded_tlv_length != 8 && tlv_hdr->encoded_tlv_length != 20) {
+		pcep_log(LOG_INFO, "%s: SR Policy Extended Association TLV: invalid len [%d]",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	ipv4 = (void *)common_tlv_create(tlv_hdr,
+					 sizeof(struct pcep_object_tlv_srpag_pol_id));
+
 	if (tlv_hdr->encoded_tlv_length == 8) {
 		ipv4->is_ipv4 = true;
 		ipv4->color = ntohl(uint32_ptr[0]);
@@ -1234,10 +1448,17 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_pol_name(struct pcep_object_tlv_header *tlv_hdr,
 			 const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_srpag_pol_name *tlv =
-		(struct pcep_object_tlv_srpag_pol_name *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_srpag_pol_name));
-	uint16_t len = tlv->header.encoded_tlv_length;
+	struct pcep_object_tlv_srpag_pol_name *tlv;
+	uint16_t len = tlv_hdr->encoded_tlv_length;
+
+	/* RFC9862, 4.5.1 */
+	if (len == 0) {
+		pcep_log(LOG_INFO, "%s: SR Policy Name TLV: invalid length zero", __func__);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_srpag_pol_name));
 
 	if (len > MAX_POLICY_NAME)
 		len = MAX_POLICY_NAME;
@@ -1251,9 +1472,17 @@ pcep_decode_tlv_cpath_id(struct pcep_object_tlv_header *tlv_hdr,
 			 const uint8_t *tlv_body_buf)
 {
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
-	struct pcep_object_tlv_srpag_cp_id *tlv =
-		(struct pcep_object_tlv_srpag_cp_id *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_srpag_cp_id));
+	struct pcep_object_tlv_srpag_cp_id *tlv;
+
+	/* RFC9862, 4.5.2 */
+	if (tlv_hdr->encoded_tlv_length != 28) {
+		pcep_log(LOG_INFO, "%s: SR Policy CPath ID TLV: invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_srpag_cp_id));
 
 	tlv->proto = tlv_body_buf[0];
 	tlv->orig_asn = ntohl(uint32_ptr[1]);
@@ -1267,10 +1496,17 @@ pcep_decode_tlv_cpath_preference(struct pcep_object_tlv_header *tlv_hdr,
 				 const uint8_t *tlv_body_buf)
 {
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
-	struct pcep_object_tlv_srpag_cp_pref *tlv =
-		(struct pcep_object_tlv_srpag_cp_pref *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_srpag_cp_pref));
+	struct pcep_object_tlv_srpag_cp_pref *tlv;
 
+	/* RFC9862, 4.5.4 */
+	if (tlv_hdr->encoded_tlv_length != 4) {
+		pcep_log(LOG_INFO, "%s: SR Policy CPath Preference TLV: invalid length %d",
+			 __func__, tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_srpag_cp_pref));
 	tlv->preference = ntohl(uint32_ptr[0]);
 
 	return (struct pcep_object_tlv_header *)tlv;
@@ -1280,13 +1516,23 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_vendor_info(struct pcep_object_tlv_header *tlv_hdr,
 			    const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_vendor_info *tlv =
-		(struct pcep_object_tlv_vendor_info *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_vendor_info));
-
 	uint32_t *uint32_ptr = (uint32_t *)tlv_body_buf;
+	struct pcep_object_tlv_vendor_info *tlv;
+
+	/* RFC7470, Section 4 */
+	if (tlv_hdr->encoded_tlv_length < 4) {
+		pcep_log(LOG_INFO, "%s: Vendor Info TLV: invalid length %d", __func__,
+			 tlv_hdr->encoded_tlv_length);
+		return NULL;
+	}
+
+	tlv = (void *)common_tlv_create(tlv_hdr,
+					sizeof(struct pcep_object_tlv_vendor_info));
+
 	tlv->enterprise_number = ntohl(uint32_ptr[0]);
-	tlv->enterprise_specific_info = ntohl(uint32_ptr[1]);
+
+	if (tlv_hdr->encoded_tlv_length >= 8)
+		tlv->enterprise_specific_info = ntohl(uint32_ptr[1]);
 
 	return (struct pcep_object_tlv_header *)tlv;
 }
@@ -1295,14 +1541,13 @@ struct pcep_object_tlv_header *
 pcep_decode_tlv_arbitrary(struct pcep_object_tlv_header *tlv_hdr,
 			  const uint8_t *tlv_body_buf)
 {
-	struct pcep_object_tlv_arbitrary *tlv_arbitrary =
-		(struct pcep_object_tlv_arbitrary *)common_tlv_create(
-			tlv_hdr, sizeof(struct pcep_object_tlv_arbitrary));
-
+	struct pcep_object_tlv_arbitrary *tlv;
 	uint16_t length = tlv_hdr->encoded_tlv_length;
+
+	/* No controlling RFC - this is internal/private */
+	tlv = (void *)common_tlv_create(tlv_hdr, sizeof(struct pcep_object_tlv_arbitrary));
+
 	if (length > MAX_ARBITRARY_SIZE) {
-		/* TODO should we also reset the tlv_hdr->encoded_tlv_length ?
-		 */
 		length = MAX_ARBITRARY_SIZE;
 		pcep_log(
 			LOG_INFO,
@@ -1311,12 +1556,14 @@ pcep_decode_tlv_arbitrary(struct pcep_object_tlv_header *tlv_hdr,
 			MAX_ARBITRARY_SIZE);
 	}
 
-	tlv_arbitrary->data_length = length;
-	tlv_arbitrary->arbitraty_type = tlv_hdr->type;
+	tlv->data_length = length;
+	tlv->arbitrary_type = tlv_hdr->type;
 	tlv_hdr->type = PCEP_OBJ_TLV_TYPE_ARBITRARY;
-	memcpy(tlv_arbitrary->data, tlv_body_buf, length);
 
-	return (struct pcep_object_tlv_header *)tlv_arbitrary;
+	if (length > 0)
+		memcpy(tlv->data, tlv_body_buf, length);
+
+	return (struct pcep_object_tlv_header *)tlv;
 }
 
 struct pcep_object_tlv_header *
@@ -1328,6 +1575,7 @@ pcep_decode_tlv_of_list(struct pcep_object_tlv_header *tlv_hdr,
 	uint16_t ival;
 	struct pcep_object_tlv_of_list *of_tlv;
 
+	/* RFC5541 */
 	if (tlv_hdr->encoded_tlv_length < 2) {
 		pcep_log(LOG_WARNING, "TLV OF List invalid length: %d",
 			 tlv_hdr->encoded_tlv_length);

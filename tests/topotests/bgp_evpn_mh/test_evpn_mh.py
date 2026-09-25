@@ -601,9 +601,10 @@ def check_local_es_evi_count(dut, expected_esis):
 
         bgp_vni_count = bgp_detail.get("vniCount", 0)
         if bgp_vni_count != zebra_vni_count:
-            return (
-                "ES %s VNI count mismatch: zebra %s bgpd %s"
-                % (esi, zebra_vni_count, bgp_vni_count)
+            return "ES %s VNI count mismatch: zebra %s bgpd %s" % (
+                esi,
+                zebra_vni_count,
+                bgp_vni_count,
             )
 
         bgp_rd = bgp_detail.get("rd")
@@ -618,9 +619,10 @@ def check_local_es_evi_count(dut, expected_esis):
 
         bgp_evi_count = local_frag.get("eviCount", 0)
         if bgp_evi_count != zebra_vni_count:
-            return (
-                "ES %s local EVI count mismatch: zebra VNI %s bgpd local EVI %s"
-                % (esi, zebra_vni_count, bgp_evi_count)
+            return "ES %s local EVI count mismatch: zebra VNI %s bgpd local EVI %s" % (
+                esi,
+                zebra_vni_count,
+                bgp_evi_count,
             )
 
     return None
@@ -680,16 +682,12 @@ def test_evpn_mh_bgpd_restart_replays_local_es_evi():
 
     test_fn = partial(check_local_es_evi_count, dut, local_esis)
     _, result = topotest.run_and_expect(test_fn, None, count=20, wait=3)
-    assertmsg = '"{}" local ES-EVI count incorrect before bgpd restart'.format(
-        dut_name
-    )
+    assertmsg = '"{}" local ES-EVI count incorrect before bgpd restart'.format(dut_name)
     assert result is None, assertmsg
 
     test_fn = partial(check_type1_routes, peer, dut_name, local_esis)
     _, result = topotest.run_and_expect(test_fn, None, count=20, wait=3)
-    assertmsg = '"{}" did not advertise Type-1/EAD before bgpd restart'.format(
-        dut_name
-    )
+    assertmsg = '"{}" did not advertise Type-1/EAD before bgpd restart'.format(dut_name)
     assert result is None, assertmsg
 
     kill_router_daemons(tgen, dut_name, ["bgpd"])
@@ -966,6 +964,9 @@ def test_evpn_vtep_change():
     Test that changing the originator VTEP IP on a remote TOR removes the
     stale VTEP from ES tables on the receiver.
 
+    Also verifies that local Type-4 (ESR) routes are properly updated when
+    VXLAN tunnel IP changes, preventing stale Type-4 routes.
+
     torm21 has two loopback addresses: 192.168.100.17 (primary) and
     192.168.100.117 (secondary). The VTEP is switched from primary to
     secondary and back to verify stale VTEP cleanup.
@@ -996,17 +997,37 @@ def test_evpn_vtep_change():
     assertmsg = f"torm11: primary VTEP {primary_vtep} not found in ES {esi} initially"
     assert result is None, assertmsg
 
+    # Helper to check that NO Type-4 (ES) route with the given IP exists.
+    # Returns None if no Type-4 prefix contains stale_ip, error string otherwise.
+    def check_type4_ip_not_present(node, stale_ip):
+        output = node.vtysh_cmd("show bgp l2vpn evpn route type es json")
+        data = json.loads(output)
+        for rd_key, rd_data in data.items():
+            if not isinstance(rd_data, dict):
+                continue
+            for key in rd_data.keys():
+                if key.startswith("[4]:") and stale_ip in key:
+                    return f"Type-4 route with stale IP {stale_ip} still present: {key}"
+        return None
+
     # 3. Switch VTEP from primary to secondary (vxlan local IP change
     #    triggers zebra to update ES originator IP and BGP re-advertises)
     remote_tor.run(f"ip link set dev vx-1000 type vxlan local {secondary_vtep}")
 
-    # 4. Verify new VTEP appears and old VTEP is removed
+    # 4.1 Verify new VTEP appears and old VTEP is removed
     test_fn = partial(check_remote_es_vtep_present, dut, esi, secondary_vtep)
     _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
     assertmsg = (
         f"torm11: secondary VTEP {secondary_vtep} not found in ES {esi} after switch"
     )
     assert result is None, assertmsg
+
+    # 4.2 Verify Type-4 route with old(primary IP) is gone on dut
+    test_fn = partial(check_type4_ip_not_present, dut, primary_vtep)
+    _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
+    assert (
+        result is None
+    ), f"torm11: {result} (stale Type-4 with primary IP after tunnel IP change)"
 
     test_fn = partial(check_remote_es_vtep_absent, dut, esi, primary_vtep)
     _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
@@ -1021,6 +1042,13 @@ def test_evpn_vtep_change():
     _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
     assertmsg = f"torm11: primary VTEP {primary_vtep} not restored in ES {esi}"
     assert result is None, assertmsg
+
+    # Verify Type-4 route with old(secondary IP) is gone on dut after restore
+    test_fn = partial(check_type4_ip_not_present, dut, secondary_vtep)
+    _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
+    assert (
+        result is None
+    ), f"torm11: {result} (stale Type-4 with secondary IP after restore)"
 
     test_fn = partial(check_remote_es_vtep_absent, dut, esi, secondary_vtep)
     _, result = topotest.run_and_expect(test_fn, None, count=30, wait=3)
@@ -1170,6 +1198,79 @@ def test_evpn_es_config_without_bridge():
                 evpn mh es-sys-mac 44:38:39:ff:ff:01
             """
         )
+
+
+def check_svi_mac_route(dut, rd, mac, expect_present):
+    """
+    Look up the type-2 route for the given MAC in the global EVPN table
+    under the origin's RD and return None if its presence matches
+    expect_present, the parsed output otherwise.
+    """
+    route = json.loads(
+        dut.vtysh_cmd(f"show bgp l2vpn evpn route rd {rd} mac {mac} json")
+    )
+    present = route.get("numPaths", 0) > 0
+    if present == expect_present:
+        return None
+    return route
+
+
+def test_evpn_svi_mac_withdraw_on_svi_del():
+    """
+    EVPN-MH advertises the SVI MAC as a MAC-only type-2 route once a
+    local ES is configured.
+    1. Restart zebra on torm11 to re-originate the SVI MAC route (it
+       does not survive the bgpd restart done earlier in this file).
+    2. Verify torm11's SVI MAC-only route is present on torm12.
+    3. Delete the vlan1000 SVI on torm11.
+    4. Verify the SVI MAC-only route is withdrawn on torm12.
+    5. Restore the SVI.
+    """
+
+    tgen = get_topogen()
+
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    dut = tgen.gears["torm12"]
+    origin_name = "torm11"
+    origin = tgen.gears[origin_name]
+
+    # A bgpd restart earlier in this file lost the SVI MAC route for
+    # good: with graceful restart registered on the zapi session, zebra
+    # retains its EVPN state on client close and short-circuits the
+    # advertise-all-vni processing on reconnect, so nothing replays the
+    # SVI MAC to the restarted bgpd. Restarting zebra rebuilds its MAC
+    # table from scratch and re-originates the route, so this test
+    # starts with the route present.
+    kill_router_daemons(tgen, origin_name, ["zebra"])
+    start_router_daemons(tgen, origin_name, ["zebra"])
+
+    svi_mac = json.loads(origin.run("ip -json link show vlan1000"))[0]["address"]
+    rd = json.loads(origin.vtysh_cmd("show bgp l2vpn evpn vni 1000 json"))["rd"]
+
+    # the SVI MAC-only route must be present before the SVI is deleted
+    test_fn = partial(check_svi_mac_route, dut, rd, svi_mac, True)
+    _, result = topotest.run_and_expect(test_fn, None, count=20, wait=3)
+    assertmsg = f'"{origin_name}" SVI MAC route missing on {dut.name}: {result}'
+    assert result is None, assertmsg
+
+    try:
+        # delete the SVI (including its VRR macvlan)
+        origin.run("ip link del dev vlan1000-v0")
+        origin.run("ip link del dev vlan1000")
+
+        # the SVI MAC-only route must be withdrawn
+        test_fn = partial(check_svi_mac_route, dut, rd, svi_mac, False)
+        _, result = topotest.run_and_expect(test_fn, None, count=20, wait=3)
+        assertmsg = (
+            f'"{origin_name}" SVI MAC route not withdrawn on {dut.name} '
+            f"after SVI delete: {result}"
+        )
+        assert result is None, assertmsg
+    finally:
+        # Restore the SVI, including the vlan1000-v0 VRR macvlan.
+        config_svi(origin, svi_ips.get(origin_name))
 
 
 if __name__ == "__main__":

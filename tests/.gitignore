@@ -5,6 +5,7 @@ frr-northbound.proto
 frr_northbound*
 .pytest_cache
 /bgpd/test_aspath
+/bgpd/test_attr_parse
 /bgpd/test_bgp_table
 /bgpd/test_capability
 /bgpd/test_community
@@ -18,6 +19,7 @@ frr_northbound*
 /isisd/test_isis_lspdb
 /isisd/test_isis_remove_excess_adjs
 /isisd/test_isis_spf
+/isisd/test_isis_tlv_ext_reach
 /isisd/test_isis_vertex_queue
 /lib/cli/test_cli
 /lib/cli/test_cli_clippy.c
@@ -40,7 +42,9 @@ frr_northbound*
 /lib/test_heavy_thread
 /lib/test_heavy_wq
 /lib/test_idalloc
+/lib/test_link_state
 /lib/test_memory
+/lib/test_network_address
 /lib/test_nexthop
 /lib/test_nexthop_iter
 /lib/test_ntop
@@ -48,6 +52,7 @@ frr_northbound*
 /lib/test_prefix2str
 /lib/test_printfrr
 /lib/test_privs
+/lib/test_rcu
 /lib/test_resolver
 /lib/test_ringbuf
 /lib/test_segv

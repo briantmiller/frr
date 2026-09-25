@@ -67,6 +67,9 @@ struct zebra_neigh {
 #define ZEBRA_NEIGH_LOCAL 0x01
 #define ZEBRA_NEIGH_REMOTE 0x02
 #define ZEBRA_NEIGH_REMOTE_NH 0x04 /* neigh entry for remote vtep */
+/* Neighbor is an EVPN default gateway (SVI IP); it is advertised with
+ * the Default Gateway extended community.
+ */
 #define ZEBRA_NEIGH_DEF_GW 0x08
 #define ZEBRA_NEIGH_ROUTER_FLAG 0x10
 #define ZEBRA_NEIGH_DUPLICATE 0x20
@@ -168,7 +171,10 @@ static inline bool zebra_evpn_neigh_is_ready_for_bgp(struct zebra_neigh *n)
 	bool mac_ready;
 	bool neigh_ready;
 
-	mac_ready = !!(n->mac->flags & ZEBRA_MAC_LOCAL);
+	/* A neighbor that is not linked to a MAC (transiently, while
+	 * being re-linked) is not advertisable.
+	 */
+	mac_ready = n->mac && (n->mac->flags & ZEBRA_MAC_LOCAL);
 	neigh_ready =
 		((n->flags & ZEBRA_NEIGH_LOCAL) && IS_ZEBRA_NEIGH_ACTIVE(n)
 		 && (!(n->flags & ZEBRA_NEIGH_LOCAL_INACTIVE)

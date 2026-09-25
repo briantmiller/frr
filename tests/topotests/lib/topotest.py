@@ -408,7 +408,7 @@ def json_cmp(output, expected, exact=False):
       order when it is compared to an Array in output
     """
 
-    (errors_n, errors) = gen_json_diff_report(
+    errors_n, errors = gen_json_diff_report(
         deepcopy(output), deepcopy(expected), exact=exact
     )
 
@@ -639,6 +639,83 @@ def get_textdiff(text1, text2, title1="", title2="", **opts):
     # Clean up line endings
     diff = os.linesep.join([s for s in diff.splitlines() if s])
     return diff
+
+
+def normalize_iproute_nhg_output(output):
+    """Canonicalize ``ip [-4|-6] route`` output for comparison across
+    NHA_GATEWAY (singleton) and NHA_GROUP (group-of-one) renderings.
+
+    The Linux kernel renders a route differently depending on whether the
+    route's nexthop id refers to a singleton (NHA_GATEWAY/NHA_OIF) or a
+    group (NHA_GROUP):
+
+        singleton:
+            <prefix> nhid <X> via <gw> dev <if> proto <P> metric <M>[ pref medium]
+
+        group of one:
+            <prefix> nhid <X> proto <P> metric <M> pref medium
+                    nexthop via <gw> dev <if> weight 1
+
+    Zebra now wraps every route's nexthop set in a kernel NHA_GROUP so
+    that ECMP membership changes can be expressed as in-place
+    NLM_F_REPLACE on the same id.  That means routes that used to render
+    in singleton form now render in group-of-one form.  This helper
+    collapses the latter back into the former so existing reference
+    tables (which were captured with singleton renderings) keep matching.
+
+    Multi-nh group entries (more than one ``nexthop`` line) are passed
+    through unchanged.
+    """
+    lines = output.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Look for a header that has nhid but no inline "via"/"dev" -- those
+        # are the group-form headers that the kernel emits for routes whose
+        # nhid points at an NHA_GROUP.
+        if re.search(r"\bnhid\b", line) and " via " not in line and " dev " not in line:
+            # Collect any indented nexthop lines that immediately follow.
+            members = []
+            j = i + 1
+            while j < len(lines) and re.match(r"\s+nexthop\b", lines[j]):
+                members.append(lines[j])
+                j += 1
+            if len(members) == 1:
+                # Group-of-one: fold the single member back into the header
+                # so the route looks like the singleton form.
+                m = re.match(
+                    r"\s*nexthop\s+(.*?)\s+weight\s+\d+\s*$",
+                    members[0],
+                )
+                if m:
+                    nh = m.group(1)
+                    # Insert "<nh>" after the nhid token. Header looks like
+                    #   "<prefix> nhid <X> proto <P> metric <M> pref medium"
+                    # so split after "nhid <X>".
+                    header = re.sub(
+                        r"(\bnhid\s+\S+)\s+",
+                        r"\1 " + nh + " ",
+                        line,
+                        count=1,
+                    )
+                    # Some refs were captured without "pref medium" trailing
+                    # the singleton -- leave any existing trailing tokens
+                    # untouched, the ref-vs-actual comparison just needs the
+                    # via/dev tokens to be on the same line.
+                    out.append(header)
+                    i = j
+                    continue
+            # Either no members or multi-nh group: keep header + members
+            # exactly as they were.
+            out.append(line)
+            for m in members:
+                out.append(m)
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
 
 def difflines(text1, text2, title1="", title2="", **opts):
@@ -947,7 +1024,8 @@ def ip4_route(node):
         }
     }
     """
-    output = normalize_text(node.run("ip route")).splitlines()
+    raw = normalize_iproute_nhg_output(normalize_text(node.run("ip route")))
+    output = raw.splitlines()
     result = {}
     for line in output:
         columns = line.split(" ")
@@ -1031,7 +1109,8 @@ def ip6_route(node):
         }
     }
     """
-    output = normalize_text(node.run("ip -6 route")).splitlines()
+    raw = normalize_iproute_nhg_output(normalize_text(node.run("ip -6 route")))
+    output = raw.splitlines()
     result = {}
     for line in output:
         columns = line.split(" ")
@@ -1071,9 +1150,10 @@ def ip6_vrf_route(node):
         }
     }
     """
-    output = normalize_text(
-        node.run("ip -6 route show vrf {0}-cust1".format(node.name))
-    ).splitlines()
+    raw = normalize_iproute_nhg_output(
+        normalize_text(node.run("ip -6 route show vrf {0}-cust1".format(node.name)))
+    )
+    output = raw.splitlines()
     result = {}
     for line in output:
         columns = line.split(" ")
@@ -1263,6 +1343,14 @@ def _sysctl_atleast(commander, variable, min_value):
         min_value = list(min_value)
     is_list = isinstance(min_value, list)
 
+    path = "/proc/sys/" + variable.replace(".", "/")
+    try:
+        # In some tests commander is actually a TopoGear which only has cmd_raises
+        commander.cmd_raises(f"test -e {path}", warn=False)
+    except subprocess.CalledProcessError:
+        logging.debug("%s sysctl file not present", path)
+        return
+
     sval = commander.cmd_raises("sysctl -n " + variable).strip()
     if is_list:
         cur_val = [int(x) for x in sval.split()]
@@ -1292,6 +1380,14 @@ def _sysctl_assure(commander, variable, value):
     if isinstance(value, tuple):
         value = list(value)
     is_list = isinstance(value, list)
+
+    path = "/proc/sys/" + variable.replace(".", "/")
+    try:
+        # In some tests commander is actually a TopoGear which only has cmd_raises
+        commander.cmd_raises(f"test -e {path}", warn=False)
+    except subprocess.CalledProcessError:
+        logging.debug("%s sysctl file not present", path)
+        return
 
     sval = commander.cmd_raises("sysctl -n " + variable).strip()
     if is_list:
@@ -1432,30 +1528,34 @@ def fix_host_limits():
     sysctl_assure(None, "fs.suid_dumpable", 1)
 
     # Maximum connection backlog
-    sysctl_atleast(None, "net.core.netdev_max_backlog", 4 * 1024)
+    sysctl_atleast(None, "net.core.netdev_max_backlog", 4 * 1024)  # NSF
 
     # Maximum read and write socket buffer sizes
-    sysctl_atleast(None, "net.core.rmem_max", 16 * 2**20)
-    sysctl_atleast(None, "net.core.wmem_max", 16 * 2**20)
+    sysctl_atleast(None, "net.core.rmem_max", 16 * 2**20)  # NSF
+    sysctl_atleast(None, "net.core.wmem_max", 16 * 2**20)  # NSF
 
     # Garbage Collection Settings for ARP and Neighbors
-    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh2", 4 * 1024)
-    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh3", 8 * 1024)
-    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh2", 4 * 1024)
-    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh3", 8 * 1024)
+    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh2", 4 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv4.neigh.default.gc_thresh3", 8 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh2", 4 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.neigh.default.gc_thresh3", 8 * 1024)  # NSF
     # Hold entries for 10 minutes
-    sysctl_assure(None, "net.ipv4.neigh.default.base_reachable_time_ms", 10 * 60 * 1000)
-    sysctl_assure(None, "net.ipv6.neigh.default.base_reachable_time_ms", 10 * 60 * 1000)
+    sysctl_assure(
+        None, "net.ipv4.neigh.default.base_reachable_time_ms", 10 * 60 * 1000
+    )  # NSF
+    sysctl_assure(
+        None, "net.ipv6.neigh.default.base_reachable_time_ms", 10 * 60 * 1000
+    )  # NSF
 
     # igmp
-    sysctl_assure(None, "net.ipv4.neigh.default.mcast_solicit", 10)
+    sysctl_assure(None, "net.ipv4.neigh.default.mcast_solicit", 10)  # NSF
 
     # MLD
-    sysctl_atleast(None, "net.ipv6.mld_max_msf", 512)
+    sysctl_atleast(None, "net.ipv6.mld_max_msf", 512)  # NSF
 
     # Increase routing table size to 128K
-    sysctl_atleast(None, "net.ipv4.route.max_size", 128 * 1024)
-    sysctl_atleast(None, "net.ipv6.route.max_size", 128 * 1024)
+    sysctl_atleast(None, "net.ipv4.route.max_size", 128 * 1024)  # NSF
+    sysctl_atleast(None, "net.ipv6.route.max_size", 128 * 1024)  # NSF??
 
 
 def setup_node_tmpdir(logdir, name):
@@ -1482,7 +1582,8 @@ class Router(Node):
     # Daemon stop order, mirroring the production init scripts
     # (tools/frrcommon.sh.in). all_stop() there signals daemons in the reverse
     # of the $DAEMONS start order, so this is that reversed list. Daemons not
-    # present here (e.g. fpm_listener, snmpd) sort before everything else.
+    # present here (e.g. fpm_listener, bfd_dplane_listener, snmpd) sort
+    # before everything else.
     # Keep this in sync with $DAEMONS in tools/frrcommon.sh.in.
     FRR_DAEMON_STOP_ORDER = {
         name: index
@@ -1587,6 +1688,7 @@ class Router(Node):
             "mgmtd": 0,
             "snmptrapd": 0,
             "fpm_listener": 0,
+            "bfd_dplane_listener": 0,
         }
         self.daemon_instances = {"ospfd": []}
         self.daemons_options = {"zebra": ""}
@@ -1687,28 +1789,30 @@ class Router(Node):
         return ret
 
     def stopRouter(self, assertOnError=True):
-        # fpm_listener writes its PID file to the gear log directory (next to
-        # its data dump), not to /var/run/frr/, so listDaemons() can't see it.
-        # Send it SIGTERM first and give it a brief moment to run its atexit
-        # handlers (in particular gcov flush under --enable-gcov) before the
-        # namespace teardown SIGKILLs it. This must happen before listDaemons()
-        # below sends SIGTERM to the FRR daemons because once zebra exits the
-        # FPM client side closes the socket and we want fpm_listener's last
-        # accept loop iteration to be reflected in coverage.
-        fpm_pidfile = "{}/{}/fpm_listener.pid".format(self.logdir, self.name)
-        try:
-            with open(fpm_pidfile) as f:
-                fpm_pid = int(f.read().strip())
+        # The listener helpers write their PID files to the gear log
+        # directory (next to their data dumps), not to /var/run/frr/, so
+        # listDaemons() can't see them. Send SIGTERM first and give them a
+        # brief moment to run their atexit handlers (in particular gcov flush
+        # under --enable-gcov) before the namespace teardown SIGKILLs them.
+        # This must happen before listDaemons() below sends SIGTERM to the FRR
+        # daemons because once the daemon exits its client side closes the
+        # socket, and we want the listener's last accept loop iteration to be
+        # reflected in coverage.
+        for listener in ("fpm_listener", "bfd_dplane_listener"):
+            pidfile = "{}/{}/{}.pid".format(self.logdir, self.name, listener)
             try:
-                os.kill(fpm_pid, signal.SIGTERM)
-                logger.debug(
-                    "%s: sent SIGTERM to fpm_listener pid %d", self.name, fpm_pid
-                )
-            except OSError:
+                with open(pidfile) as f:
+                    pid = int(f.read().strip())
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    logger.debug(
+                        "%s: sent SIGTERM to %s pid %d", self.name, listener, pid
+                    )
+                except OSError:
+                    pass
+                time.sleep(0.1)
+            except (FileNotFoundError, ValueError):
                 pass
-            time.sleep(0.1)
-        except (FileNotFoundError, ValueError):
-            pass
 
         # Stop Running FRR Daemons
         running = self.listDaemons()
@@ -1738,7 +1842,7 @@ class Router(Node):
 
         running = self.listDaemons()
         if running:
-            for _ in range(0, 30):
+            for _ in range(0, 60):
                 sleep(
                     0.5,
                     "{}: waiting for daemons stopping: {}".format(
@@ -1751,19 +1855,20 @@ class Router(Node):
 
         if running:
             logger.warning(
-                "%s: sending SIGBUS to: %s",
+                "%s: sending SIGXCPU to: %s",
                 self.name,
                 ", ".join([x[0] for x in running]),
             )
             for name, pid in running:
                 pidfile = "/var/run/{}/{}.pid".format(self.routertype, name)
                 logger.info("%s: killing %s", self.name, name)
-                self.cmd("kill -SIGBUS %d" % pid)
+                self.cmd("kill -SIGXCPU %d" % pid)
                 self.cmd("rm -- " + pidfile)
 
             sleep(
                 0.5,
-                "%s: waiting for daemons to exit/core after initial SIGBUS" % self.name,
+                "%s: waiting for daemons to exit/core after initial SIGXCPU"
+                % self.name,
             )
 
         errors = self.checkRouterCores(reportOnce=True)
@@ -1988,49 +2093,6 @@ class Router(Node):
         if g_pytest_config.name_in_option_list(self.name, "--vtysh"):
             self.run_in_window("vtysh", title="vt-%s" % self.name)
 
-        if self.unified_config:
-            # Check that none of the datastores are locked before proceeding
-            def check_datastores_unlocked():
-                """Check that all datastores are unlocked"""
-                try:
-                    logger.info("Checking datastores on router %s", self.name)
-                    output = self.cmd("vtysh -c 'show mgmt datastore all'")
-                    # Check if any datastore is locked
-                    for line in output.splitlines():
-                        logger.info("Line: %s", line)
-                        if "Locked:" in line and "True" in line:
-                            logger.info("Datastore is locked on router %s", self.name)
-                            return False
-                    logger.info("Datastores are unlocked on router %s", self.name)
-                    return True
-                except Exception:
-                    # If command fails, assume datastores are unlocked
-                    return True
-
-            # Use run_and_expect to wait for datastores to be unlocked
-            result, _ = run_and_expect(
-                check_datastores_unlocked, True, count=30, wait=1
-            )
-            if not result:
-                logger.error(
-                    "Datastores are still locked on router %s, cannot proceed with config load",
-                    self.name,
-                )
-                return "Datastores are locked, cannot proceed with config load"
-
-            # By default, render frr.conf into the running config via vtysh.
-            # Tests that want to drive config via frr-reload.py (or other
-            # mechanisms) can set skip_unified_vtysh = True on the router
-            # instance before calling start_router().
-            if not self.skip_unified_vtysh:
-                self.cmd("vtysh -f /etc/frr/frr.conf")
-            else:
-                logger.info(
-                    "%s: skipping initial 'vtysh -f /etc/frr/frr.conf'; "
-                    "config will be applied externally (e.g., via frr-reload.py)",
-                    self.name,
-                )
-
         return status
 
     def getStdErr(self, daemon):
@@ -2156,6 +2218,10 @@ class Router(Node):
             rediropt = " > {0}.out 2> {0}.err".format(dfname)
             if daemon == "fpm_listener":
                 binary = "/usr/lib/frr/fpm_listener"
+                cmdenv = ""
+                cmdopt = "-d {}".format(daemon_opts)
+            elif daemon == "bfd_dplane_listener":
+                binary = os.path.join(self.daemondir, "bfd_dplane_listener")
                 cmdenv = ""
                 cmdopt = "-d {}".format(daemon_opts)
             elif daemon == "snmpd":
@@ -2447,6 +2513,7 @@ class Router(Node):
                     daemon != "snmpd"
                     and daemon != "snmptrapd"
                     and daemon != "fpm_listener"
+                    and daemon != "bfd_dplane_listener"
                 ):
                     cmdopt += " -d "
                 cmdopt += rediropt
@@ -2583,6 +2650,13 @@ class Router(Node):
             while "fpm_listener" in daemons_list:
                 daemons_list.remove("fpm_listener")
 
+        if "bfd_dplane_listener" in daemons_list:
+            # bfdd connects to the listener as a client, so it has to be
+            # accepting before bfdd starts or the first connect fails.
+            start_daemon("bfd_dplane_listener")
+            while "bfd_dplane_listener" in daemons_list:
+                daemons_list.remove("bfd_dplane_listener")
+
         # Now start all the other daemons
         for daemon in daemons_list:
             if self.daemons[daemon] == 0:
@@ -2632,6 +2706,54 @@ class Router(Node):
 
         for tailf in tail_log_files:
             self.run_in_window("tail -n10000 -F " + tailf, title=tailf, background=True)
+
+        if self.unified_config:
+            # Check that none of the datastores are locked before proceeding
+            def check_datastores_unlocked():
+                """Check that all datastores are unlocked"""
+                try:
+                    logger.info("Checking datastores on router %s", self.name)
+                    output = self.cmd("vtysh -c 'show mgmt datastore all'")
+                    # Check if any datastore is locked
+                    for line in output.splitlines():
+                        logger.info("Line: %s", line)
+                        if "Locked:" in line and "True" in line:
+                            logger.info("Datastore is locked on router %s", self.name)
+                            return False
+                    logger.info("Datastores are unlocked on router %s", self.name)
+                    return True
+                except Exception:
+                    # If command fails, assume datastores are unlocked
+                    return True
+
+            # Use run_and_expect to wait for datastores to be unlocked
+            result, _ = run_and_expect(
+                check_datastores_unlocked, True, count=30, wait=1
+            )
+            if not result:
+                logger.error(
+                    "Datastores are still locked on router %s, cannot proceed with config load",
+                    self.name,
+                )
+                return "Datastores are locked, cannot proceed with config load"
+
+            # By default, render frr.conf into the running config via vtysh.
+            # This also (re-)applies configuration for daemons that were
+            # just (re-)started individually, e.g. after a single daemon is
+            # killed and restarted with startDaemons()/kill_router_daemons(),
+            # since such daemons don't read /etc/frr/frr.conf on their own in
+            # unified-config mode.
+            # Tests that want to drive config via frr-reload.py (or other
+            # mechanisms) can set skip_unified_vtysh = True on the router
+            # instance before calling start_router().
+            if not self.skip_unified_vtysh:
+                self.cmd("vtysh -f /etc/frr/frr.conf")
+            else:
+                logger.info(
+                    "%s: skipping 'vtysh -f /etc/frr/frr.conf'; "
+                    "config will be applied externally (e.g., via frr-reload.py)",
+                    self.name,
+                )
 
         return ""
 
@@ -2810,6 +2932,8 @@ class Router(Node):
                 continue
             if daemon == "fpm_listener":
                 continue
+            if daemon == "bfd_dplane_listener":
+                continue
             if (self.daemons[daemon] == 1) and not (daemon in daemonsRunning):
                 sys.stderr.write("%s: Daemon %s not running\n" % (self.name, daemon))
                 if daemon == "staticd":
@@ -2911,7 +3035,7 @@ class Router(Node):
                 interface = m.group(1)
                 ll_per_if_count = 0
             m = re.search(
-                "inet6 (fe80::[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+)[/0-9]* scope link",
+                r"inet6 (fe80:[0-9a-f:]*)(?:/\d+)? scope link",
                 line,
             )
             if m:

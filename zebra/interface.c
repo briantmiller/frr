@@ -252,6 +252,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 		zebra_evpn_if_cleanup(zebra_if);
 		zebra_evpn_mac_ifp_del(ifp);
 
+		zebra_l2_unmap_slave_from_bond(zebra_if);
+
 		if_nhg_dependents_release(ifp);
 		nhg_connected_tree_free(&zebra_if->nhg_dependents);
 
@@ -264,6 +266,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 		XFREE(MTYPE_ZINFO, zebra_if);
 	}
 
+	zebra_vxlan_if_ref_cleanup(ifp);
+
 	/* walk over all zebra interfaces; unref link pointer */
 	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
 		FOR_ALL_INTERFACES (vrf, p_ifp) {
@@ -275,6 +279,15 @@ static int if_zebra_delete_hook(struct interface *ifp)
 				zebra_if->link_ifindex = IFINDEX_INTERNAL;
 				zebra_if->link_nsid = NS_UNKNOWN;
 			}
+			/*
+			 * Master pointers are caches of an ifp that is about
+			 * to be freed; the ifindex stays as-is so that the
+			 * linkage is re-established if the master reappears.
+			 */
+			if (zebra_if->brslave_info.br_if == ifp)
+				zebra_if->brslave_info.br_if = NULL;
+			if (zebra_if->bondslave_info.bond_if == ifp)
+				zebra_if->bondslave_info.bond_if = NULL;
 		}
 	}
 	return 0;
@@ -1306,24 +1319,15 @@ static void zebra_if_addr_update_ctx(struct zebra_dplane_ctx *ctx,
 			   dplane_op2str(dplane_ctx_get_op(ctx)), ifp->name,
 			   ifp->ifindex, addr);
 
-	/* Handle tentative IPv6 addresses:
-	 * - On UP interfaces: skip tentative addresses (DAD in progress)
-	 * - On DOWN interfaces: accept tentative addresses (DAD cannot run)
-	 */
-	if (op == DPLANE_OP_INTF_ADDR_ADD && addr->family == AF_INET6 &&
-	    dplane_ctx_intf_is_tentative(ctx)) {
-		if (if_is_operative(ifp)) {
-			if (IS_ZEBRA_DEBUG_KERNEL)
-				zlog_debug("%s: %s: Tentative addr %pFX on UP interface %s, skipping",
-					   __func__,
-					   dplane_op2str(op), addr, ifp->name);
-			return;
-		}
-		if (IS_ZEBRA_DEBUG_KERNEL)
-			zlog_debug("%s: %s: Tentative addr %pFX on DOWN interface %s - accepted (DAD cannot run)",
-				   __func__, dplane_op2str(op), addr,
-				   ifp->name);
-	}
+	if (dplane_ctx_intf_is_tentative(ctx))
+		SET_FLAG(flags, ZEBRA_IFA_TENTATIVE);
+	else
+		UNSET_FLAG(flags, ZEBRA_IFA_TENTATIVE);
+
+	if (dplane_ctx_intf_is_dadfailed(ctx))
+		SET_FLAG(flags, ZEBRA_IFA_DADFAILED);
+	else
+		UNSET_FLAG(flags, ZEBRA_IFA_DADFAILED);
 
 	/* Is there a peer or broadcast address? */
 	dest = dplane_ctx_get_intf_dest(ctx);
@@ -2509,6 +2513,18 @@ static void connected_dump_vty(struct vty *vty, json_object *json,
 			CHECK_FLAG(connected->flags, ZEBRA_IFA_UNNUMBERED));
 	else if (CHECK_FLAG(connected->flags, ZEBRA_IFA_UNNUMBERED))
 		vty_out(vty, " unnumbered");
+
+	if (json)
+		json_object_boolean_add(json_addr, "tentative",
+					CHECK_FLAG(connected->flags, ZEBRA_IFA_TENTATIVE));
+	else if (CHECK_FLAG(connected->flags, ZEBRA_IFA_TENTATIVE))
+		vty_out(vty, " tentative");
+
+	if (json)
+		json_object_boolean_add(json_addr, "dadFailed",
+					CHECK_FLAG(connected->flags, ZEBRA_IFA_DADFAILED));
+	else if (CHECK_FLAG(connected->flags, ZEBRA_IFA_DADFAILED))
+		vty_out(vty, " DAD failed");
 
 	if (connected->label) {
 		if (json)

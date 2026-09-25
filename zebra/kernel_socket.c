@@ -1599,6 +1599,17 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 		ctx = dplane_ctx_dequeue(ctx_list);
 		if (ctx == NULL)
 			break;
+
+		/*
+		 * Skip-kernel ctxs are routed through work_list to preserve
+		 * FIFO ordering for downstream providers. Pass them directly
+		 * to handled_list without kernel programming.
+		 */
+		if (dplane_ctx_is_skip_kernel(ctx)) {
+			dplane_ctx_enqueue_tail(&handled_list, ctx);
+			continue;
+		}
+
 		switch (dplane_ctx_get_op(ctx)) {
 
 		case DPLANE_OP_ROUTE_INSTALL:
@@ -1671,6 +1682,12 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 		case DPLANE_OP_SYS_ROUTE_DELETE:
 		case DPLANE_OP_ROUTE_NOTIFY:
 		case DPLANE_OP_LSP_NOTIFY:
+			res = ZEBRA_DPLANE_REQUEST_SUCCESS;
+			break;
+
+		/* EVPN-MH FDB nexthops are a netlink-only feature - no-op here */
+		case DPLANE_OP_NH_FDB_INSTALL:
+		case DPLANE_OP_NH_FDB_DELETE:
 			res = ZEBRA_DPLANE_REQUEST_SUCCESS;
 			break;
 

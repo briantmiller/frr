@@ -361,37 +361,44 @@ void zebra_nhe_init(struct nhg_hash_entry *nhe, afi_t afi,
 	memset(nhe, 0, sizeof(struct nhg_hash_entry));
 	nhe->vrf_id = VRF_DEFAULT;
 	nhe->type = ZEBRA_ROUTE_NHG;
+
+	/*
+	 * Default to AFI_UNSPEC: nhes built through this function represent
+	 * a route's parent NHE -- they get wrapped in a kernel NHA_GROUP
+	 * even when the route has a single (gateway) nexthop, so that ECMP
+	 * grow/shrink can reuse the same parent id with NLM_F_REPLACE. The
+	 * leaf singletons that hang off the parent are built via
+	 * zebra_nhg_find / zebra_nhg_find_nexthop and use specific AFIs, so
+	 * the parent-vs-leaf split is what keeps them from hash-colliding.
+	 *
+	 * The exception is IFINDEX-only and BLACKHOLE single-nh routes:
+	 * those nh types are afi-agnostic in zebra (the same "dev lo" nh
+	 * can satisfy both an IPv4 and an IPv6 route) but the kernel
+	 * singleton that ultimately gets programmed is afi-specific via
+	 * NHM nh_family. If we let those parents live at AFI_UNSPEC, the
+	 * hash would collapse the IPv4 and IPv6 parents onto the same id
+	 * and the second-installed family would be rejected by the kernel
+	 * because the underlying singleton was created for the first
+	 * family. Pin those parents to a specific AFI so each family gets
+	 * its own parent/leaf pair. zebra_nhe_find treats afi != UNSPEC
+	 * single-nh nhes as leaves (no depend wrapping), so these stay as
+	 * direct kernel singletons -- they do not need ECMP grow/shrink
+	 * support anyway.
+	 */
 	nhe->afi = AFI_UNSPEC;
 
-	/* There are some special rules that apply to groups representing
-	 * a single nexthop.
-	 */
-	if (nh && (nh->next == NULL)) {
+	if (nh && nh->next == NULL) {
 		switch (nh->type) {
-			/*
-			 * This switch case handles setting the afi different
-			 * for ipv4/v6 routes. Ifindex nexthop
-			 * objects cannot be ambiguous, they must be Address
-			 * Family specific as that the kernel relies on these
-			 * for some reason.  blackholes can be v6 because the
-			 * v4 kernel infrastructure allows the usage of v6
-			 * blackholes in this case.   if we get here, we will
-			 * either use the AF of the route, or the one we got
-			 * passed from here from the kernel.
-			 */
 		case NEXTHOP_TYPE_IFINDEX:
 			nhe->afi = afi;
 			break;
 		case NEXTHOP_TYPE_BLACKHOLE:
 			nhe->afi = AFI_IP6;
 			break;
-		case NEXTHOP_TYPE_IPV4_IFINDEX:
 		case NEXTHOP_TYPE_IPV4:
-			nhe->afi = AFI_IP;
-			break;
-		case NEXTHOP_TYPE_IPV6_IFINDEX:
+		case NEXTHOP_TYPE_IPV4_IFINDEX:
 		case NEXTHOP_TYPE_IPV6:
-			nhe->afi = AFI_IP6;
+		case NEXTHOP_TYPE_IPV6_IFINDEX:
 			break;
 		}
 	}
@@ -457,9 +464,17 @@ static void *zebra_nhg_hash_alloc(void *arg)
 	 * Add the ifp now if it's not a group or recursive and has ifindex.
 	 *
 	 * A proto-owned ID is always a group.
+	 *
+	 * Only the leaf singleton (afi != AFI_UNSPEC) should be associated
+	 * with the interface. The zebra-owned parent NHE that wraps a single
+	 * nexthop in a group-of-one lives at AFI_UNSPEC; it is is-singleton by
+	 * nexthop count but carries a depend, so it must NOT be treated as an
+	 * interface singleton. The leaf drives its parent's reinstall via the
+	 * nhg_dependents walk in zebra_interface_nhg_reinstall().
 	 */
-	if (!PROTO_OWNED(nhe) && (ZEBRA_NHG_IS_SINGLETON(nhe) && nhe->nhg.nexthop->ifindex &&
-				  !CHECK_FLAG(nhe->nhg.nexthop->flags, NEXTHOP_FLAG_RECURSIVE))) {
+	if (!PROTO_OWNED(nhe) && nhe->afi != AFI_UNSPEC &&
+	    (ZEBRA_NHG_IS_SINGLETON(nhe) && nhe->nhg.nexthop->ifindex &&
+	     !CHECK_FLAG(nhe->nhg.nexthop->flags, NEXTHOP_FLAG_RECURSIVE))) {
 		struct interface *ifp = NULL;
 
 		ifp = if_lookup_by_index(nhe->nhg.nexthop->ifindex,
@@ -679,15 +694,28 @@ static void handle_recursive_depend(struct nhg_connected_tree_head *nhg_depends,
 				    struct nexthop *nh, afi_t afi, int type)
 {
 	struct nhg_hash_entry *depend = NULL;
-	struct nexthop_group resolved_ng = {};
-
-	resolved_ng.nexthop = nh;
+	struct nhg_hash_entry rt_nhe = {};
 
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: head %p, nh %pNHv",
 			   __func__, nhg_depends, nh);
 
-	depend = zebra_nhg_rib_find(0, &resolved_ng, afi, type);
+	/*
+	 * Build a parent-style lookup (afi=AFI_UNSPEC) for the resolved
+	 * nexthop list, matching what a route with this nh set would
+	 * create via zebra_nhg_rib_find_nhe(). When the resolving route
+	 * has already created its parent NHE in the hash, this lookup
+	 * finds and reuses it, so the recursive parent's depend is the
+	 * resolving route's parent NHE -- i.e. zebra_nhg_resolve() peels
+	 * the recursive parent down to the resolving route's NHA_ID and
+	 * both routes end up programmed in the kernel with the same
+	 * group id.
+	 */
+	zebra_nhe_init(&rt_nhe, afi, nh);
+	rt_nhe.nhg.nexthop = nh;
+	rt_nhe.type = type;
+
+	depend = zebra_nhg_rib_find_nhe(&rt_nhe, afi);
 
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: nh %pNHv => %p (%u)",
@@ -785,11 +813,30 @@ static bool zebra_nhe_find(struct nhg_hash_entry **nhe, /* return value */
 		goto done;
 	}
 
-	/* Prepare dependency relationships if this is not a
-	 * singleton nexthop. There are two cases: a single
-	 * recursive nexthop, where we need a relationship to the
-	 * resolving nexthop; or a group of nexthops, where we need
-	 * relationships with the corresponding singletons.
+	/*
+	 * Prepare dependency relationships. Three cases:
+	 *
+	 *   1. A single recursive nexthop on a zebra-owned id: build a
+	 *      depend on the resolving nexthop and mark the parent
+	 *      NEXTHOP_GROUP_RECURSIVE so install ordering walks the
+	 *      resolution chain correctly.
+	 *
+	 *   2. A leaf singleton -- either kernel-learned (from_dplane), or a
+	 *      zebra-built leaf reached via depends_find_singleton. Leaves
+	 *      always use a specific AFI (set in zebra_nhg_find), while
+	 *      parent NHEs (built via zebra_nhe_init) use AFI_UNSPEC. So
+	 *      "single non-recursive nh + (from_dplane || afi != UNSPEC)"
+	 *      identifies the leaf side of the parent/leaf split. Leaves
+	 *      keep nhg_depends empty -- they are the bottom of the
+	 *      dependency tree and are what the kernel actually programs
+	 *      as NHA_GATEWAY/NHA_OIF singletons.
+	 *
+	 *   3. Everything else -- multi-nexthop groups, proto-owned NHGs,
+	 *      and zebra-owned parent NHEs (afi == AFI_UNSPEC) wrapping a
+	 *      single non-recursive nexthop -- builds a depend per nh.
+	 *      This guarantees every zebra-built parent NHE is encoded as
+	 *      NHA_GROUP (size >= 1), so future ECMP grow/shrink can be
+	 *      expressed as NLM_F_REPLACE on the same parent id.
 	 */
 	zebra_nhg_depends_init(newnhe);
 
@@ -798,17 +845,24 @@ static bool zebra_nhe_find(struct nhg_hash_entry **nhe, /* return value */
 	if (CHECK_FLAG(nh->flags, NEXTHOP_FLAG_ACTIVE))
 		SET_FLAG(newnhe->flags, NEXTHOP_GROUP_VALID);
 
-	if (nh->next == NULL && newnhe->id < ZEBRA_NHG_PROTO_LOWER) {
-		if (CHECK_FLAG(nh->flags, NEXTHOP_FLAG_RECURSIVE)) {
-			/* Single recursive nexthop */
-			handle_recursive_depend(&newnhe->nhg_depends,
-						nh->resolved, afi,
-						newnhe->type);
-			recursive = true;
-		}
+	if (nh->next == NULL && CHECK_FLAG(nh->flags, NEXTHOP_FLAG_RECURSIVE) &&
+	    newnhe->id < ZEBRA_NHG_PROTO_LOWER) {
+		/* Case 1: single recursive zebra-owned nexthop */
+		handle_recursive_depend(&newnhe->nhg_depends, nh->resolved, afi, newnhe->type);
+		recursive = true;
+	} else if (nh->next == NULL && !CHECK_FLAG(nh->flags, NEXTHOP_FLAG_RECURSIVE) &&
+		   (from_dplane || newnhe->afi != AFI_UNSPEC)) {
+		/*
+		 * Case 2: leaf singleton -- kernel-learned, or zebra-built
+		 * leaf reached via depends_find_singleton (which sets a
+		 * specific AFI). Keep nhg_depends empty so we don't recurse
+		 * back through depends_find_add for ourselves.
+		 */
+		if (IS_ZEBRA_DEBUG_NHG_DETAIL)
+			zlog_debug("%s: leaf singleton NH %pNHv afi=%d%s", __func__, nh,
+				   newnhe->afi, from_dplane ? " (from dplane)" : "");
 	} else {
-		/* Proto-owned are groups by default */
-		/* List of nexthops */
+		/* Case 3: build depends per nexthop */
 		for (nh = newnhe->nhg.nexthop; nh; nh = nh->next) {
 			if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 				zlog_debug("%s: depends NH %pNHv %s",
@@ -1045,6 +1099,7 @@ void nhg_ctx_free(struct nhg_ctx **ctx)
 	nexthop_del_labels(nh);
 	nexthop_del_srv6_seg6local(nh);
 	nexthop_del_srv6_seg6(nh);
+	nexthop_free_res_info(nh);
 
 done:
 	XFREE(MTYPE_NHG_CTX, *ctx);
@@ -1130,8 +1185,13 @@ void zebra_nhg_check_valid(struct nhg_hash_entry *nhe)
 	struct nhg_connected *rb_node_dep = NULL;
 	bool valid = false;
 
-	/* Singleton means it has no depends and has only dependents */
-	if (ZEBRA_NHG_IS_SINGLETON(nhe)) {
+	/*
+	 * A true leaf singleton has no depends and only dependents. Note that
+	 * a zebra-owned parent NHE wrapping a single nexthop in a group-of-one
+	 * is is-singleton by nexthop count but carries a depend, so guard on an
+	 * empty depends tree to avoid clobbering the parent's own nexthop flags.
+	 */
+	if (ZEBRA_NHG_IS_SINGLETON(nhe) && zebra_nhg_depends_is_empty(nhe)) {
 		UNSET_FLAG(nhe->nhg.nexthop->flags, NEXTHOP_FLAG_FIB);
 		UNSET_FLAG(nhe->nhg.nexthop->flags, NEXTHOP_FLAG_ACTIVE);
 	}
@@ -1322,17 +1382,12 @@ static int nhg_ctx_process_new(struct nhg_ctx *ctx)
 	SET_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED);
 
 	/*
-	 * On startup Zebra is creating the nexthop group cache entry
-	 * after the router has it's startup time set.  This is because
-	 * the process of grabbing routes and nexthops is now *after*
-	 * the dataplane starts up, which is after the routers startup
-	 * time is set.  So let's just cheat a tiny bit on the time
-	 * and set the nexthop group hash entry startup time to be
-	 * slightly before the zrouter.startup_time.  Then graceful
-	 * restart sweeping will work properly for these nexthop entries
+	 * The startup boundary is recorded after kernel nexthops are read.
+	 * Use zero to mark an entry imported before that boundary.  A later
+	 * protocol update replaces it with the current monotonic time.
 	 */
 	if (startup) {
-		nhe->uptime = zrouter.startup_time - 1;
+		nhe->uptime = 0;
 		/* tag stale FDB NH/NHG and reserve its bitmap bit; sweep
 		 * releases the bit via zebra_evpn_mh_release_stale_nhid()
 		 */
@@ -1523,6 +1578,7 @@ static struct nhg_hash_entry *depends_find_singleton(const struct nexthop *nh,
 	nexthop_del_labels(&lookup);
 	nexthop_del_srv6_seg6local(&lookup);
 	nexthop_del_srv6_seg6(&lookup);
+	nexthop_free_res_info(&lookup);
 
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: nh %pNHv => %p (%pNG)", __func__, nh, nhe, nhe);
@@ -1827,6 +1883,9 @@ static void zebra_nhg_timer(struct event *event)
 
 void zebra_nhg_decrement_ref(struct nhg_hash_entry *nhe)
 {
+	bool unrefreshed_stale_fdb = CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_STALE_FDB) &&
+				     nhe->uptime == 0;
+
 	if (IS_ZEBRA_DEBUG_NHG_DETAIL)
 		zlog_debug("%s: nhe %p (%pNG) %d => %d", __func__, nhe, nhe,
 			   nhe->refcnt, nhe->refcnt - 1);
@@ -1836,7 +1895,8 @@ void zebra_nhg_decrement_ref(struct nhg_hash_entry *nhe)
 	if (!zebra_router_in_shutdown() && nhe->refcnt <= 0 &&
 	    (CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED) ||
 	     CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_QUEUED)) &&
-	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND)) {
+	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND) &&
+	    !unrefreshed_stale_fdb) {
 		nhe->refcnt = 1;
 		SET_FLAG(nhe->flags, NEXTHOP_GROUP_KEEP_AROUND);
 		event_add_timer(zrouter.master, zebra_nhg_timer, nhe,
@@ -1882,7 +1942,8 @@ static struct nexthop *nexthop_set_resolved(afi_t afi, const struct nexthop *new
 	resolved_hop = nexthop_new();
 	SET_FLAG(resolved_hop->flags, NEXTHOP_FLAG_ACTIVE);
 
-	resolved_hop->vrf_id = nexthop->vrf_id;
+	/* Use newhop's VRF - it reflects where the egress interface lives. */
+	resolved_hop->vrf_id = newhop->vrf_id;
 
 	/* Using weighted ECMP, we should respect the weight and use
 	 * the same value for non-recursive next-hop.
@@ -2008,7 +2069,8 @@ static struct nexthop *nexthop_set_resolved(afi_t afi, const struct nexthop *new
 		if (nexthop->nh_srv6->seg6_segs)
 			nexthop_add_srv6_seg6(resolved_hop, &nexthop->nh_srv6->seg6_segs->seg[0],
 					      nexthop->nh_srv6->seg6_segs->num_segs,
-					      nexthop->nh_srv6->seg6_segs->encap_behavior);
+					      nexthop->nh_srv6->seg6_segs->encap_behavior,
+					      &nexthop->nh_srv6->seg6_segs->encap_source);
 	}
 
 	/* Handle evpn nexthop - capture that info also */
@@ -2285,6 +2347,37 @@ zebra_nhg_connected_ifindex(struct route_node *rn, struct route_entry *match,
 }
 
 /*
+ * Locate NHG info for use as the "resolver" for a recursive route. This
+ * may mean navigating some of the NHG hierarchy; some levels of the NHG hierarchy
+ * are not installed through the dataplane, and aren't "visible" outside zebra.
+ */
+static void set_resolving_info(struct nexthop *nh, const struct route_node *rn,
+			       const struct route_entry *match)
+{
+	uint32_t id = match->nhe_id;
+	const struct nhg_hash_entry *nhe;
+	const struct nhg_connected *node;
+
+	nhe = match->nhe;
+
+	/* If the resolving nhg is itself recursive, it won't be installed. Walk
+	 * down the tree a bit to find the installed id value.
+	 */
+	if (CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_RECURSIVE) &&
+	    !CHECK_FLAG(nhe->flags, NEXTHOP_GROUP_INSTALLED)) {
+		frr_each (nhg_connected_tree_const, &nhe->nhg_depends, node) {
+			if (CHECK_FLAG(node->nhe->flags, NEXTHOP_GROUP_INSTALLED)) {
+				id = node->nhe->id;
+				break;
+			}
+		}
+	}
+
+	/* Capture resolving prefix */
+	nexthop_set_res_info(nh, id, &(rn->p));
+}
+
+/*
  * Given a nexthop we need to properly recursively resolve,
  * do a table lookup to find and match if at all possible.
  * Set the nexthop->ifindex and resolution info as appropriate.
@@ -2550,6 +2643,9 @@ static int nexthop_active(struct nexthop *nexthop, struct nhg_hash_entry *nhe,
 					"%s: CONNECT match %p (%pNG), newhop %pNHv",
 					__func__, match, match->nhe, newhop);
 
+			/* TODO -- resolving info for this path too? */
+			set_resolving_info(nexthop, rn, match);
+
 			return 1;
 		} else if (match && CHECK_FLAG(flags, ZEBRA_FLAG_ALLOW_RECURSION)) {
 			struct nexthop_group *nhg;
@@ -2612,6 +2708,11 @@ static int nexthop_active(struct nexthop *nexthop, struct nhg_hash_entry *nhe,
 				SET_FLAG(nexthop->flags,
 					 NEXTHOP_FLAG_RECURSIVE);
 				resolver = nexthop_set_resolved(afi, newhop, nexthop, NULL, flags);
+
+				/* Capture the NHG info used to resolve the nexthop. */
+				if (!resolved)
+					set_resolving_info(nexthop, rn, match);
+
 				resolved = 1;
 
 				/* If there are backup nexthops, capture
@@ -3673,13 +3774,11 @@ static int zebra_nhg_sweep_entry(struct hash_bucket *bucket, void *arg)
 	}
 
 	/*
-	 * same logic as with routes.
-	 *
-	 * If older than startup time, we know we read them in from the
-	 * kernel and have not gotten and update for them since startup
-	 * from an upper level proto.
+	 * Entries imported from the kernel during startup have an uptime of
+	 * zero.  An upper-level protocol refresh gives the entry a nonzero
+	 * timestamp.
 	 */
-	if (zrouter.startup_time < nhe->uptime)
+	if (nhe->uptime != 0)
 		return HASHWALK_CONTINUE;
 
 	/*
@@ -4159,8 +4258,14 @@ void zebra_interface_nhg_reinstall(struct interface *ifp)
 					   ifp->name);
 		}
 
-		/* Check for singleton NHG associated to interface */
-		if (!nexthop_is_blackhole(nh) && ZEBRA_NHG_IS_SINGLETON(rb_node_dep->nhe)) {
+		/*
+		 * Check for a true leaf singleton NHG associated to the
+		 * interface. A parent group-of-one is is-singleton by nexthop
+		 * count but carries a depend; it is reinstalled below via the
+		 * leaf's nhg_dependents walk, not directly here.
+		 */
+		if (!nexthop_is_blackhole(nh) && ZEBRA_NHG_IS_SINGLETON(rb_node_dep->nhe) &&
+		    zebra_nhg_depends_is_empty(rb_node_dep->nhe)) {
 			struct nhg_connected *rb_node_dependent;
 
 			if (IS_ZEBRA_DEBUG_NHG_DETAIL)

@@ -60,8 +60,8 @@ ssize_t bfd_recv_ipv4(int sd, uint8_t *msgbuf, size_t msgbuflen, uint8_t *ttl,
 ssize_t bfd_recv_ipv6(int sd, uint8_t *msgbuf, size_t msgbuflen, uint8_t *ttl,
 		      ifindex_t *ifindex, struct sockaddr_any *local,
 		      struct sockaddr_any *peer);
-int bp_udp_send(int sd, uint8_t ttl, uint8_t *data, size_t datalen,
-		struct sockaddr *to, socklen_t tolen);
+int bp_udp_send(int sd, uint8_t ttl, uint8_t *data, size_t datalen, struct sockaddr *to,
+		socklen_t tolen, const struct in6_pktinfo *pktinfo);
 int bp_bfd_echo_in(struct bfd_vrf_global *bvrf, int sd, uint8_t *ttl,
 		   uint32_t *my_discr, uint64_t *my_rtt);
 static int ptm_bfd_reflector_process_init_packet(struct bfd_vrf_global *bvrf, int s);
@@ -305,6 +305,8 @@ void ptm_bfd_echo_snd(struct bfd_session *bfd)
 	struct bfd_echo_pkt bep;
 	struct sockaddr_in sin;
 	struct sockaddr_in6 sin6;
+	struct in6_pktinfo pktinfo = {};
+	const struct in6_pktinfo *pktinfop = NULL;
 	struct bfd_vrf_global *bvrf = bfd_vrf_look_by_session(bfd);
 
 	if (!bvrf)
@@ -332,6 +334,17 @@ void ptm_bfd_echo_snd(struct bfd_session *bfd)
 		sin6.sin6_len = sizeof(sin6);
 #endif /* HAVE_STRUCT_SOCKADDR_SA_LEN */
 
+		/*
+		 * The echo socket is shared and unbound, so the kernel would
+		 * otherwise pick any address on the outgoing interface. The peer
+		 * reflects only echoes whose source names a known session, so an
+		 * arbitrary source gets the echo dropped there.
+		 */
+		memcpy(&pktinfo.ipi6_addr, &bfd->key.local, sizeof(pktinfo.ipi6_addr));
+		if (bfd->ifp)
+			pktinfo.ipi6_ifindex = bfd->ifp->ifindex;
+		pktinfop = &pktinfo;
+
 		sa = (struct sockaddr *)&sin6;
 		salen = sizeof(sin6);
 	} else {
@@ -347,9 +360,7 @@ void ptm_bfd_echo_snd(struct bfd_session *bfd)
 		sa = (struct sockaddr *)&sin;
 		salen = sizeof(sin);
 	}
-	if (bp_udp_send(sd, BFD_TTL_VAL, (uint8_t *)&bep, sizeof(bep), sa,
-			salen)
-	    == -1)
+	if (bp_udp_send(sd, BFD_TTL_VAL, (uint8_t *)&bep, sizeof(bep), sa, salen, pktinfop) == -1)
 		return;
 
 	bfd->stats.tx_echo_pkt++;
@@ -446,7 +457,14 @@ void ptm_bfd_snd(struct bfd_session *bfd, int fbit)
 	if (CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_CBIT))
 		BFD_SETCBIT(cp.flags, BFD_CBIT);
 
-	BFD_SETDEMANDBIT(cp.flags, BFD_DEF_DEMAND);
+	/*
+	 * The Demand bit is only set once both systems are Up.
+	 *
+	 * RFC 5880, Section 6.8.6.
+	 */
+	BFD_SETDEMANDBIT(cp.flags, CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_DEMAND) &&
+					   bfd->ses_state == PTM_BFD_UP &&
+					   bfd->remote_ses_state == PTM_BFD_UP);
 
 	/* Polling and Final can't be set at the same time.
 	 *
@@ -539,6 +557,17 @@ void ptm_bfd_snd(struct bfd_session *bfd, int fbit)
 		}
 #endif /* CRYPTO_OPENSSL */
 	} else {
+		/*
+		 * RFC 5880 Section 6.7 has no unauthenticated mode for a
+		 * session configured to authenticate. Reaching here with a
+		 * keychain attached means nothing could be built for it: no
+		 * usable key, or a type this build cannot produce. Sending in
+		 * the clear would leave the link unprotected while `show bfd
+		 * peer` still reports authentication, so send nothing.
+		 */
+		if (bfd->kc)
+			return;
+
 		cp.len = packet_len;
 		/* No Auth: Ensure we still copy the header to the send buffer! */
 		memcpy(send_buffer, &cp, BFD_PKT_LEN);
@@ -965,7 +994,13 @@ static bool bfd_check_auth(struct bfd_session *bfd, const struct bfd_pkt *cp)
 		expected_auth_type = map_keychain_algo_to_bfd_auth_type(active_key->hash_algo,
 									bfd->auth_meticulous);
 	if (!CHECK_FLAG(cp->flags, BFD_ABIT)) {
-		if (expected_auth_type != BFD_AUTH_TYPE_RESERVED) {
+		/*
+		 * Tested on the keychain rather than on the key found in it.
+		 * A keychain holding nothing usable must still refuse an
+		 * unauthenticated peer, or a key the local system cannot load
+		 * silently disables authentication on the link.
+		 */
+		if (bfd->kc) {
 			cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa, &local_sa,
 				 bfd->ifp ? bfd->ifp->ifindex : 0, bfd->vrf ? bfd->vrf->vrf_id : 0,
 				 "Auth: enabled on session, but peer sent no auth");
@@ -996,13 +1031,6 @@ static bool bfd_check_auth(struct bfd_session *bfd, const struct bfd_pkt *cp)
 		cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa, &local_sa,
 			 bfd->ifp ? bfd->ifp->ifindex : 0, bfd->vrf ? bfd->vrf->vrf_id : 0,
 			 "Auth: packet length too short for auth data");
-		return false;
-	}
-
-	if (expected_auth_type == BFD_AUTH_TYPE_RESERVED) {
-		cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa, &local_sa,
-			 bfd->ifp ? bfd->ifp->ifindex : 0, bfd->vrf ? bfd->vrf->vrf_id : 0,
-			 "Auth: local type not available");
 		return false;
 	}
 
@@ -1087,29 +1115,54 @@ static bool bfd_check_auth(struct bfd_session *bfd, const struct bfd_pkt *cp)
 		memcpy(&received_seq_num, auth_section + 4, sizeof(received_seq_num));
 		received_seq_num = ntohl(received_seq_num);
 
-		if (bfd->auth_last_rx_seq_num != 0) {
-			if (received_auth_type == BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1) {
-				if (received_seq_num <= bfd->auth_last_rx_seq_num) {
-					cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa,
-						 &local_sa, bfd->ifp ? bfd->ifp->ifindex : 0,
-						 bfd->vrf ? bfd->vrf->vrf_id : 0,
-						 "Auth: meticulous sequence number error");
+		/*
+		 * RFC 5880 Section 6.8.1: the expected sequence number is no
+		 * longer known once nothing has been received for twice the
+		 * detection time, so that it resynchronises when the remote
+		 * system restarts.
+		 */
+		if (bfd->auth_seq_known && bfd->detect_TO &&
+		    monotime_since(&bfd->auth_last_rx_time, NULL) >
+			    (int64_t)(2 * bfd->detect_TO))
+			bfd->auth_seq_known = false;
+
+		if (bfd->auth_seq_known) {
+			bool meticulous = received_auth_type ==
+					  BFD_AUTH_TYPE_METICULOUS_KEYED_SHA1;
+			uint32_t lowest = meticulous ? 1 : 0;
+			/*
+			 * RFC 5880 names the local state variable
+			 * bfd.DetectMult and the header field Detect Mult;
+			 * Section 6.7.4 asks for the latter, which is the
+			 * value carried by the packet being checked.
+			 * bfd_recv_cb() has already discarded the packet if
+			 * that field is zero.
+			 */
+			uint32_t highest = 3 * cp->detect_mult;
+			uint32_t distance;
+
+			/*
+			 * The window is bfd.RcvAuthSeq to bfd.RcvAuthSeq +
+			 * (3 * Detect Mult) inclusive, one past that for the
+			 * meticulous variants. Unsigned subtraction gives the
+			 * circular number space the RFC asks for: a sequence
+			 * number behind the stored one wraps to a distance
+			 * larger than the window and is rejected.
+			 */
+			distance = received_seq_num - bfd->auth_last_rx_seq_num;
+			if (distance < lowest || distance > highest) {
+				cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa,
+					 &local_sa, bfd->ifp ? bfd->ifp->ifindex : 0,
+					 bfd->vrf ? bfd->vrf->vrf_id : 0,
+					 "Auth: sequence number %u outside window %u..%u",
+					 received_seq_num, bfd->auth_last_rx_seq_num + lowest,
+					 bfd->auth_last_rx_seq_num + highest);
+				if (meticulous)
 					bfd->stats.rx_pkt_authentication_keyed_sha1_sequence_meticulous_error++;
-					return false;
-				}
-			} else {
-				/* Non-meticulous allows equal sequence numbers on stable state */
-				if (received_seq_num < bfd->auth_last_rx_seq_num) {
-					cp_debug(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_MH), &peer_sa,
-						 &local_sa, bfd->ifp ? bfd->ifp->ifindex : 0,
-						 bfd->vrf ? bfd->vrf->vrf_id : 0,
-						 "Auth: sequence number error (replay)");
+				else
 					bfd->stats.rx_pkt_authentication_keyed_sha1_sequence_error++;
-					return false;
-				}
+				return false;
 			}
-			if ((received_seq_num % bfd->auth_seq_num_update_modulo) == 0)
-				bfd->auth_last_rx_seq_num = received_seq_num;
 		}
 
 		/* Validate Digest */
@@ -1133,6 +1186,15 @@ static bool bfd_check_auth(struct bfd_session *bfd, const struct bfd_pkt *cp)
 			bfd->stats.rx_pkt_authentication_keyed_sha1_mismatch++;
 			return false;
 		}
+
+		/*
+		 * Accepted. The replay window moves only now, after the digest
+		 * has been verified, so that a packet failing authentication
+		 * cannot advance it.
+		 */
+		bfd->auth_last_rx_seq_num = received_seq_num;
+		bfd->auth_seq_known = true;
+		monotime(&bfd->auth_last_rx_time);
 
 		break;
 	}
@@ -1305,9 +1367,15 @@ void bfd_recv_cb(struct event *t)
 		return;
 	}
 
-	/* Ensure that existing good sessions are not overridden. */
-	if (!cp->discrs.remote_discr && bfd->ses_state != PTM_BFD_DOWN &&
-	    bfd->ses_state != PTM_BFD_ADM_DOWN) {
+	/*
+	 * RFC 5880 Section 6.8.6: a packet carrying a zero Your Discriminator
+	 * is discarded when the State field in that packet is not Down or
+	 * AdminDown. Testing the local state instead would refuse a peer that
+	 * has lost its state and is correctly announcing Down, which in demand
+	 * mode is never recovered from because no detection timer is running.
+	 */
+	if (!cp->discrs.remote_discr && BFD_GETSTATE(cp->flags) != PTM_BFD_DOWN &&
+	    BFD_GETSTATE(cp->flags) != PTM_BFD_ADM_DOWN) {
 		frrtrace(6, frr_bfd, packet_remote_discr_zero, is_mhop, &peer, &local, ifindex,
 			 vrfid, bfd->ses_state);
 		cp_debug(is_mhop, &peer, &local, ifindex, vrfid,
@@ -1398,6 +1466,9 @@ void bfd_recv_cb(struct event *t)
 	else
 		bfd->remote_cbit = 0;
 
+	bfd->remote_ses_state = BFD_GETSTATE(cp->flags);
+	bfd->remote_demand_mode = BFD_GETDEMANDBIT(cp->flags) ? 1 : 0;
+
 	/* The initiator handle SBFD reflect packet. */
 	if (bfd->bfd_mode == BFD_MODE_TYPE_SBFD_INIT) {
 		sbfd_initiator_state_handler(bfd, PTM_BFD_UP);
@@ -1448,8 +1519,19 @@ void bfd_recv_cb(struct event *t)
 		bfd->detect_TO = bfd->remote_detect_mult
 				 * bfd->remote_timers.desired_min_tx;
 
-	/* Apply new receive timer immediately. */
-	bfd_recvtimer_update(bfd);
+	/*
+	 * Apply new receive timer immediately, unless demand mode is
+	 * active: the peer ceases periodic transmission, so there is
+	 * nothing to time out. Liveness is then verified by Poll
+	 * Sequence instead.
+	 *
+	 * RFC 5880, Section 6.6.
+	 */
+	if (!(CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_DEMAND) && bfd->ses_state == PTM_BFD_UP &&
+	      bfd->remote_ses_state == PTM_BFD_UP && !bfd->polling))
+		bfd_recvtimer_update(bfd);
+	else
+		bfd_recvtimer_delete(bfd);
 
 	/* Handle echo timers changes. */
 	bs_echo_timer_handler(bfd);
@@ -1559,7 +1641,8 @@ int bp_bfd_echo_in(struct bfd_vrf_global *bvrf, int sd, uint8_t *ttl,
 		}
 
 		bp_udp_send(sd, *ttl - 1, msgbuf, bep->len, (struct sockaddr *)&peer,
-			    (sd == bvrf->bg_echo) ? sizeof(peer.sa_sin) : sizeof(peer.sa_sin6));
+			    (sd == bvrf->bg_echo) ? sizeof(peer.sa_sin) : sizeof(peer.sa_sin6),
+			    NULL);
 		return -1;
 	}
 
@@ -1634,8 +1717,8 @@ int bp_udp_send_fp(int sd, uint8_t *data, size_t datalen,
 }
 #endif
 
-int bp_udp_send(int sd, uint8_t ttl, uint8_t *data, size_t datalen,
-		struct sockaddr *to, socklen_t tolen)
+int bp_udp_send(int sd, uint8_t ttl, uint8_t *data, size_t datalen, struct sockaddr *to,
+		socklen_t tolen, const struct in6_pktinfo *pktinfo)
 {
 	struct cmsghdr *cmsg;
 	ssize_t wlen;
@@ -1681,6 +1764,24 @@ int bp_udp_send(int sd, uint8_t ttl, uint8_t *data, size_t datalen,
 #endif /* BFD_BSD */
 		}
 		memcpy(CMSG_DATA(cmsg), &ttlval, sizeof(ttlval));
+	}
+
+	/*
+	 * Pick the source address when the caller supplies one. The echo
+	 * socket is shared by every session in the VRF, so this cannot be a
+	 * sticky socket option: it has to travel with the message.
+	 */
+	if (pktinfo != NULL) {
+		size_t used = msg.msg_controllen ? CMSG_SPACE(sizeof(ttlval)) : 0;
+
+		msg.msg_control = msgctl;
+		msg.msg_controllen = used + CMSG_SPACE(sizeof(*pktinfo));
+
+		cmsg = used ? CMSG_NXTHDR(&msg, CMSG_FIRSTHDR(&msg)) : CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = IPPROTO_IPV6;
+		cmsg->cmsg_type = IPV6_PKTINFO;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(*pktinfo));
+		memcpy(CMSG_DATA(cmsg), pktinfo, sizeof(*pktinfo));
 	}
 
 	/* Send echo back. */

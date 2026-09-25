@@ -293,7 +293,7 @@ def test_pim_autorp_selective_group_joins(request):
         conf
          router pim
           autorp announce 10.0.0.2 224.0.0.0/4
-          autorp announce scope 31 interval 1 holdtime 5
+          autorp announce scope 31 interval 1 holdtime 15
         """
     )
 
@@ -314,7 +314,7 @@ def test_pim_autorp_selective_group_joins(request):
         conf
          router pim
           autorp send-rp-discovery source interface r1-eth0
-          autorp send-rp-discovery scope 31 interval 1 holdtime 5
+          autorp send-rp-discovery scope 31 interval 1 holdtime 15
         """
     )
 
@@ -411,7 +411,7 @@ def test_pim_autorp_no_mapping_agent_rp(request):
         conf
          router pim
           autorp announce 10.0.0.2 224.0.0.0/4
-          autorp announce scope 31 interval 1 holdtime 5
+          autorp announce scope 31 interval 1 holdtime 15
         """
     )
 
@@ -450,7 +450,7 @@ def test_pim_autorp_no_mapping_agent_rp(request):
               "enabled":true,
               "scope":31,
               "interval":1,
-              "holdtime":5,
+              "holdtime":15,
               "rpList":[
                 {
                   "rpAddress":"10.0.0.2",
@@ -486,7 +486,7 @@ def test_pim_autorp_discovery_rp(request):
         conf
          router pim
           autorp send-rp-discovery source interface r1-eth0
-          autorp send-rp-discovery scope 31 interval 1 holdtime 5
+          autorp send-rp-discovery scope 31 interval 1 holdtime 15
         """
     )
 
@@ -532,7 +532,7 @@ def test_pim_autorp_discovery_rp(request):
             "active":true,
             "scope":31,
             "interval":1,
-            "holdtime":5,
+            "holdtime":15,
             "source":"interface",
             "interface":"r1-eth0",
             "address":"10.0.0.1",
@@ -565,7 +565,7 @@ def test_pim_autorp_discovery_rp(request):
             "rpList":{
               "10.0.0.2":{
                 "rpAddress":"10.0.0.2",
-                "holdtime":5,
+                "holdtime":15,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -604,7 +604,7 @@ def test_pim_autorp_discovery_disable_purge_rp(request):
         conf
          router pim
           autorp announce 10.0.0.2 224.0.0.0/4
-          autorp announce scope 31 interval 1 holdtime 5
+          autorp announce scope 31 interval 1 holdtime 15
         """
     )
     tgen.routers()["r1"].vtysh_cmd(
@@ -612,7 +612,7 @@ def test_pim_autorp_discovery_disable_purge_rp(request):
         conf
          router pim
           autorp send-rp-discovery source interface r1-eth0
-          autorp send-rp-discovery scope 31 interval 1 holdtime 5
+          autorp send-rp-discovery scope 31 interval 1 holdtime 15
         """
     )
 
@@ -677,6 +677,14 @@ def test_pim_autorp_discovery_disable_purge_rp(request):
     assert result is None, "r2 did not purge learned AutoRP RP after disable"
 
     step("Restore AutoRP state for following tests")
+    # Remove the temporary r3 candidate so later tests are not polluted
+    tgen.routers()["r3"].vtysh_cmd(
+        """
+        conf
+         router pim
+          no autorp announce 10.0.0.2
+        """
+    )
     tgen.routers()["r2"].vtysh_cmd(
         """
         conf
@@ -688,7 +696,7 @@ def test_pim_autorp_discovery_disable_purge_rp(request):
         """
         conf
          router pim
-          autorp send-rp-discovery scope 31 interval 1 holdtime 5
+          autorp send-rp-discovery scope 31 interval 1 holdtime 15
         """
     )
 
@@ -708,7 +716,7 @@ def test_pim_autorp_discovery_multiple_rp_same(request):
         conf
          router pim
           autorp announce 10.0.1.3 224.0.0.0/4
-          autorp announce scope 31 interval 1 holdtime 5
+          autorp announce scope 31 interval 1 holdtime 15
         """
     )
 
@@ -753,7 +761,7 @@ def test_pim_autorp_discovery_multiple_rp_same(request):
             "rpList":{
               "10.0.1.3":{
                 "rpAddress":"10.0.1.3",
-                "holdtime":5,
+                "holdtime":15,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -846,7 +854,7 @@ def test_pim_autorp_discovery_multiple_rp_different(request):
             "rpList":{
               "10.0.0.2":{
                 "rpAddress":"10.0.0.2",
-                "holdtime":5,
+                "holdtime":15,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -856,7 +864,7 @@ def test_pim_autorp_discovery_multiple_rp_different(request):
               },
               "10.0.1.3":{
                 "rpAddress":"10.0.1.3",
-                "holdtime":5,
+                "holdtime":15,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -941,16 +949,18 @@ def test_pim_autorp_discovery_neg_prefixes(request):
         _, result = topotest.run_and_expect(test_func, None)
         assert result is None, "{} does not have correct rp-info".format(rtr)
 
-    step("Verify AutoRP discovery RP's")
+    # Wait for the mapping agent to advertise negatives before checking leaves.
+    # Under ASAN, r4 can miss discovery refreshes during the brief update window.
+    step("Verify mapping agent has negative prefixes")
     expected = json.loads(
         """
         {
-          "discovery":{
-            "enabled": true,
+          "mapping-agent":{
+            "enabled":true,
+            "active":true,
             "rpList":{
               "10.0.0.2":{
                 "rpAddress":"10.0.0.2",
-                "holdtime":5,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -960,7 +970,6 @@ def test_pim_autorp_discovery_neg_prefixes(request):
               },
               "10.0.1.3":{
                 "rpAddress":"10.0.1.3",
-                "holdtime":5,
                 "groupRanges":[
                   {
                     "negative":false,
@@ -984,7 +993,68 @@ def test_pim_autorp_discovery_neg_prefixes(request):
           }
         }"""
     )
-    for rtr in ["r1", "r2", "r3", "r4"]:
+    test_func = partial(
+        topotest.router_json_cmp, tgen.gears["r1"], "show ip pim autorp json", expected
+    )
+    _, result = topotest.run_and_expect(test_func, None)
+    assert result is None, "r1 mapping agent does not have negative prefixes"
+
+    step("Verify AutoRP discovery RP's")
+    expected = json.loads(
+        """
+        {
+          "discovery":{
+            "enabled": true,
+            "rpList":{
+              "10.0.0.2":{
+                "rpAddress":"10.0.0.2",
+                "holdtime":15,
+                "groupRanges":[
+                  {
+                    "negative":false,
+                    "prefix":"224.0.0.0/4"
+                  }
+                ]
+              },
+              "10.0.1.3":{
+                "rpAddress":"10.0.1.3",
+                "holdtime":15,
+                "groupRanges":[
+                  {
+                    "negative":false,
+                    "prefix":"225.0.0.0/8"
+                  },
+                  {
+                    "negative":false,
+                    "prefix":"226.0.0.0/8"
+                  },
+                  {
+                    "negative":true,
+                    "prefix":"225.1.0.0/16"
+                  },
+                  {
+                    "negative":true,
+                    "prefix":"226.1.0.0/16"
+                  }
+                ]
+              }
+            }
+          }
+        }"""
+    )
+    # First verify r1's discovery has the negative prefixes.
+    # Since r1 is the mapping agent, this confirms the updated discovery was sent.
+    test_func = partial(
+        topotest.router_json_cmp,
+        tgen.gears["r1"],
+        "show ip pim autorp json",
+        expected,
+    )
+    _, result = topotest.run_and_expect(test_func, None)
+    assert result is None, "r1 does not have correct autorp discovery"
+
+    # Now verify the other routers received the discovery.
+    for rtr in ["r2", "r3", "r4"]:
         test_func = partial(
             topotest.router_json_cmp,
             tgen.gears[rtr],
@@ -1060,6 +1130,122 @@ def test_pim_autorp_discovery_static(request):
         )
         _, result = topotest.run_and_expect(test_func, None)
         assert result is None, "{} does not have correct rp-info".format(rtr)
+
+
+def test_pim_autorp_mapping_agent_election(request):
+    "Test PIM AutoRP mapping agent election with multiple mapping agents"
+    tgen = get_topogen()
+    tc_name = request.node.name
+    write_test_header(tc_name)
+
+    if tgen.routers_have_failure():
+        pytest.skip("skipped because of router(s) failure")
+
+    # r1 is already a mapping agent with source 10.0.0.1 from previous tests.
+    # Configure r4 as a second mapping agent with source 10.0.3.4.
+    # Since 10.0.3.4 > 10.0.0.1, r4 should win and r1 should be suppressed.
+    step("Configure r4 as a second mapping agent")
+    tgen.routers()["r4"].vtysh_cmd(
+        """
+        conf
+         router pim
+          autorp send-rp-discovery source interface r4-eth1
+          autorp send-rp-discovery scope 31 interval 1 holdtime 15
+        """
+    )
+
+    step("Verify r4 mapping agent is active (higher IP wins)")
+    expected = json.loads(
+        """
+        {
+          "mapping-agent": {
+            "enabled":true,
+            "active":true,
+            "address":"10.0.3.4"
+          }
+        }"""
+    )
+    test_func = partial(
+        topotest.router_json_cmp, tgen.gears["r4"], "show ip pim autorp json", expected
+    )
+    _, result = topotest.run_and_expect(test_func, None)
+    assert result is None, "r4 mapping agent should be active"
+
+    step("Verify r1 mapping agent is suppressed (lower IP loses)")
+    expected = json.loads(
+        """
+        {
+          "mapping-agent": {
+            "enabled":true,
+            "active":false
+          }
+        }"""
+    )
+    test_func = partial(
+        topotest.router_json_cmp, tgen.gears["r1"], "show ip pim autorp json", expected
+    )
+    _, result = topotest.run_and_expect(test_func, None)
+    assert result is None, "r1 mapping agent should be suppressed"
+
+    # Verify all routers learn RPs from the active mapping agent (r4).
+    # This also implicitly verifies discovery is sent on all interfaces:
+    #   - r4 is connected to r2 via r4-eth0 (10.0.2.0/24)
+    #   - r4 is connected to r3 via r4-eth1 (10.0.3.0/24)
+    # Both r2 and r3 receiving discovery proves r4 sends on both interfaces.
+    step("Verify all routers learn RPs from the active mapping agent")
+    expected = json.loads(
+        """
+        {
+          "10.0.0.2":[
+            {
+              "rpAddress":"10.0.0.2",
+              "group":"224.0.0.0/4",
+              "source":"AutoRP"
+            }
+          ],
+          "10.0.1.3":[
+            {
+              "rpAddress":"10.0.1.3",
+              "prefixList":"__AUTORP_10.0.1.3__",
+              "source":"AutoRP"
+            }
+          ]
+        }"""
+    )
+    for rtr in ["r1", "r2", "r3", "r4"]:
+        test_func = partial(
+            topotest.router_json_cmp,
+            tgen.gears[rtr],
+            "show ip pim rp-info json",
+            expected,
+        )
+        _, result = topotest.run_and_expect(test_func, None)
+        assert result is None, "{} does not have correct rp-info".format(rtr)
+
+    step("Remove r4 mapping agent and verify r1 becomes active again")
+    tgen.routers()["r4"].vtysh_cmd(
+        """
+        conf
+         router pim
+          no autorp send-rp-discovery
+        """
+    )
+
+    expected = json.loads(
+        """
+        {
+          "mapping-agent": {
+            "enabled":true,
+            "active":true,
+            "address":"10.0.0.1"
+          }
+        }"""
+    )
+    test_func = partial(
+        topotest.router_json_cmp, tgen.gears["r1"], "show ip pim autorp json", expected
+    )
+    _, result = topotest.run_and_expect(test_func, None)
+    assert result is None, "r1 mapping agent should become active after r4 is removed"
 
 
 def test_memory_leak():

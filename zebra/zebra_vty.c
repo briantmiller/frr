@@ -325,6 +325,10 @@ static void show_nexthop_detail_helper(struct vty *vty,
 		for (i = 1; i < nexthop->backup_num; i++)
 			vty_out(vty, ",%d", nexthop->backup_idx[i]);
 	}
+
+	if (nexthop->res_info)
+		vty_out(vty, ", res via %pIA/%d (%u)", &(nexthop->res_info->addr),
+			nexthop->res_info->pfxlen, nexthop->res_info->id);
 }
 
 static void zebra_show_ip_route_opaque(struct vty *vty, struct route_entry *re,
@@ -955,6 +959,9 @@ static void do_show_route_helper(struct vty *vty, struct zebra_vrf *zvrf,
 		vty_json_close(vty, first_json);
 }
 
+/*
+ * Show all route tables in 'zvrf'
+ */
 static void do_show_ip_route_all(struct vty *vty, struct zebra_vrf *zvrf, afi_t afi, safi_t safi,
 				 bool use_fib, bool use_json, route_tag_t tag,
 				 const struct prefix *longer_prefix_p, bool supernets_only,
@@ -964,6 +971,8 @@ static void do_show_ip_route_all(struct vty *vty, struct zebra_vrf *zvrf, afi_t 
 {
 	struct zebra_router_table *zrt;
 	struct rib_table_info *info;
+	bool first_table = true;
+	char idbuf[20];
 
 	RB_FOREACH (zrt, zebra_router_table_head,
 		    &zrouter.tables) {
@@ -974,11 +983,19 @@ static void do_show_ip_route_all(struct vty *vty, struct zebra_vrf *zvrf, afi_t 
 		if (zrt->afi != afi || zrt->safi != safi)
 			continue;
 
+		if (use_json) {
+			snprintf(idbuf, sizeof(idbuf), "%d", info->table_id);
+			vty_json_key(vty, idbuf, &first_table);
+		}
+
 		do_show_ip_route(vty, zvrf_name(zvrf), afi, safi, use_fib, use_json, tag,
 				 longer_prefix_p, supernets_only, type, ospf_instance_id,
 				 zrt->tableid, show_ng, show_nhg_summary, ecmp_gt, ecmp_lt,
 				 ecmp_eq, ecmp_count, failed_only, ctx);
 	}
+
+	if (use_json)
+		vty_json_close(vty, first_table);
 }
 
 static int do_show_ip_route(struct vty *vty, const char *vrf_name, afi_t afi, safi_t safi,
@@ -1935,6 +1952,10 @@ DEFPY (show_route,
 	return CMD_SUCCESS;
 }
 
+#if CONFDATE > 20280811
+CPP_NOTICE("Remove `show <ip|ipv6> rpf [json]` command")
+#endif
+/* Deprecated on 2024-10-29 in 8983d2428208 */
 ALIAS_DEPRECATED (show_route,
                   show_ip_rpf_cmd,
                   "show <ip$ipv4|ipv6$ipv6> rpf$mrib [json$json]",
@@ -3391,13 +3412,10 @@ DEFPY (show_evpn_mac_vni_all_vtep,
 	bool uj = use_json(argc, argv);
 
 	if (ip) {
-		if (sockunion_family(ip) == AF_INET) {
-			SET_IPADDR_V4(&vtep_ip);
-			vtep_ip.ipaddr_v4.s_addr = sockunion2ip(ip);
-		} else {
-			SET_IPADDR_V6(&vtep_ip);
-			memcpy(&vtep_ip.ipaddr_v6, &ip->sin6.sin6_addr, sizeof(struct in6_addr));
-		}
+		if (sockunion_family(ip) == AF_INET)
+			ipaddr_set_v4(&vtep_ip, ip->sin.sin_addr);
+		else
+			ipaddr_set_v6(&vtep_ip, &ip->sin6.sin6_addr);
 	}
 
 	if (IS_IPADDR_NONE(&vtep_ip)) {
@@ -3460,13 +3478,10 @@ DEFPY (show_evpn_mac_vni_vtep,
 	bool uj = use_json(argc, argv);
 
 	if (ip) {
-		if (sockunion_family(ip) == AF_INET) {
-			SET_IPADDR_V4(&vtep_ip);
-			vtep_ip.ipaddr_v4.s_addr = sockunion2ip(ip);
-		} else {
-			SET_IPADDR_V6(&vtep_ip);
-			memcpy(&vtep_ip.ipaddr_v6, &ip->sin6.sin6_addr, sizeof(struct in6_addr));
-		}
+		if (sockunion_family(ip) == AF_INET)
+			ipaddr_set_v4(&vtep_ip, ip->sin.sin_addr);
+		else
+			ipaddr_set_v6(&vtep_ip, &ip->sin6.sin6_addr);
 	}
 
 	if (IS_IPADDR_NONE(&vtep_ip)) {
@@ -3661,13 +3676,10 @@ DEFPY (show_evpn_neigh_vni_vtep,
 	bool uj = use_json(argc, argv);
 
 	if (ip) {
-		if (sockunion_family(ip) == AF_INET) {
-			SET_IPADDR_V4(&vtep_ip);
-			vtep_ip.ipaddr_v4.s_addr = sockunion2ip(ip);
-		} else {
-			SET_IPADDR_V6(&vtep_ip);
-			memcpy(&vtep_ip.ipaddr_v6, &ip->sin6.sin6_addr, sizeof(struct in6_addr));
-		}
+		if (sockunion_family(ip) == AF_INET)
+			ipaddr_set_v4(&vtep_ip, ip->sin.sin_addr);
+		else
+			ipaddr_set_v6(&vtep_ip, &ip->sin6.sin6_addr);
 	} else {
 		SET_IPADDR_NONE(&vtep_ip);
 	}
@@ -4102,6 +4114,26 @@ DEFPY_HIDDEN(zebra_test_metaq_plug,
 	return CMD_SUCCESS;
 }
 
+#ifdef DEV_BUILD
+DEFPY_HIDDEN(zebra_test_dplane_results_plug,
+	     zebra_test_dplane_results_plug_cmd,
+	     "[no] zebra test dplane disable results",
+	     NO_STR
+	     ZEBRA_STR
+	     "Test command\n"
+	     "Dataplane\n"
+	     "Plug dplane processing (prevent processing)\n"
+	     "Plug the dplane results queue (prevent processing)\n")
+{
+	if (no)
+		zebra_rib_dplane_results_unplug();
+	else
+		zebra_rib_dplane_results_plug();
+
+	return CMD_SUCCESS;
+}
+#endif
+
 /* Display Zebra MetaQ counters */
 DEFUN (show_zebra_metaq_counters,
        show_zebra_metaq_counters_cmd,
@@ -4374,6 +4406,9 @@ void zebra_vty_init(void)
 	install_element(VIEW_NODE, &show_dataplane_providers_cmd);
 	install_element(VIEW_NODE, &show_zebra_metaq_counters_cmd);
 	install_element(VIEW_NODE, &zebra_test_metaq_plug_cmd);
+#ifdef DEV_BUILD
+	install_element(VIEW_NODE, &zebra_test_dplane_results_plug_cmd);
+#endif
 
 #ifdef HAVE_NETLINK
 	install_element(CONFIG_NODE, &zebra_kernel_netlink_batch_tx_buf_cmd);

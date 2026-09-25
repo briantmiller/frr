@@ -1912,7 +1912,7 @@ static bool zebra_evpn_local_mac_update_fwd_info(struct zebra_mac *mac,
 	return es_change;
 }
 
-/* Notify Local MACs to the clienti, skips GW MAC */
+/* Notify Local MACs to the client, skips GW MAC */
 static void zebra_evpn_send_mac_hash_entry_to_client(struct hash_bucket *bucket,
 						     void *arg)
 {
@@ -2496,7 +2496,7 @@ void zebra_evpn_mac_svi_del(struct interface *ifp, struct zebra_evpn *zevpn)
 	memcpy(&macaddr.octet, ifp->hw_addr, ETH_ALEN);
 	mac = zebra_evpn_mac_lookup(zevpn, &macaddr);
 
-	if (!mac || CHECK_FLAG(mac->flags, ZEBRA_MAC_SVI))
+	if (!mac || !CHECK_FLAG(mac->flags, ZEBRA_MAC_SVI))
 		return;
 
 	if (IS_ZEBRA_DEBUG_EVPN_MH_ES)

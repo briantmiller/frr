@@ -526,7 +526,7 @@ pim_neighbor_add(struct interface *ifp, pim_addr source_addr,
 	else
 		pim_hello_restart_triggered(neigh->interface);
 
-	pim_upstream_find_new_rpf(pim_ifp->pim);
+	pim_upstream_find_new_rpf(pim_ifp->pim, ifp);
 
 	/* RNH can send nexthop update prior to PIM neibhor UP
 	   in that case nexthop cache would not consider this neighbor
@@ -654,6 +654,7 @@ void pim_neighbor_delete(struct interface *ifp, struct pim_neighbor *neigh,
 	listnode_delete(pim_ifp->pim_neighbor_list, neigh);
 
 	pim_neighbor_free(neigh);
+	pim_upstream_find_new_rpf(pim_ifp->pim, ifp);
 
 	sched_rpf_cache_refresh(pim_ifp->pim);
 }
@@ -747,12 +748,51 @@ static void delete_from_neigh_addr(struct interface *ifp,
 	} /* scan addr list */
 }
 
+/*
+ * Compare two prefix lists for equality.
+ * Returns true if the lists have the same prefixes (in any order).
+ */
+static bool prefix_list_equal(struct list *list1, struct list *list2)
+{
+	struct listnode *node1, *node2;
+	struct prefix *p1, *p2;
+	bool found;
+
+	/* Both NULL means equal (no secondary addresses) */
+	if (!list1 && !list2)
+		return true;
+
+	/* One NULL and one not means not equal */
+	if (!list1 || !list2)
+		return false;
+
+	/* Different lengths means not equal */
+	if (listcount(list1) != listcount(list2))
+		return false;
+
+	/* Check that every prefix in list1 exists in list2 */
+	for (ALL_LIST_ELEMENTS_RO(list1, node1, p1)) {
+		found = false;
+		for (ALL_LIST_ELEMENTS_RO(list2, node2, p2)) {
+			if (prefix_same(p1, p2)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+
+	return true;
+}
+
 void pim_neighbor_update(struct pim_neighbor *neigh,
 			 pim_hello_options hello_options, uint16_t holdtime,
 			 uint32_t dr_priority, struct list *addr_list)
 {
 	struct pim_interface *pim_ifp = neigh->interface->info;
 	uint32_t old, new;
+	bool secondary_addr_changed = false;
 
 	/* Received holdtime ? */
 	if (PIM_OPTION_IS_SET(hello_options, PIM_OPTION_MASK_HOLDTIME)) {
@@ -779,6 +819,15 @@ void pim_neighbor_update(struct pim_neighbor *neigh,
 				__func__, (void *)addr_list);
 		}
 	} else {
+		/*
+		 * Check if the secondary addresses actually changed.
+		 * We compare list contents, not pointers, because each
+		 * hello message allocates a new addr_list even when
+		 * the addresses are unchanged.
+		 */
+		if (!prefix_list_equal(neigh->prefix_list, addr_list))
+			secondary_addr_changed = true;
+
 		/* Delete existing secondary address list */
 		delete_prefix_list(neigh);
 	}
@@ -806,4 +855,12 @@ void pim_neighbor_update(struct pim_neighbor *neigh,
 	  Copy flags
 	 */
 	neigh->hello_options = hello_options;
+
+	/*
+	 * When neighbor secondary addresses change, upstreams that depend on
+	 * this neighbor for RPF (via secondary address matching) may now be
+	 * resolvable. Re-evaluate upstreams that don't have a valid RPF path.
+	 */
+	if (secondary_addr_changed)
+		pim_upstream_find_new_rpf(pim_ifp->pim, neigh->interface);
 }

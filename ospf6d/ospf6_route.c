@@ -532,16 +532,18 @@ int ospf6_route_cmp(struct ospf6_route *ra, struct ospf6_route *rb)
 
 	if (ra->path.type == OSPF6_PATH_TYPE_EXTERNAL2) {
 		if (ra->path.u.cost_e2 != rb->path.u.cost_e2)
-			return (ra->path.u.cost_e2 - rb->path.u.cost_e2);
-		else
-			return (ra->path.cost - rb->path.cost);
-	} else {
-		if (ra->path.cost != rb->path.cost)
-			return (ra->path.cost - rb->path.cost);
+			return (ra->path.u.cost_e2 > rb->path.u.cost_e2) ? 1 : -1;
+		if (ra->path.cost > rb->path.cost)
+			return 1;
+		if (ra->path.cost < rb->path.cost)
+			return -1;
+		return 0;
 	}
+	if (ra->path.cost != rb->path.cost)
+		return (ra->path.cost > rb->path.cost) ? 1 : -1;
 
 	if (ra->path.area_id != rb->path.area_id)
-		return (ntohl(ra->path.area_id) - ntohl(rb->path.area_id));
+		return (ntohl(ra->path.area_id) > ntohl(rb->path.area_id)) ? 1 : -1;
 
 	if ((ra->prefix_options & OSPF6_PREFIX_OPTION_LA)
 	    != (rb->prefix_options & OSPF6_PREFIX_OPTION_LA))
@@ -1015,10 +1017,11 @@ struct ospf6_route *ospf6_route_best_next(struct ospf6_route *route)
 	struct route_node *rnode;
 	struct ospf6_route *next;
 
+	rnode = route->rnode;
+	assert(rnode);
+	route_lock_node(rnode);
 	ospf6_route_unlock(route);
 
-	rnode = route->rnode;
-	route_lock_node(rnode);
 	rnode = route_next(rnode);
 	while (rnode && rnode->info == NULL)
 		rnode = route_next(rnode);

@@ -3557,8 +3557,16 @@ route_set_ecommunity_lb(void *rule, const struct prefix *prefix, void *object)
 	if (!peer || !peer->bgp)
 		return RMAP_ERROR;
 
-	/* Build link bandwidth extended community */
-	as = (peer->bgp->as > BGP_AS_MAX) ? BGP_AS_TRANS : peer->bgp->as;
+	/* Build link bandwidth extended community. The 2-byte (classic)
+	 * encoding below falls back to BGP_AS_TRANS for a 4-byte AS; the
+	 * extended (4-byte) encoding has no such limit and must use the
+	 * real AS. Use confederation ID if configured and sending to
+	 * external eBGP peer, similar to AS_PATH handling. When route-map
+	 * is applied at origination (network command), peer is peer_self.
+	 * The AS number set here will be replaced later in
+	 * subgroup_announce_check() based on the actual destination peer.
+	 */
+	as = bgp_local_as_for_peer(peer);
 	if (rels->lb_type == RMAP_ECOMM_LB_SET_VALUE) {
 		bw_bytes = (rels->bw * 1000 * 1000) / 8;
 	} else if (rels->lb_type == RMAP_ECOMM_LB_SET_CUMUL) {
@@ -3596,6 +3604,7 @@ route_set_ecommunity_lb(void *rule, const struct prefix *prefix, void *object)
 		} else {
 			ecom_lb.size = 1;
 			ecom_lb.unit_size = IPV6_ECOMMUNITY_SIZE;
+			ecom_lb.disable_ieee_floating = false;
 			ecom_lb.val = (uint8_t *)lb_eval.val;
 			new_ecom = ecommunity_dup(&ecom_lb);
 		}
@@ -3604,19 +3613,24 @@ route_set_ecommunity_lb(void *rule, const struct prefix *prefix, void *object)
 	} else {
 		struct ecommunity_val lb_eval;
 
-		encode_lb_extcomm(as, bw_bytes, rels->non_trans, &lb_eval,
+		encode_lb_extcomm(as > BGP_AS_MAX ? BGP_AS_TRANS : as, bw_bytes,
+				  rels->non_trans, &lb_eval,
 				  CHECK_FLAG(peer->flags,
 					     PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE));
 
 		old_ecom = bgp_attr_get_ecommunity(path->attr);
 		if (old_ecom) {
 			new_ecom = ecommunity_dup(old_ecom);
+			new_ecom->disable_ieee_floating =
+				CHECK_FLAG(peer->flags, PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE);
 			ecommunity_add_val(new_ecom, &lb_eval, true, true);
 			if (!old_ecom->refcnt)
 				ecommunity_free(&old_ecom);
 		} else {
 			ecom_lb.size = 1;
 			ecom_lb.unit_size = ECOMMUNITY_SIZE;
+			ecom_lb.disable_ieee_floating =
+				CHECK_FLAG(peer->flags, PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE);
 			ecom_lb.val = (uint8_t *)lb_eval.val;
 			new_ecom = ecommunity_dup(&ecom_lb);
 		}
@@ -5135,8 +5149,8 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 				"Processing route_map %s(%s:%s) update on advertise type5 route command",
 				rmap_name, afi2str(afi), safi2str(safi));
 
-		if (route_update && (advertise_type5_routes_bestpath(bgp, afi) ||
-				     advertise_type5_routes_multipath(bgp, afi))) {
+		if (route_update && (advertise_type5_routes_bestpath(bgp, afi, safi) ||
+				     advertise_type5_routes_multipath(bgp, afi, safi))) {
 			bgp_evpn_withdraw_type5_routes(bgp, afi, safi);
 			bgp_evpn_advertise_type5_routes(bgp, afi, safi);
 		}

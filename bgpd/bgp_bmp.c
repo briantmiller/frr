@@ -466,13 +466,22 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 	struct stream *s;
 	size_t len;
 	struct timeval uptime, uptime_real;
+	struct timeval *uptime_tv = NULL;
 	uint8_t peer_type;
 	bool is_locrib = false;
 	uint64_t peer_distinguisher = 0;
 
-	uptime.tv_sec = peer->uptime;
-	uptime.tv_usec = 0;
-	monotime_to_realtime(&uptime, &uptime_real);
+	/* peer->uptime is monotonic and is 0 when the session has never
+	 * established; converting 0 to realtime would yield the machine's
+	 * boot time.  RFC 7854 says a zero timestamp means the time is
+	 * unavailable, which bmp_per_peer_hdr emits for a NULL timeval.
+	 */
+	if (peer->uptime) {
+		uptime.tv_sec = peer->uptime;
+		uptime.tv_usec = 0;
+		monotime_to_realtime(&uptime, &uptime_real);
+		uptime_tv = &uptime_real;
+	}
 
 	peer_type = bmp_get_peer_type(peer);
 	if (peer_type == BMP_PEER_TYPE_LOC_RIB_INSTANCE)
@@ -493,7 +502,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_UP_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, &uptime_real);
+		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, uptime_tv);
 
 		/* Local Address (16 bytes) */
 		if (is_locrib)
@@ -558,7 +567,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_DOWN_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, &uptime_real);
+		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type, peer_distinguisher, uptime_tv);
 
 		type_pos = stream_get_endp(s);
 		stream_putc(s, 0);	/* placeholder for down reason */
@@ -965,6 +974,122 @@ static int bmp_outgoing_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 	return 0;
 }
 
+/* true if any bmp_targets performs pre-policy monitoring of the given bgp
+ * instance for afi/safi, either directly or through bmp import-vrf-view.
+ * "skip" excludes one bmp_targets from consideration (used while its own
+ * configuration is being changed); pass NULL to consider all.
+ */
+static bool bmp_prepolicy_covers(struct bgp *bgp, afi_t afi, safi_t safi, struct bmp_targets *skip)
+{
+	struct bgp *bgp_vrf;
+	struct listnode *node;
+	struct bmp_bgp *bmpbgp;
+	struct bmp_targets *bt;
+
+	/* cheap early-out for the common case of no BMP configuration */
+	if (!bmp_bgph_count(&bmp_bgph))
+		return false;
+
+	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
+		bmpbgp = bmp_bgp_find(bgp_vrf);
+		if (!bmpbgp)
+			continue;
+		frr_each (bmp_targets, &bmpbgp->targets, bt) {
+			if (bt == skip)
+				continue;
+			if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_PREPOLICY))
+				continue;
+			if (bgp_vrf != bgp && !bmp_imported_bgp_find(bt, bgp->name))
+				continue;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* bgp_adj_in_needed hook: pre-policy monitoring reads from Adj-RIB-In, so
+ * bgpd must maintain it for every peer the monitoring covers.
+ */
+static int bmp_adj_in_needed(struct peer *peer, afi_t afi, safi_t safi)
+{
+	/* labeled-unicast routes live in the unicast table */
+	if (safi == SAFI_LABELED_UNICAST)
+		safi = SAFI_UNICAST;
+
+	return bmp_prepolicy_covers(peer->bgp, afi, safi, NULL);
+}
+
+/* enable path: peers newly covered by pre-policy monitoring have their
+ * Adj-RIB-In repopulated through a route refresh (or a session reset for
+ * peers without the refresh capability), like enabling soft-reconfiguration
+ * inbound does.
+ */
+static void bmp_adj_in_refresh_bgp(struct bgp *bgp, afi_t afi, safi_t safi)
+{
+	struct listnode *node;
+	struct peer *peer;
+
+	for (ALL_LIST_ELEMENTS_RO(bgp->peer, node, peer)) {
+		if (peer->afc_nego[afi][safi] &&
+		    !CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG))
+			peer_change_action(peer, afi, safi, peer_change_reset_in);
+
+		/* labeled-unicast routes live in the unicast table */
+		if (safi == SAFI_UNICAST && peer->afc_nego[afi][SAFI_LABELED_UNICAST] &&
+		    !CHECK_FLAG(peer->af_flags[afi][SAFI_LABELED_UNICAST], PEER_FLAG_SOFT_RECONFIG))
+			peer_change_action(peer, afi, SAFI_LABELED_UNICAST, peer_change_reset_in);
+	}
+}
+
+/* disable path: free the Adj-RIB-In of peers no consumer needs it for */
+static void bmp_adj_in_release_bgp(struct bgp *bgp, afi_t afi, safi_t safi)
+{
+	struct listnode *node;
+	struct peer *peer;
+
+	for (ALL_LIST_ELEMENTS_RO(bgp->peer, node, peer)) {
+		if (bgp_adj_in_needed(peer, afi, safi))
+			continue;
+		/* labeled-unicast adj-in entries share the unicast table */
+		if (safi == SAFI_UNICAST && bgp_adj_in_needed(peer, afi, SAFI_LABELED_UNICAST))
+			continue;
+		bgp_clear_adj_in(peer, afi, safi);
+	}
+}
+
+static void bmp_adj_in_ensure(struct bmp_targets *bt, afi_t afi, safi_t safi)
+{
+	struct bmp_imported_bgp *bib;
+	struct bgp *bgp;
+
+	if (bt->bgp && !bmp_prepolicy_covers(bt->bgp, afi, safi, bt))
+		bmp_adj_in_refresh_bgp(bt->bgp, afi, safi);
+
+	frr_each (bmp_imported_bgps, &bt->imported_bgps, bib) {
+		bgp = bgp_lookup_by_name(bib->name);
+		if (!bgp)
+			continue;
+		if (!bmp_prepolicy_covers(bgp, afi, safi, bt))
+			bmp_adj_in_refresh_bgp(bgp, afi, safi);
+	}
+}
+
+static void bmp_adj_in_release(struct bmp_targets *bt, afi_t afi, safi_t safi)
+{
+	struct bmp_imported_bgp *bib;
+	struct bgp *bgp;
+
+	if (bt->bgp)
+		bmp_adj_in_release_bgp(bt->bgp, afi, safi);
+
+	frr_each (bmp_imported_bgps, &bt->imported_bgps, bib) {
+		bgp = bgp_lookup_by_name(bib->name);
+		if (!bgp)
+			continue;
+		bmp_adj_in_release_bgp(bgp, afi, safi);
+	}
+}
+
 static int bmp_peer_status_changed(struct peer *peer)
 {
 	struct bmp_bgp_peer *bbpeer, *bbdopp;
@@ -1301,6 +1426,35 @@ static void bmp_update_syncro(struct bmp *bmp, afi_t afi, safi_t safi, struct bg
 	}
 }
 
+/*
+ * True if any session on this target other than `self` still needs to
+ * synchronize this afi/safi (its table walk has not completed yet).
+ *
+ * The `bgp_request_sync` flags below are per-target (shared by every BMP
+ * session of the target), but the sync progress (afistate) is per-session.
+ * Clearing the shared flag as soon as the *first* (fastest) session finishes
+ * an afi/safi would make bmp_get_next_bgp() return NULL for any slower session
+ * that only reaches that afi/safi afterwards, silently abandoning the rest of
+ * its table walk (e.g. the whole IPv6 dump once IPv4 is done). So the flags
+ * must only be cleared once every session is done with the afi/safi.
+ */
+static bool bmp_targets_afi_needs_sync(const struct bmp_targets *bt,
+				       const struct bmp *self, afi_t afi,
+				       safi_t safi)
+{
+	const struct bmp *bmp;
+
+	for (bmp = bmp_session_const_first(&bt->sessions); bmp;
+	     bmp = bmp_session_const_next(&bt->sessions, bmp)) {
+		if (bmp == self)
+			continue;
+		if (bmp->afistate[afi][safi] == BMP_AFI_NEEDSYNC ||
+		    bmp->afistate[afi][safi] == BMP_AFI_SYNC)
+			return true;
+	}
+	return false;
+}
+
 static void bmp_update_syncro_set(struct bmp *bmp, afi_t afi, safi_t safi, struct bgp *bgp,
 				  enum bmp_afi_state state)
 {
@@ -1309,6 +1463,13 @@ static void bmp_update_syncro_set(struct bmp *bmp, afi_t afi, safi_t safi, struc
 	bmp->afistate[afi][safi] = state;
 	bmp->syncafi = AFI_MAX;
 	bmp->syncsafi = SAFI_MAX;
+
+	/* keep the shared request-sync flags set while slower sessions still
+	 * need to walk this afi/safi (see comment above)
+	 */
+	if (bmp_targets_afi_needs_sync(bmp->targets, bmp, afi, safi))
+		return;
+
 	if (bgp == NULL || bmp->targets->bgp == bmp->sync_bgp)
 		bmp->targets->bgp_request_sync[afi][safi] = false;
 
@@ -1747,7 +1908,8 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 		written = true;
 	}
 
-	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_PREPOLICY)) {
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_PREPOLICY) &&
+	    bgp_adj_in_needed(peer, afi, safi)) {
 		struct bgp_adj_in *adjin;
 
 		for (adjin = bn ? bn->adj_in : NULL; adjin;
@@ -2387,6 +2549,8 @@ static void bmp_targets_put(struct bmp_targets *bt)
 	struct bmp *bmp;
 	struct bmp_active *ba;
 	struct bmp_imported_bgp *bib;
+	afi_t afi;
+	safi_t safi;
 
 	event_cancel(&bt->t_stats);
 
@@ -2400,6 +2564,14 @@ static void bmp_targets_put(struct bmp_targets *bt)
 
 	bmp_targets_del(&bt->bmpbgp->targets, bt);
 	QOBJ_UNREG(bt);
+
+	/* this target no longer drives Adj-RIB-In maintenance; free what no
+	 * other consumer needs
+	 */
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_PREPOLICY))
+			bmp_adj_in_release(bt, afi, safi);
+	}
 
 	frr_each_safe (bmp_imported_bgps, &bt->imported_bgps, bib)
 		bmp_imported_bgp_free(bib);
@@ -2908,6 +3080,10 @@ DEFPY(bmp_import_vrf,
 			return CMD_WARNING;
 		bmp_send_peerdown_vrf_per_instance(bt, bgp);
 		bmp_imported_bgp_put(bt, bib);
+		FOREACH_AFI_SAFI (afi, safi) {
+			if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_PREPOLICY))
+				bmp_adj_in_release_bgp(bgp, afi, safi);
+		}
 		return CMD_SUCCESS;
 	}
 	bib = bmp_imported_bgp_find(bt, (char *)vrfname);
@@ -2919,6 +3095,13 @@ DEFPY(bmp_import_vrf,
 	if (!bgp)
 		return CMD_SUCCESS;
 
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_PREPOLICY))
+			continue;
+		if (!bmp_prepolicy_covers(bgp, afi, safi, bt))
+			bmp_adj_in_refresh_bgp(bgp, afi, safi);
+	}
+
 	frr_each (bmp_session, &bt->sessions, bmp) {
 		if (bmp->state != BMP_PeerUp && bmp->state != BMP_Run)
 			continue;
@@ -2926,6 +3109,10 @@ DEFPY(bmp_import_vrf,
 		bmp_send_peerup_vrf_per_instance(bmp, &bib->vrf_state, bgp);
 		FOREACH_AFI_SAFI (afi, safi)
 			bmp_update_syncro(bmp, afi, safi, bgp);
+		/* wake the session's write loop, otherwise the requested
+		 * table sync only starts when unrelated traffic does it
+		 */
+		pullwr_bump(bmp->pullwr);
 	}
 	return CMD_SUCCESS;
 }
@@ -3131,8 +3318,20 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 	if (prev == bt->afimon[afi][safi])
 		return CMD_SUCCESS;
 
-	frr_each (bmp_session, &bt->sessions, bmp)
+	if (flag == BMP_MON_PREPOLICY) {
+		if (no)
+			bmp_adj_in_release(bt, afi, safi);
+		else
+			bmp_adj_in_ensure(bt, afi, safi);
+	}
+
+	frr_each (bmp_session, &bt->sessions, bmp) {
 		bmp_update_syncro(bmp, afi, safi, NULL);
+		/* wake the session's write loop, otherwise the requested
+		 * table sync only starts when unrelated traffic does it
+		 */
+		pullwr_bump(bmp->pullwr);
+	}
 
 	return CMD_SUCCESS;
 }
@@ -3710,6 +3909,7 @@ static int bgp_bmp_module_init(void)
 	hook_register(peer_status_changed, bmp_peer_status_changed);
 	hook_register(peer_backward_transition, bmp_peer_backward);
 	hook_register(bgp_process, bmp_process);
+	hook_register(bgp_adj_in_needed, bmp_adj_in_needed);
 	hook_register(bgp_nht_path_update, bmp_nht_path_valid);
 	hook_register(bgp_inst_config_write, bmp_config_write);
 	hook_register(bgp_inst_delete, bmp_bgp_del);

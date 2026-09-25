@@ -51,18 +51,15 @@ static void bgp_evpn_mh_get_vtep_ip(const struct attr *attr, struct ipaddr *vtep
 	nhfamily = NEXTHOP_FAMILY(attr->mp_nexthop_len);
 
 	if (nhfamily == AF_INET) {
-		SET_IPADDR_V4(vtep_ip);
 		if (attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV4 ||
 		    attr->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV4)
-			IPV4_ADDR_COPY(&vtep_ip->ipaddr_v4, &attr->mp_nexthop_global_in);
+			ipaddr_set_v4(vtep_ip, attr->mp_nexthop_global_in);
 		else
-			IPV4_ADDR_COPY(&vtep_ip->ipaddr_v4, &attr->nexthop);
+			ipaddr_set_v4(vtep_ip, attr->nexthop);
 	} else if (nhfamily == AF_INET6) {
-		SET_IPADDR_V6(vtep_ip);
-		IPV6_ADDR_COPY(&vtep_ip->ipaddr_v6, &attr->mp_nexthop_global);
+		ipaddr_set_v6(vtep_ip, &attr->mp_nexthop_global);
 	} else {
-		SET_IPADDR_V4(vtep_ip);
-		IPV4_ADDR_COPY(&vtep_ip->ipaddr_v4, &attr->nexthop);
+		ipaddr_set_v4(vtep_ip, attr->nexthop);
 	}
 }
 
@@ -78,15 +75,12 @@ bgp_evpn_mh_fill_vtep_ip_from_pi(const struct bgp_path_info *pi,
 	 */
 	if (pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV4 ||
 	    pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV4) {
-		SET_IPADDR_V4(vtep_ip);
-		vtep_ip->ipaddr_v4 = pi->attr->mp_nexthop_global_in;
+		ipaddr_set_v4(vtep_ip, pi->attr->mp_nexthop_global_in);
 	} else if (pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV6_GLOBAL ||
 		   pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL ||
 		   pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV6_GLOBAL ||
 		   pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV6_GLOBAL_AND_LL) {
-		SET_IPADDR_V6(vtep_ip);
-		IPV6_ADDR_COPY(&vtep_ip->ipaddr_v6,
-			       &pi->attr->mp_nexthop_global);
+		ipaddr_set_v6(vtep_ip, &pi->attr->mp_nexthop_global);
 	}
 }
 
@@ -236,17 +230,12 @@ static int bgp_evpn_es_route_select_install(struct bgp *bgp,
 			uint8_t nhfamily = NEXTHOP_FAMILY(old_select->attr->mp_nexthop_len);
 
 			if (nhfamily == AF_INET) {
-				SET_IPADDR_V4(&vtep_ip);
-				IPV4_ADDR_COPY(&vtep_ip.ipaddr_v4,
-					       &old_select->attr->mp_nexthop_global_in);
+				ipaddr_set_v4(&vtep_ip, old_select->attr->mp_nexthop_global_in);
 			} else if (nhfamily == AF_INET6) {
-				SET_IPADDR_V6(&vtep_ip);
-				IPV6_ADDR_COPY(&vtep_ip.ipaddr_v6,
-					       &old_select->attr->mp_nexthop_global);
+				ipaddr_set_v6(&vtep_ip, &old_select->attr->mp_nexthop_global);
 			} else {
 				/* default condition */
-				SET_IPADDR_V4(&vtep_ip);
-				IPV4_ADDR_COPY(&vtep_ip.ipaddr_v4, &old_select->attr->nexthop);
+				ipaddr_set_v4(&vtep_ip, old_select->attr->nexthop);
 			}
 			bgp_evpn_es_vtep_del(bgp, es, vtep_ip, true /*esr*/);
 		}
@@ -268,7 +257,7 @@ static int bgp_evpn_es_route_install(struct bgp *bgp,
 		struct bgp_path_info *parent_pi)
 {
 	int ret = 0;
-	struct bgp_dest *dest = NULL;
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
 	struct bgp_path_info *pi = NULL;
 	struct attr *attr_new = NULL;
 
@@ -302,10 +291,9 @@ static int bgp_evpn_es_route_install(struct bgp *bgp,
 		bgp_path_info_add(dest, pi);
 	} else {
 		if (!CHECK_FLAG(pi->flags, BGP_PATH_REMOVED) &&
-		    attrhash_cmp(pi->attr, parent_pi->attr)) {
-			bgp_dest_unlock_node(dest);
+		    attrhash_cmp(pi->attr, parent_pi->attr))
 			return 0;
-		}
+
 		/* The attribute has changed. */
 		/* Add (or update) attribute to hash. */
 		attr_new = bgp_attr_intern(parent_pi->attr);
@@ -327,8 +315,6 @@ static int bgp_evpn_es_route_install(struct bgp *bgp,
 	/* Perform route selection and update zebra, if required. */
 	ret = bgp_evpn_es_route_select_install(bgp, es, dest, pi);
 
-	bgp_dest_unlock_node(dest);
-
 	return ret;
 }
 
@@ -337,7 +323,7 @@ static int bgp_evpn_es_route_uninstall(struct bgp *bgp, struct bgp_evpn_es *es,
 		struct prefix_evpn *p, struct bgp_path_info *parent_pi)
 {
 	int ret;
-	struct bgp_dest *dest;
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
 	struct bgp_path_info *pi;
 
 	if (!es->route_table)
@@ -357,19 +343,14 @@ static int bgp_evpn_es_route_uninstall(struct bgp *bgp, struct bgp_evpn_es *es,
 			    parent_pi)
 			break;
 
-	if (!pi) {
-		bgp_dest_unlock_node(dest);
+	if (!pi)
 		return 0;
-	}
 
 	/* Mark entry for deletion */
 	bgp_path_info_mark_for_delete(dest, pi);
 
 	/* Perform route selection and update zebra, if required. */
 	ret = bgp_evpn_es_route_select_install(bgp, es, dest, pi);
-
-	/* Unlock route node. */
-	bgp_dest_unlock_node(dest);
 
 	return ret;
 }
@@ -569,13 +550,11 @@ int bgp_evpn_mh_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 		if (es) {
 			struct ipaddr vtep_ip = {};
 
-			if (IS_IPADDR_V4(&es->originator_ip)) {
-				SET_IPADDR_V4(&vtep_ip);
-				vtep_ip.ipaddr_v4 = attr->mp_nexthop_global_in;
-			} else if (IS_IPADDR_V6(&es->originator_ip)) {
-				SET_IPADDR_V6(&vtep_ip);
-				IPV6_ADDR_COPY(&vtep_ip.ipaddr_v6, &attr->mp_nexthop_global);
-			}
+			if (IS_IPADDR_V4(&es->originator_ip))
+				ipaddr_set_v4(&vtep_ip, attr->mp_nexthop_global_in);
+			else if (IS_IPADDR_V6(&es->originator_ip))
+				ipaddr_set_v6(&vtep_ip, &attr->mp_nexthop_global);
+
 			frrtrace(4, frr_bgp, evpn_mh_local_ead_es_evi_route_upd, &es->esi,
 				 (vpn ? vpn->vni : 0), evp->prefix.route_type, &vtep_ip);
 		}
@@ -715,47 +694,35 @@ int delete_global_ead_evi_routes(struct bgp *bgp, struct bgpevpn *vpn)
  * Reference: draft-ietf-bess-evpn-pref-df
  */
 /* Build extended community for EVPN ES (type-4) route */
-static void bgp_evpn_type4_route_extcomm_build(struct bgp_evpn_es *es,
-		struct attr *attr)
+static void bgp_evpn_type4_route_extcomm_build(struct bgp_evpn_es *es, struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity ecom_es_rt;
-	struct ecommunity ecom_df;
-	struct ecommunity_val eval;
-	struct ecommunity_val eval_es_rt;
-	struct ecommunity_val eval_df;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
 	struct ethaddr mac;
+	struct ecommunity *ecom;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the ones below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* ES import RT */
 	memset(&mac, 0, sizeof(mac));
-	memset(&ecom_es_rt, 0, sizeof(ecom_es_rt));
 	es_get_system_mac(&es->esi, &mac);
-	encode_es_rt_extcomm(&eval_es_rt, &mac);
-	ecom_es_rt.size = 1;
-	ecom_es_rt.unit_size = ECOMMUNITY_SIZE;
-	ecom_es_rt.val = (uint8_t *)eval_es_rt.val;
-	bgp_attr_set_ecommunity(
-		attr,
-		ecommunity_merge(bgp_attr_get_ecommunity(attr), &ecom_es_rt));
+	encode_es_rt_extcomm(&eval_tmp, &mac);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* DF election extended community */
-	memset(&ecom_df, 0, sizeof(ecom_df));
-	encode_df_elect_extcomm(&eval_df, es->df_pref);
-	ecom_df.size = 1;
-	ecom_df.val = (uint8_t *)eval_df.val;
-	bgp_attr_set_ecommunity(
-		attr,
-		ecommunity_merge(bgp_attr_get_ecommunity(attr), &ecom_df));
+	encode_df_elect_extcomm(&eval_tmp, es->df_pref);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Create or update local type-4 route */
@@ -991,85 +958,80 @@ static int bgp_evpn_type4_remote_routes_import(struct bgp *bgp,
  */
 
 /* Extended communities associated with EAD-per-ES */
-static void
-bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
-				      struct attr *attr)
+static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
+						  struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity ecom_esi_label;
-	struct ecommunity_val eval;
-	struct ecommunity_val eval_esi_label;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
 	struct listnode *evi_node, *rt_node;
 	struct ecommunity *ecom;
+	struct ecommunity *export_rt;
+	struct bgp_evpn_effective_fq_rt *fq_rt;
 	struct bgp_evpn_es_evi *es_evi;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the ones below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* ESI label */
-	encode_esi_label_extcomm(&eval_esi_label,
-			false /*single_active*/);
-	ecom_esi_label.size = 1;
-	ecom_esi_label.unit_size = ECOMMUNITY_SIZE;
-	ecom_esi_label.val = (uint8_t *)eval_esi_label.val;
-	bgp_attr_set_ecommunity(attr,
-				ecommunity_merge(bgp_attr_get_ecommunity(attr),
-						 &ecom_esi_label));
+	encode_esi_label_extcomm(&eval_tmp, false /*single_active*/);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* Add export RTs for all L2-VNIs associated with this ES */
 	/* XXX - suppress EAD-ES advertisement if there are no EVIs associated
 	 * with it.
 	 */
 	if (listcount(bgp_mh_info->ead_es_export_rtl)) {
-		for (ALL_LIST_ELEMENTS_RO(bgp_mh_info->ead_es_export_rtl,
-					  rt_node, ecom))
-			bgp_attr_set_ecommunity(
-				attr, ecommunity_merge(attr->ecommunity, ecom));
+		/* TODO: convert to ecommunity_append_val_unchecked() once
+		 * uniqueness and ordering are guaranteed here, too.
+		 */
+		for (ALL_LIST_ELEMENTS_RO(bgp_mh_info->ead_es_export_rtl, rt_node, export_rt))
+			ecommunity_merge(ecom, export_rt);
 	} else {
-		for (ALL_LIST_ELEMENTS_RO(es_frag->es_evi_frag_list, evi_node,
-					  es_evi)) {
+		for (ALL_LIST_ELEMENTS_RO(es_frag->es_evi_frag_list, evi_node, es_evi)) {
 			if (!CHECK_FLAG(es_evi->flags, BGP_EVPNES_EVI_LOCAL))
 				continue;
-			for (ALL_LIST_ELEMENTS_RO(es_evi->vpn->export_rtl,
-						  rt_node, ecom))
-				bgp_attr_set_ecommunity(
-					attr, ecommunity_merge(attr->ecommunity,
-							       ecom));
+			frr_each (bgp_evpn_effective_fq_rt_slu,
+				  &es_evi->vpn->effective_fq_export_rts, fq_rt)
+				ecommunity_append_val_unchecked(ecom, &fq_rt->ecom_val);
 		}
 	}
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Extended communities associated with EAD-per-EVI */
-static void bgp_evpn_type1_evi_route_extcomm_build(struct bgp_evpn_es *es,
-		struct bgpevpn *vpn, struct attr *attr)
+static void bgp_evpn_type1_evi_route_extcomm_build(struct bgp_evpn_es *es, struct bgpevpn *vpn,
+						   struct attr *attr)
 {
-	struct ecommunity ecom_encap;
-	struct ecommunity_val eval;
+	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
-	struct listnode *rt_node;
 	struct ecommunity *ecom;
+	struct bgp_evpn_effective_fq_rt *fq_rt;
 
-	/* Encap */
+	ecom = ecommunity_new();
+
+	/* Encap. This is the first community; the export RTs below extend it. */
 	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	memset(&ecom_encap, 0, sizeof(ecom_encap));
-	encode_encap_extcomm(tnl_type, &eval);
-	ecom_encap.size = 1;
-	ecom_encap.unit_size = ECOMMUNITY_SIZE;
-	ecom_encap.val = (uint8_t *)eval.val;
-	bgp_attr_set_ecommunity(attr, ecommunity_dup(&ecom_encap));
+	encode_encap_extcomm(tnl_type, &eval_tmp);
+	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
-	/* Add export RTs for the L2-VNI */
-	for (ALL_LIST_ELEMENTS_RO(vpn->export_rtl, rt_node, ecom))
-		bgp_attr_set_ecommunity(
-			attr,
-			ecommunity_merge(bgp_attr_get_ecommunity(attr), ecom));
+	/* Add export RTs for the L2-VNI. */
+	frr_each (bgp_evpn_effective_fq_rt_slu, &vpn->effective_fq_export_rts, fq_rt)
+		ecommunity_append_val_unchecked(ecom, &fq_rt->ecom_val);
+
+	/* Attach the extended community last: bgp_attr_set_ecommunity()
+	 * derives the EXT_COMMUNITIES attribute flag from the community size,
+	 * so it must see the fully built (non-empty) community.
+	 */
+	bgp_attr_set_ecommunity(attr, ecom);
 }
 
 /* Update EVPN EAD (type-1) route -
@@ -1625,12 +1587,23 @@ bgp_evpn_es_vtep_add(struct bgp *bgp, struct bgp_evpn_es *es,
 			   &es_vtep->vtep_ip, esr ? "esr" : "ead", df_alg, df_pref);
 
 	if (esr) {
+		bool had_esr = CHECK_FLAG(es_vtep->flags, BGP_EVPNES_VTEP_ESR);
+
 		SET_FLAG(es_vtep->flags, BGP_EVPNES_VTEP_ESR);
 		if ((es_vtep->df_pref != df_pref)
 		    || (es_vtep->df_alg != df_alg)) {
 			param_change = true;
 			es_vtep->df_pref = df_pref;
 			es_vtep->df_alg = df_alg;
+		}
+		/* FRR only implements preference-based DF election */
+		if (df_alg != EVPN_MH_DF_ALG_PREF && (!had_esr || param_change)) {
+			char alg_buf[EVPN_DF_ALG_STR_LEN];
+
+			zlog_warn("es %s vtep %pIA Type-4 ESR df_alg %s (%u); only preference (%u) is supported",
+				  es->esi_str, &vtep_ip,
+				  evpn_es_df_alg2str(df_alg, alg_buf, sizeof(alg_buf)), df_alg,
+				  EVPN_MH_DF_ALG_PREF);
 		}
 	} else {
 		++es_vtep->evi_cnt;
@@ -2549,6 +2522,28 @@ int bgp_evpn_local_es_add(struct bgp *bgp, esi_t *esi, struct ipaddr originator_
 	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
 		zlog_debug("add local es %s orig-ip %pIA df_pref %u %s", es->esi_str,
 			   &originator_ip, df_pref, bypass ? "bypass" : "");
+
+	/* Handle tunnel IP (originator_ip) change for an existing local ES */
+	if (!new_es && !ipaddr_is_same(&es->originator_ip, &originator_ip)) {
+		if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
+			zlog_debug("local es %s tunnel-ip changed from %pIA to %pIA", es->esi_str,
+				   &es->originator_ip, &originator_ip);
+
+		if (bgp_evpn_local_es_is_active(es)) {
+			struct prefix_evpn p;
+			int ret;
+
+			build_evpn_type4_prefix(&p, &es->esi, es->originator_ip);
+			ret = bgp_evpn_type4_route_delete(bgp, es, &p);
+			if (ret) {
+				flog_err(EC_BGP_EVPN_ROUTE_DELETE,
+					 "%u failed to delete type-4 route for ESI %s",
+					 bgp->vrf_id, es->esi_str);
+			}
+		}
+
+		regen_esr = true;
+	}
 
 	es->originator_ip = originator_ip;
 	if (df_pref != es->df_pref) {
@@ -5043,17 +5038,13 @@ static void bgp_evpn_path_nh_link(struct bgp *bgp_vrf, struct bgp_path_info *pi)
 	memset(&ip, 0, sizeof(ip));
 	/* copy path attribute's ipv4 or ipv6 address as nexthop field synced to zebra */
 	if (pi->net->rn->p.family == AF_INET6 || BGP_ATTR_MP_NEXTHOP_LEN_IP6(pi->attr)) {
-		SET_IPADDR_V6(&ip);
-		memcpy(&ip.ipaddr_v6, &pi->attr->mp_nexthop_global,
-		       sizeof(ip.ipaddr_v6));
+		ipaddr_set_v6(&ip, &pi->attr->mp_nexthop_global);
 	} else {
-		SET_IPADDR_V4(&ip);
 		if (pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV4 ||
 		    pi->attr->mp_nexthop_len == BGP_ATTR_NHLEN_VPNV4)
-			memcpy(&ip.ipaddr_v4, &pi->attr->mp_nexthop_global_in,
-			       sizeof(ip.ipaddr_v4));
+			ipaddr_set_v4(&ip, pi->attr->mp_nexthop_global_in);
 		else
-			memcpy(&ip.ipaddr_v4, &pi->attr->nexthop, sizeof(ip.ipaddr_v4));
+			ipaddr_set_v4(&ip, pi->attr->nexthop);
 	}
 
 	nh = bgp_evpn_nh_find(bgp_vrf, &ip);

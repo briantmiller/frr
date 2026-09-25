@@ -96,16 +96,8 @@ def setup_module(mod):
     tgen = Topogen(build_topo, mod.__name__)
     tgen.start_topology()
 
-    router_list = tgen.routers()
-
-    # For all registered routers, load the zebra configuration file
-    for rname, router in router_list.items():
-        router.load_config(
-            TopoRouter.RD_ZEBRA, os.path.join(CWD, "{}/zebra.conf".format(rname))
-        )
-        router.load_config(
-            TopoRouter.RD_OSPF, os.path.join(CWD, "{}/ospfd.conf".format(rname))
-        )
+    for router in tgen.routers().values():
+        router.load_frr_config()
 
     tgen.start_router()
 
@@ -135,6 +127,27 @@ def test_ospf_initial_convergence_step1():
         "rt1",
         "show ip route json",
         "step1/show_ip_route_initial.ref",
+    )
+
+
+def test_ospf_sr_convergence_step1b():
+    """
+    Verify SR prefix SIDs are learned before TI-LFA tests.
+
+    This is critical for TI-LFA because backup paths require SR labels.
+    Without this check, TI-LFA tests may fail intermittently when SR
+    labels haven't fully propagated yet.
+    """
+    logger.info("Test (step 1b): check SR label convergence")
+    tgen = get_topogen()
+
+    if tgen.routers_have_failure():
+        pytest.skip(tgen.errors)
+
+    router_compare_json_output(
+        "rt1",
+        "show mpls table json",
+        "step1/show_mpls_table.ref",
     )
 
 

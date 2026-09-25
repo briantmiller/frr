@@ -2401,10 +2401,10 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	bgp_size_t update_len;
 	bgp_size_t withdraw_len;
 	enum NLRI_TYPES {
-		NLRI_UPDATE,
 		NLRI_WITHDRAW,
-		NLRI_MP_UPDATE,
 		NLRI_MP_WITHDRAW,
+		NLRI_UPDATE,
+		NLRI_MP_UPDATE,
 		NLRI_TYPE_MAX
 	};
 	struct bgp_nlri nlris[NLRI_TYPE_MAX];
@@ -2423,8 +2423,8 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	attr.label_index = BGP_INVALID_LABEL_INDEX;
 	attr.label = MPLS_INVALID_LABEL;
 	memset(&nlris, 0, sizeof(nlris));
-	memset(peer->rcvd_attr_str, 0, BUFSIZ);
-	peer->rcvd_attr_printed = false;
+	bm->rcvd_attr_str[0] = '\0';
+	bm->rcvd_attr_printed = false;
 
 	s = connection->curr;
 	end = stream_pnt(s) + size;
@@ -2505,10 +2505,13 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 		 ? &attr                                                                          \
 		 : NULL)
 
+	update_len = end - stream_pnt(s) - attribute_len;
+
 	/* Parse attribute when it exists. */
 	if (attribute_len) {
 		attr_parse_ret = bgp_attr_parse(connection, &attr, attribute_len,
-						&nlris[NLRI_MP_UPDATE], &nlris[NLRI_MP_WITHDRAW]);
+						&nlris[NLRI_MP_UPDATE], &nlris[NLRI_MP_WITHDRAW],
+						update_len > 0);
 		if (attr_parse_ret == BGP_ATTR_PARSE_ERROR) {
 			bgp_attr_unintern_sub(&attr);
 			return BGP_Stop;
@@ -2519,8 +2522,7 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	if (attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW ||
 	    attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW_IGNORE || BGP_DEBUG(update, UPDATE_IN) ||
 	    BGP_DEBUG(update, UPDATE_PREFIX)) {
-		ret = bgp_dump_attr(&attr, peer->rcvd_attr_str,
-				    sizeof(peer->rcvd_attr_str));
+		ret = bgp_dump_attr(&attr, bm->rcvd_attr_str, sizeof(bm->rcvd_attr_str));
 
 		if (attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW ||
 		    attr_parse_ret == BGP_ATTR_PARSE_WITHDRAW_IGNORE) {
@@ -2533,14 +2535,10 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 
 		if (ret && bgp_debug_update(peer, NULL, NULL, 1) &&
 		    BGP_DEBUG(update, UPDATE_DETAIL)) {
-			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
-				   peer->rcvd_attr_str);
-			peer->rcvd_attr_printed = true;
+			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer, bm->rcvd_attr_str);
+			bm->rcvd_attr_printed = true;
 		}
 	}
-
-	/* Network Layer Reachability Information. */
-	update_len = end - stream_pnt(s);
 
 	/* If we received MP_UNREACH_NLRI attribute, but also NLRIs, then
 	 * NLRIs should be handled as a new data. Though, if we received
@@ -2561,7 +2559,7 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 			   withdraw_len, attribute_len, update_len);
 
 	/* Parse any given NLRIs */
-	for (int i = NLRI_UPDATE; i < NLRI_TYPE_MAX; i++) {
+	for (int i = NLRI_WITHDRAW; i < NLRI_TYPE_MAX; i++) {
 		if (!nlris[i].nlri)
 			continue;
 
@@ -2598,9 +2596,8 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 			flog_err(EC_BGP_UPDATE_RCV,
 				 "%s [Error] Error parsing NLRI", peer->host);
 			if (peer_established(connection))
-				bgp_notify_send(connection,
-						BGP_NOTIFY_UPDATE_ERR,
-						i <= NLRI_WITHDRAW
+				bgp_notify_send(connection, BGP_NOTIFY_UPDATE_ERR,
+						(i == NLRI_WITHDRAW || i == NLRI_UPDATE)
 							? BGP_NOTIFY_UPDATE_INVAL_NETWORK
 							: BGP_NOTIFY_UPDATE_OPT_ATTR_ERR);
 			bgp_attr_unintern_sub(&attr);
@@ -2641,6 +2638,9 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 
 	/* Notify BGP Conditional advertisement scanner process */
 	peer->advmap_table_change = true;
+
+	/* Clear attribute string to prevent stale state from other call paths */
+	bm->rcvd_attr_str[0] = '\0';
 
 	return Receive_UPDATE_message;
 }
@@ -2807,8 +2807,6 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 	safi_t safi;
 	struct stream *s;
 	struct peer_af *paf;
-	struct update_group *updgrp;
-	struct peer *updgrp_peer;
 	uint8_t subtype;
 	bool force_update = false;
 	bgp_size_t msg_length =
@@ -2956,16 +2954,14 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 							"%pBP rcvd Remove-All pfxlist ORF request",
 							peer);
 					prefix_bgp_orf_remove_all(afi, name);
-					peer->orf_plist[afi][safi] = prefix_bgp_orf_lookup(afi,
-											   name);
+					peer->orf_plist[afi][safi] = NULL;
 
+					/* Propagate to conf peer for REFRESH_DEFER case */
 					paf = peer_af_find(peer, afi, safi);
-					if (paf && paf->subgroup) {
-						updgrp = PAF_UPDGRP(paf);
-						updgrp_peer = UPDGRP_PEER(updgrp);
-						updgrp_peer->orf_plist[afi][safi] =
-							peer->orf_plist[afi][safi];
-					}
+					if (paf && paf->subgroup)
+						UPDGRP_PEER(PAF_UPDGRP(paf))->orf_plist[afi][safi] =
+							NULL;
+
 					break;
 				}
 
@@ -3086,9 +3082,13 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 
 	paf = peer_af_find(peer, afi, safi);
 	if (paf && paf->subgroup) {
-		updgrp = PAF_UPDGRP(paf);
-		updgrp_peer = UPDGRP_PEER(updgrp);
-		updgrp_peer->orf_plist[afi][safi] = peer->orf_plist[afi][safi];
+		/*
+		 * A peer sending ORF to us is placed into a dedicated update-group
+		 * at session establishment (isolated by peer address).
+		 * Propagate the updated orf_plist directly to the conf peer
+		 * so that subgroup_announce_check() sees the new filter.
+		 */
+		UPDGRP_PEER(PAF_UPDGRP(paf))->orf_plist[afi][safi] = peer->orf_plist[afi][safi];
 
 		/* Avoid suppressing duplicate routes later
 		 * when processing in subgroup_announce_table().
@@ -3499,8 +3499,7 @@ static void bgp_dynamic_capability_orf(uint8_t *pnt, int action,
 	}
 }
 
-static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
-					struct capability_header *hdr,
+static bool bgp_dynamic_capability_role(uint8_t *pnt, int action, struct capability_header *hdr,
 					struct peer *peer)
 {
 	uint8_t role;
@@ -3510,7 +3509,7 @@ static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
 			flog_err(EC_BGP_CAPABILITY_INVALID_LENGTH,
 				 "%pBP: ROLE Capability length error: got %u, expected %zu",
 				 peer, hdr->length, sizeof(role));
-			return;
+			return false;
 		}
 		SET_FLAG(peer->cap, PEER_CAP_ROLE_RCV);
 		memcpy(&role, pnt + 3, sizeof(role));
@@ -3518,8 +3517,9 @@ static void bgp_dynamic_capability_role(uint8_t *pnt, int action,
 		peer->remote_role = role;
 	} else {
 		UNSET_FLAG(peer->cap, PEER_CAP_ROLE_RCV);
-		peer->remote_role = ROLE_UNDEFINED;
 	}
+
+	return true;
 }
 
 static void bgp_dynamic_capability_fqdn(uint8_t *pnt, int action,
@@ -4030,7 +4030,13 @@ static int bgp_capability_msg_parse(struct peer_connection *connection, uint8_t 
 			bgp_dynamic_capability_enhe(pnt, action, hdr, peer);
 			break;
 		case CAPABILITY_CODE_ROLE:
-			bgp_dynamic_capability_role(pnt, action, hdr, peer);
+			if (!bgp_dynamic_capability_role(pnt, action, hdr, peer)) {
+				bgp_notify_send(connection, BGP_NOTIFY_OPEN_ERR,
+						BGP_NOTIFY_OPEN_MALFORMED_ATTR);
+				return BGP_Stop;
+			}
+			if (bgp_role_violation(connection))
+				return BGP_Stop;
 			break;
 		default:
 			flog_warn(EC_BGP_UNRECOGNIZED_CAPABILITY,

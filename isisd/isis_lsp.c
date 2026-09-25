@@ -6,6 +6,7 @@
  * Copyright (C) 2001,2002   Sampo Saaristo
  *                           Tampere University of Technology
  *                           Institute of Communications Engineering
+ * Copyright (C) 2003        Ofer Wald, Hannes Gredler
  * Copyright (C) 2013-2015   Christian Franke <chris@opensourcerouting.org>
  */
 
@@ -670,10 +671,17 @@ void lspid_print(uint8_t *lsp_id, char *dest, size_t dest_len, char dynhost,
 	else
 		dyn = NULL;
 
+	/*
+	 * Truncate the hostname to 15 characters so that the full LSP ID
+	 * (hostname + ".XX-XX" suffix = 21 chars) fits the %-21s column
+	 * used by lsp_print_vty().  The 'id' buffer (SYSID_STRLEN = 24)
+	 * can hold up to 23 chars, so this limit is for column alignment,
+	 * not buffer safety.
+	 */
 	if (dyn)
-		snprintf(id, sizeof(id), "%.14s", dyn->hostname);
+		snprintf(id, sizeof(id), "%.15s", dyn->hostname);
 	else if (!memcmp(isis->sysid, lsp_id, ISIS_SYS_ID_LEN) && dynhost)
-		snprintf(id, sizeof(id), "%.14s", cmd_hostname_get());
+		snprintf(id, sizeof(id), "%.15s", cmd_hostname_get());
 	else
 		snprintfrr(id, sizeof(id), "%pSY", lsp_id);
 

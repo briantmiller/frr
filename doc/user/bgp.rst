@@ -47,10 +47,15 @@ be specified (:ref:`common-invocation-options`).
 
 .. option:: -n, --no_kernel
 
-   Do not install learned routes into the linux kernel.  This option is useful
-   for a route-reflector environment or if you are running multiple bgp
-   processes in the same namespace.  This option is different than the --no_zebra
-   option in that a ZAPI connection is made.
+   Do not install BGP routes into zebra (and therefore not into the Linux
+   kernel).  This is the supported way to keep BGP from programming routes
+   when you still need a working FRR process, for example a route reflector
+   or multiple bgpd processes in the same namespace.
+
+   bgpd still opens a ZAPI connection to zebra.  FRR protocol daemons are
+   tightly integrated with zebra for interface, VRF, nexthop-tracking, label,
+   and other state; they are not intended to run as a standalone process
+   without zebra.
 
    This option can also be toggled during runtime by using the
    ``[no] bgp no-rib`` commands in VTY shell.
@@ -72,8 +77,12 @@ be specified (:ref:`common-invocation-options`).
 
 .. option:: -Z, --no_zebra
 
-   Do not communicate with zebra at all.  This is different than the --no_kernel
-   option in that we do not even open a ZAPI connection to the zebra process.
+   Deprecated.  This option is buggy and misleading: it does not fully stop
+   communication with zebra, and FRR is tightly integrated with zebra.
+
+   Do not use this option.  It will be removed in a future release.  To avoid
+   installing BGP routes into zebra, use ``-n`` / ``--no_kernel`` (or
+   ``bgp no-rib`` at runtime).
 
 .. option:: -s, --socket_size
 
@@ -88,9 +97,7 @@ be specified (:ref:`common-invocation-options`).
    Allow BGP to peer in the V6 afi, when the interface only has v4 addresses.
    This allows bgp to install the v6 routes with a v6 nexthop that has the
    v4 address encoded in the nexthop.  Zebra's equivalent option currently
-   overrides the bgp setting.  This setting is only really usable when
-   the operator has turned off communication to zebra and is running bgpd
-   as a complete standalone process.
+   overrides the bgp setting.
 
 .. option:: -K, --graceful_restart
 
@@ -1216,6 +1223,14 @@ Administrative Shutdown
 
    An optional shutdown message `MSG` can be specified.
 
+.. clicmd:: bgp shutdown no-notify
+
+   Administrative shutdown of all peers of a bgp instance without sending
+   BGP notification messages. This is useful in active/standby HA setups
+   where, when the node becomes standby, BGP should be shut down without
+   sending notifications in order to preserve BGP Graceful Restart state
+   on the receiving peers.
+
 
 .. _bgp-network:
 
@@ -1389,6 +1404,22 @@ Route Aggregation-IPv4 Address Family
    Similar to `summary-only`, but will only suppress more specific routes that
    are matched by the selected route-map.
 
+.. clicmd:: aggregate-address A.B.C.D/M upa [drop] [max-routes (1-4294967295)]
+
+   Enable Unreachable Prefix Announcement (UPA) for this aggregate. When component
+   routes are withdrawn or become unreachable, UPA routes are originated with
+   the UPA extended community (type 0x03, subtype 0x09) instead of withdrawing
+   the aggregate.
+
+   The optional ``drop`` keyword sets the D-bit in the UPA extended community,
+   signaling to receivers that they should install a blackhole/drop entry for
+   the prefix.
+
+   The ``max-routes`` parameter specifies a cap on the number of simultaneous
+   UPA routes that can be originated for this aggregate (0 = unlimited).
+
+   See :ref:`bgp-upa` for detailed information about UPA configuration and behavior.
+
 
    This configuration example sets up an ``aggregate-address`` under the ipv4
    address-family.
@@ -1442,6 +1473,22 @@ Route Aggregation-IPv6 Address Family
    Similar to `summary-only`, but will only suppress more specific routes that
    are matched by the selected route-map.
 
+.. clicmd:: aggregate-address X:X::X:X/M upa [drop] [max-routes (1-4294967295)]
+
+   Enable Unreachable Prefix Announcement (UPA) for this aggregate. When component
+   routes are withdrawn or become unreachable, UPA routes are originated with
+   the UPA extended community (type 0x03, subtype 0x09) instead of withdrawing
+   the aggregate.
+
+   The optional ``drop`` keyword sets the D-bit in the UPA extended community,
+   signaling to receivers that they should install a blackhole/drop entry for
+   the prefix.
+
+   The ``max-routes`` parameter specifies a cap on the number of simultaneous
+   UPA routes that can be originated for this aggregate (0 = unlimited).
+
+   See :ref:`bgp-upa` for detailed information about UPA configuration and behavior.
+
 
    This configuration example sets up an ``aggregate-address`` under the ipv6
    address-family.
@@ -1456,6 +1503,134 @@ Route Aggregation-IPv6 Address Family
         aggregate-address 50::0/64 route-map aggr-rmap
        exit-address-family
 
+
+.. _bgp-upa:
+
+Unreachable Prefix Announcement (UPA)
+--------------------------------------
+
+Unreachable Prefix Announcement (UPA) is a BGP mechanism defined in
+``draft-ietf-idr-upa-02`` that allows routers to signal that a prefix is
+unreachable without withdrawing the route entirely. This enables downstream
+routers to take appropriate action (such as blackholing traffic) while
+maintaining route presence in the BGP table.
+
+UPA Overview
+^^^^^^^^^^^^
+
+Traditionally, when all component routes of an aggregate disappear, the
+aggregate itself must be withdrawn. UPA solves this by advertising the
+aggregate with a special **UPA Extended Community** (type 0x03, subtype 0x09)
+that contains:
+
+- **Router ID**: The originating router's BGP router ID (4 bytes)
+- **D-bit (Drop flag)**: Whether receivers should install a blackhole entry
+
+When peers receive a route with the UPA extended community, they can:
+
+- Install a blackhole route to drop traffic immediately (D-bit)
+- Apply special policies (rate limiting, diversion to scrubbing centers, etc.)
+- Log/alert on unreachable prefixes
+
+Honoring the D-bit is opt-in: a receiver installs a blackhole/drop entry for a
+received UPA route **only** if UPA is enabled for that neighbor with
+``neighbor X upa``. Without that configuration the D-bit is ignored and no
+unreachable route is installed, even though the route (and its UPA extended
+community) remains visible in the BGP table.
+
+UPA Configuration
+^^^^^^^^^^^^^^^^^
+
+UPA must be enabled on both the aggregate and the BGP neighbor.
+
+**On the aggregate:**
+
+.. code-block:: frr
+
+   router bgp 65001
+    address-family ipv4 unicast
+     aggregate-address 10.0.0.0/8 upa drop max-routes 100
+    exit-address-family
+
+This enables UPA for the aggregate 10.0.0.0/8. When component routes become
+unreachable, UPA routes are originated up to the max-routes limit.
+
+**On the neighbor:**
+
+.. code-block:: frr
+
+   router bgp 65001
+    neighbor 192.0.2.1 remote-as 65002
+    address-family ipv4 unicast
+     neighbor 192.0.2.1 activate
+     neighbor 192.0.2.1 upa
+    exit-address-family
+
+``neighbor X upa`` governs UPA in both directions for that neighbor: only such
+neighbors are sent UPA-tagged routes (others receive normal route withdrawals,
+maintaining backward compatibility), and only for such neighbors is the D-bit of
+a received UPA route honored (a drop/blackhole entry installed). The
+``neighbor X upa`` command is documented in :ref:`bgp-peers`.
+
+Global UPA Origination
+^^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to per-aggregate UPA, UPA origination can be enabled globally for an
+address-family. This originates UPA routes for any prefix that becomes
+unreachable, independent of aggregate configuration.
+
+.. clicmd:: upa originate-all
+
+   Enable global UPA origination for the address-family. When any prefix becomes
+   unreachable, a UPA route is originated instead of a plain withdrawal.
+
+.. clicmd:: upa drop
+
+   Set the D-bit in globally originated UPA Extended Communities, signaling
+   receivers to install a blackhole/drop entry.
+
+.. clicmd:: upa max-routes (1-4294967295)
+
+   Limit the maximum number of simultaneous global UPA routes that can be
+   originated for the address-family. The default is ``0`` (unlimited).
+
+UPA Behavior
+^^^^^^^^^^^^
+
+- Aggregate is advertised normally when component routes are present
+- When components are withdrawn, UPA routes are originated with the UPA ExtCom
+- If ``drop`` is configured, the D-bit is set in the UPA extended community,
+  signaling receivers to install a blackhole/drop entry
+- When components become reachable again, UPA routes are automatically withdrawn
+- Multiple UPA originators' Router-IDs are aggregated in a single UPDATE
+  (up to 200 per prefix; a warning is logged above 100)
+- UPA routes always lose best-path selection to non-UPA routes
+
+UPA Show Commands
+^^^^^^^^^^^^^^^^^
+
+.. clicmd:: show bgp [<view|vrf> VIEWVRFNAME] [<ipv4|ipv6>] [unicast] upa [json]
+
+   Display UPA routes in the BGP routing table. Shows all routes that have
+   the UPA extended community set.
+
+.. clicmd:: show bgp [<view|vrf> VIEWVRFNAME] [<ipv4|ipv6>] [unicast] upa statistics [json]
+
+   Display UPA statistics including global UPA configuration state, number of
+   tracked UPA routes, and active UPA route count.
+
+.. clicmd:: show bgp [<ipv4|ipv6> [unicast]] neighbors <A.B.C.D|X:X::X:X|WORD> upa [json]
+
+   Display per-neighbor UPA information, including whether UPA sending is
+   enabled for the neighbor.
+
+UPA Debugging
+^^^^^^^^^^^^^
+
+.. clicmd:: debug bgp upa
+
+   Enable debugging of UPA origination, withdrawal, and Extended Community
+   processing.
 
 .. _bgp-redistribute-to-bgp:
 
@@ -1609,9 +1784,10 @@ Redistribute routes from a routing table number into BGP.
    After a non-graceful restart, peers detect the session loss and withdraw
    routes to this router, so the receiver has no routes to this router at all.
    ``advertisement-delay`` controls when this router re-announces itself,
-   ensuring it only attracts traffic once it has fully converged.  When
-   graceful-restart is active, ``advertisement-delay`` is not started -- the
-   GR restarter path handles route retention separately.
+   ensuring it only attracts traffic once it has fully converged.  While a
+   graceful restart is in progress for a BGP instance, ``advertisement-delay``
+   is not started for that instance -- the GR restarter path handles route
+   retention separately.  Other instances are unaffected.
 
    This feature holds route advertisements to peers for a configured number of
    seconds after the first peer reaches Established status.  The delay applies
@@ -1657,19 +1833,30 @@ Redistribute routes from a routing table number into BGP.
    After a non-graceful restart, peers detect the session loss and withdraw
    routes to this router, so the receiver has no routes to this router at all.
    ``advertisement-delay`` controls when this router re-announces itself,
-   ensuring it only attracts traffic once it has fully converged.  When
-   graceful-restart is active, ``advertisement-delay`` is not started -- the
-   GR restarter path handles route retention separately.
+   ensuring it only attracts traffic once it has fully converged.  While a
+   graceful restart is in progress for a BGP instance, ``advertisement-delay``
+   is not started for that instance -- the GR restarter path handles route
+   retention separately.  Other instances are unaffected.
 
    This feature holds route advertisements to peers for a configured number of
-   seconds after the first peer reaches Established status.  Note that this
-   command is configured under the specific bgp instance/vrf that the feature
-   is enabled for.  It cannot be used at the same time as the global
-   ``bgp advertisement-delay`` described above.  The global and per-vrf
+   seconds after the first BGP peer in any VRF reaches Established status.
+   Note that this command is configured under the specific bgp instance/vrf
+   that the feature is enabled for.  It cannot be used at the same time as the
+   global ``bgp advertisement-delay`` described above.  The global and per-vrf
    approaches are mutually exclusive.
 
-   When the first peer reaches Established, a timer for the configured delay is
-   started.  During this period, best-path selection and FIB programming proceed
+   The timer is VRF-aware: when the first peer in any VRF (including the
+   default VRF) reaches Established, the advertisement-delay timer starts for
+   every VRF that has it configured.  A VRF that has no BGP peers of its own,
+   and learns its routes by import from another instance, is held as well.
+   Each VRF manages its own timer independently.
+
+   Because a peer in one VRF starts the timer everywhere it is configured,
+   enable it only on the VRFs whose advertisements should be held.  A VRF
+   that carries the sessions used to reach other routers will otherwise hold
+   those advertisements too.
+
+   During the delay period, best-path selection and FIB programming proceed
    normally, but route advertisements to peers are held.  When the timer
    expires, advertisements are released to all established peers.
 
@@ -1761,6 +1948,10 @@ Defining Peers
    Enabling this peering sub-type will allow the propagation of non-transitive
    attributes across EBGP peerings (e.g. local-preference). Make sure to
    turn this peering type on for all peers in the OAD.
+
+   The AIGP attribute is not propagated implicitly over EBGP-OAD sessions. Per
+   ``draft-uttaro-idr-bgp-oad`` its default is "disabled" and it must be enabled
+   explicitly with ``neighbor PEER aigp`` on both ends of each OAD session.
 
    Disabled by default.
 
@@ -1996,6 +2187,27 @@ Configuring Peers
 
    Default: disabled.
 
+.. clicmd:: neighbor PEER upa
+
+   Enable UPA (Unreachable Prefix Announcement) for this peer. This governs
+   both directions:
+
+   - Outbound: locally originated UPA routes and received routes carrying the
+     UPA extended community (type 0x03, subtype 0x09) are announced to this
+     neighbor.
+   - Inbound: the D-bit of UPA routes received from this neighbor is honored,
+     i.e. a blackhole/drop entry is installed into zebra. Without this option
+     the D-bit is ignored and no unreachable route is installed.
+
+   Neighbors without this option will receive standard route withdrawals
+   when aggregates become unreachable, maintaining backward compatibility.
+
+   This capability must be configured together with the aggregate-address
+   ``upa`` option on the originating router.
+   See :ref:`bgp-upa` for detailed information.
+
+   Default: disabled.
+
 .. clicmd:: neighbor PEER weight WEIGHT
 
    This command specifies a default `weight` value for the neighbor's routes.
@@ -2126,7 +2338,7 @@ Configuring Peers
 
    .. code-block:: frr
 
-      ip extcommunity-list standard MGMT_SOO permit soo 1.1.1.1:0
+      bgp extcommunity-list standard MGMT_SOO permit soo 1.1.1.1:0
       !
       route-map RM_ALLOW_AS permit 10
        match extcommunity MGMT_SOO
@@ -2249,12 +2461,18 @@ Configuring Peers
    If you do not want specific attributes, you can drop them using this command, and
    let the BGP proceed by ignoring those attributes.
 
+   These attributes: ORIGIN AS_PATH NEXT_HOP MULTI_EXIT_DISC MP_REACH_NLRI
+   MP_UNREACH_NLRI EXT_COMMUNITIES and OTC cannot be dropped. Additionally if the
+   peer is ebgp then LOCAL_PREF ORIGINATOR_ID and CLUSTER_LIST cannot be dropped.
+   OTC is rejected because :rfc:`9234` does not allow the operator to alter the
+   route leak prevention procedures.
+
 .. clicmd:: neighbor <A.B.C.D|X:X::X:X|WORD> path-attribute treat-as-withdraw (1-255)...
 
    Received BGP UPDATES that contain specified path attributes are treat-as-withdraw. If
    there is an existing prefix in the BGP routing table, it will be removed.  These
    attributes: ORIGIN AS_PATH NEXT_HOP MULTI_EXIT_DISC MP_REACH_NLRI MP_UNREACH_NLRI
-   and EXT_COMMUNITIES cannot be ignored.  Additionally if the peer is ebgp then
+   EXT_COMMUNITIES and OTC cannot be ignored.  Additionally if the peer is ebgp then
    LOCAL_PREF ORIGINATOR_ID and CLUSTER_LIST cannot be ignored.  If you choose
    any of these then the whole command will be ignored.
 
@@ -3023,7 +3241,10 @@ The following commands can be used in route maps:
 
 .. clicmd:: set extended-comm-list delete <EXTCOMMUNITY_LIST_NAME>
 
-   Set BGP extended community list for deletion.
+   Remove extended communities from a route that match the specified
+   extcommunity-list. Both standard and expanded lists may be used. Only
+   ``permit`` entries in the list are removed. See
+   :ref:`bgp-extended-community-lists`.
 
 .. clicmd:: set large-comm-list delete <LCOMMUNITY_LIST_NAME>
 
@@ -3185,30 +3406,82 @@ the other is IP address based format.
 Extended Community Lists
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
+Extended community lists are user-defined lists of extended community values.
+They are used to match routes in route-maps or to remove selected extended
+communities from a route.
+
+There are two types of extended community list:
+
+standard
+   This type accepts explicit extended community values. Each value must be
+   prefixed with a type keyword: ``rt``, ``soo``, ``nt``, or ``color``. The
+   value itself uses either AS-based (``AS:VAL``) or IP-based
+   (``IP-Address:VAL``) format. Multiple values may be specified on one line.
+   Matching is done on the encoded extended community, so ``rt 65001:100`` and
+   ``soo 65001:100`` are different values.
+
+expanded
+   This type accepts a regular expression (:ref:`bgp-regular-expressions`).
+   Because the regex must be interpreted on each use, expanded lists are slower
+   than standard lists. Do not prefix values with ``rt`` or ``soo``; the regex
+   is matched against each extended community on the route individually (for
+   example against strings such as ``RT:65001:100`` or ``SoO:10.0.0.1:1``).
+
 .. clicmd:: bgp extcommunity-list standard NAME permit|deny EXTCOMMUNITY
 
-   This command defines a new standard extcommunity-list. `extcommunity` is
-   extended communities value. The `extcommunity` is compiled into extended
-   community structure. We can define multiple extcommunity-list under same
-   name. In that case match will happen user defined order. Once the
-   extcommunity-list matches to extended communities attribute in BGP updates
-   it return permit or deny based upon the extcommunity-list definition. When
-   there is no matched entry, deny will be returned. When `extcommunity` is
-   empty it matches to any routes.
+   This command defines a new standard extcommunity-list. ``EXTCOMMUNITY`` is
+   one or more extended community values, each prefixed with a type keyword.
+   The value is compiled into an extended community structure. Multiple
+   extcommunity-list entries may be defined under the same name; in that case
+   matching happens in user-defined order. Once an entry matches an extended
+   community on the route, the list returns ``permit`` or ``deny`` based on
+   that entry. When no entry matches, ``deny`` is returned. When
+   ``EXTCOMMUNITY`` is empty, the entry matches any route.
+
+   Example:
+
+   .. code-block:: frr
+
+      bgp extcommunity-list standard CUSTOMER-RT permit rt 65001:100
+      bgp extcommunity-list standard MGMT-SOO permit soo 10.0.0.1:100
+      bgp extcommunity-list standard STRIP-RT permit rt 65001:100 rt 65001:200
 
 .. clicmd:: bgp extcommunity-list expanded NAME permit|deny LINE
 
-   This command defines a new expanded extcommunity-list. `line` is a string
-   expression of extended communities attribute. `line` can be a regular
-   expression (:ref:`bgp-regular-expressions`) to match an extended communities
-   attribute in BGP updates.
+   This command defines a new expanded extcommunity-list. ``LINE`` is a regular
+   expression matched against each extended community value on a route
+   individually.
 
-   Note that all extended community lists shares a single name space, so it's
-   not necessary to specify their type when creating or destroying them.
+   Example:
+
+   .. code-block:: frr
+
+      bgp extcommunity-list expanded STRIP-RT permit 65001:(1[0-9]{2}|2[0-4][0-9]|250)
+
+   Note that all extended community lists share a single namespace, so it is
+   not necessary to specify ``standard`` or ``expanded`` when removing a list
+   by name.
+
+.. _bgp-numbered-extcommunity-lists:
+
+Numbered Extended Community Lists
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When a number is used as the extcommunity-list name, the number range
+determines the list type. Numbers ``1`` to ``99`` define standard lists.
+Numbers ``100`` to ``500`` define expanded lists.
+
+.. clicmd:: bgp extcommunity-list (1-99) permit|deny EXTCOMMUNITY
+
+   Define a numbered standard extcommunity-list.
+
+.. clicmd:: bgp extcommunity-list (100-500) permit|deny LINE
+
+   Define a numbered expanded extcommunity-list.
 
 .. clicmd:: show bgp extcommunity-list [NAME detail]
 
-   This command displays current extcommunity-list information. When `name` is
+   This command displays current extcommunity-list information. When ``NAME`` is
    specified the community list's information is shown.
 
 
@@ -3227,12 +3500,37 @@ BGP Extended Communities in Route Map
    is set, match happens when any of the extended communities of the BGP updates
    matches an extended community of the specified list.
 
- .. clicmd:: match extcommunity-limit (0-65535)
+.. clicmd:: match extcommunity-limit (0-65535)
 
    This command matches BGP updates that use extended community list and IPv6
    extended community list, and with an extended community list count less or
    equal than the defined limit. Setting extended community-limit to 0 will
    only match BGP updates with no extended community.
+
+.. clicmd:: set extended-comm-list delete <EXTCOMMUNITY_LIST_NAME>
+
+   Remove extended communities from the route that match ``permit`` entries in
+   the named extcommunity-list. Both standard and expanded lists are
+   supported. Other extended communities on the route are left unchanged.
+   See :ref:`bgp-extended-community-lists`.
+
+   Example using a standard list to strip one Route Target:
+
+   .. code-block:: frr
+
+      bgp extcommunity-list standard STRIP-RT permit rt 65001:200
+      !
+      route-map RMAP permit 10
+       set extended-comm-list delete STRIP-RT
+
+   Example using an expanded list to strip a range of Route Targets:
+
+   .. code-block:: frr
+
+      bgp extcommunity-list expanded STRIP-RT permit 65001:(2[0-4][0-9]|250)
+      !
+      route-map RMAP permit 10
+       set extended-comm-list delete STRIP-RT
 
 .. clicmd:: set extcommunity none
 
@@ -3261,7 +3559,7 @@ BGP Extended Communities in Route Map
 
    This command sets Site of Origin value.
 
-.. clicmd:: set extcomumnity color EXTCOMMUNITY
+.. clicmd:: set extcommunity color EXTCOMMUNITY
 
    This command sets colors values.
 
@@ -3294,9 +3592,6 @@ BGP Extended Communities in Route Map
    configures it as ``non-transitive``.
 
 .. seealso:: :ref:`wecmp_linkbw`
-
-Note that the extended expanded community is only used for `match` rule, not for
-`set` actions.
 
 .. _bgp-large-communities-attribute:
 
@@ -3960,34 +4255,54 @@ and used as the source VNI for sending traffic to the destination IP-VRF.
 Note that in FRR, Downstream VNI requires the use of single VXLAN devices (SVD)
 for the dataplane and will not work with traditional VXLAN devices.
 
-.. _bgp-evpn-ip-vrf-route-targets:
+.. _bgp-evpn-route-target-configuration:
 
-EVPN IP-VRF Route Targets
-^^^^^^^^^^^^^^^^^^^^^^^^^
+EVPN Route Target Configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-.. clicmd:: route-target <import|export|both> <RTLIST|auto>
+The concepts behind EVPN Route Targets (how they identify IP-VRFs and
+EVIs, how the automatic Route Target is derived and matched, and how
+wildcard Route Targets match) are described in :ref:`evpn-route-targets`.
+This section documents the commands.
 
-   Configure the route-target set for EVPN for a specific IP-VRF.
-   RTLIST is a list of any of matching ``(A.B.C.D:MN|EF:OPQR|GHJK:MN|*:OPQR|*:MN)``
-   where ``*`` indicates wildcard matching for the AS number
-   (match any AS number). Note that wildcards are only applicable to ``import``.
-   Wildcards are particularly useful in eBGP-datacenter deployments, where each leaf
-   has a unique AS number and thus uses a unique export-RT, but you want to import all routes
-   from all leaves.
-   ``auto`` is used to retain the autoconfigure that is default behavior for L3 RTs.
+Route Targets are configured per direction with the same commands on two
+levels:
 
-   Route Targets allow building flexible VPN topologies by controlling the leaking of
-   routes between different IP-VRFs. For EVPN, the Downstream VNI feature makes this easy.
+- for an IP-VRF (L3VNI), under the ``l2vpn evpn`` address-family of the
+  tenant VRF's BGP instance (``router bgp AS vrf VRFNAME``), and
+- for an EVI / L2VNI (unfortunately the terms are used exchangeably in FRR,
+  because FRR uses the "VLAN-Based Service Interface" model, as defined
+  in :rfc:`9135`), under ``vni N`` inside the ``l2vpn evpn`` address-family
+  of the BGP underlay (IP-)VRF (the VRF that has ``advertise-all-vni``
+  configured). Any attempt to configure the vni-level commands in a
+  different (IP-)VRF is rejected
+  (``This command is only supported under EVPN VRF``).
 
-   When using ``import``, the configured RTs are used to select which
-   EVPN VPN routes are imported into the local VRF. When using
-   ``export``, the configured RTs are attached to advertised EVPN VPN routes. Note that
-   the ``export`` Route Target only applies to routes that are originated in the local VRF.
-   An export Route Target will not be attached to routes that are learned from other peers
-   that are re-advertised. ``both`` applies the list to import and export.
+EVPN attaches the IP-VRF Route Targets to Route Type 2 (MAC/IP
+Advertisement, :rfc:`9135`) and Route Type 5 (IP Prefix Route, :rfc:`9136`)
+routes, and the EVI Route Targets to the routes of the EVI,
+notably Route Type 2 and Route Type 3 (IMET).
 
-   EVPN attaches the IP-VRF Route Targets to Route Type 2 (MAC/IP Advertisement, :rfc:`9135`)
-   and Route Type 5 (IP Prefix Route, :rfc:`9136`).
+.. clicmd:: route-target <import|export|both> RTLIST
+
+   Configure the manual route-target set of the IP-VRF or EVI / L2VNI.
+   RTLIST is a space separated list of route targets, each matching
+   ``(A.B.C.D:MN|EF:OPQR|GHJK:MN|*:OPQR|*:MN)``, where ``*`` indicates
+   wildcard matching for the AS number (match any AS number, see
+   :ref:`evpn-wildcard-route-targets`). Wildcards are only applicable to
+   ``import``.
+
+   When using ``import``, the configured RTs are used to select which EVPN
+   VPN routes are imported into the IP-VRF or EVI. When using
+   ``export``, the configured RTs are attached to advertised EVPN VPN
+   routes. Note that the ``export`` Route Targets only apply to routes that
+   are originated locally. An export Route Target will not be attached to
+   routes that are learned from other peers and re-advertised. ``both``
+   applies the list to import and export.
+
+   Route Targets allow building flexible VPN topologies by controlling the
+   leaking of routes between different IP-VRFs. For EVPN, the Downstream
+   VNI feature makes this easy.
 
    Example:
 
@@ -3998,36 +4313,11 @@ EVPN IP-VRF Route Targets
        address-family l2vpn evpn
         route-target import 64496:12344
         route-target import 64496:17000000
+        route-target import *:12345
         route-target export 64496:12344
        exit-address-family
       exit
-
-.. _bgp-evpn-mac-vrf-l2vni-route-targets:
-
-EVPN MAC-VRF / L2VNI Route Targets
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-.. clicmd:: route-target <import|export|both> <RTLIST>
-
-   Configure the route-target set for EVPN for a specific MAC-VRF / L2VNI (the
-   terms are equivalent for FRR, because FRR uses the "VLAN-Based Service Interface" model,
-   as defined in :rfc:`9135`)
-
-   RTLIST is a list of any of matching ``(A.B.C.D:MN|EF:OPQR|GHJK:MN)``. Note that it is currently
-   not possible to manually define wildcard imports like for IP-VRFs, and there is also no explicit
-   ``auto`` option like for IP-VRFs.
-
-   This command can only be executed in the BGP underlay (IP-)VRF
-   (i.e. the VRF that has ``advertise-all-vni`` configured).
-   Any attempt to configure this command in a different (IP-)VRF will be rejected
-   (``This command is only supported under EVPN VRF``).
-
-   EVPN attaches the MAC-VRF Route Targets to Route Type 2 (MAC/IP Advertisement, :rfc:`9135`).
-
-   Example:
-
-   .. code-block:: frr
-
+      !
       router bgp 64496
        !
        address-family l2vpn evpn
@@ -4038,6 +4328,41 @@ EVPN MAC-VRF / L2VNI Route Targets
         exit-vni
        exit-address-family
       exit
+
+.. clicmd:: auto-route-target <import|export|both> <add-always|add-never|add-if-no-manual|rfc8365-compatible>
+
+   Control the automatic route-target of the given direction(s) of the
+   IP-VRF or EVI / L2VNI (see :ref:`evpn-automatic-route-targets` for
+   how it is derived, encoded and matched). The add-mode selects when it is
+   added to the effective route-targets:
+
+   - ``add-always``: always add the automatic route-target, even when
+     manual route-targets are configured for the direction.
+   - ``add-never``: never add the automatic route-target, so the direction
+     only uses manually configured route-targets. With ``add-never`` and no
+     manual route-targets, no EVPN VPN routes are imported into
+     (``import``) or advertised with a route-target from (``export``) the
+     IP-VRF or EVI.
+   - ``add-if-no-manual``: add the automatic route-target only when no
+     manual route-target is configured for the direction. This is the
+     default behavior; configuring it explicitly makes the default visible
+     in the running configuration.
+
+   ``rfc8365-compatible`` is an orthogonal per-direction setting (a
+   separate statement, kept independently of the add-mode): it encodes the
+   automatic route-target with the VXLAN encapsulation bits set in the
+   local admin field, as described in :rfc:`8365`. It is off by default,
+   configured at the instance level (the tenant VRF for the L3VNI, the
+   EVPN underlay VRF for all its L2VNIs) and cannot be set per-L2VNI.
+
+   ``both`` applies the setting to import and export.
+
+   .. deprecated:: 10.8
+      ``route-target <import|export|both> auto`` is the previous spelling
+      of ``auto-route-target <import|export|both> add-always``, and
+      ``autort rfc8365-compatible`` is the previous spelling of
+      ``auto-route-target both rfc8365-compatible``. Both are still
+      accepted as hidden aliases.
 
 
 .. _bgp-evpn-advertise-pip:
@@ -4157,7 +4482,7 @@ route with gateway IP.
 1. CLI to add gateway IP while generating EVPN type-5 route from a BGP IPv4/IPv6
 prefix:
 
-.. clicmd:: advertise <ipv4|ipv6> unicast [gateway-ip]
+.. clicmd:: advertise <ipv4|ipv6> unicast [gateway-ip] [route-map RMAP_NAME] [skip-evpn-imported]
 
 When this CLI is configured for a BGP vrf under L2VPN EVPN address family, EVPN
 type-5 routes are generated for BGP prefixes in the vrf.
@@ -4172,6 +4497,26 @@ of the corresponding type-5 paths.
 
 Note that EVPN will still perform its own bestpath selection for each EVPN
 prefix, and addpath must be properly configured in EVPN to enable multipathing.
+
+The optional ``skip-evpn-imported`` keyword prevents exporting a
+unicast route as a Type-5 route when its ultimate VRF-leak import parent is in
+the EVPN table. This prevents an EVPN-origin route leaked between VRFs from
+being re-exported into EVPN. It can be removed without disabling Type-5 export
+with the following command:
+
+.. clicmd:: no advertise <ipv4|ipv6> unicast skip-evpn-imported
+
+VPN routes can also be advertised as EVPN type-5 routes:
+
+.. clicmd:: advertise <ipv4|ipv6> vpn [route-map RMAP_NAME]
+
+When this CLI is configured under the L2VPN EVPN address family, selected
+IPv4/IPv6 VPN routes are exported to EVPN as type-5 routes. EVPN export route
+targets are attached according to the IP-VRF route-target configuration.
+If the VPN route carries an SRv6 L3 service attribute, the SRv6 SID is
+propagated to the EVPN type-5 route. The ``gateway-ip`` overlay index is only
+supported with ``advertise <ipv4|ipv6> unicast`` and cannot be used with the
+``vpn`` form.
 
 2. Add gateway IP to EVPN type-5 route using a route-map:
 
@@ -4914,8 +5259,10 @@ The following command is available in ``config`` mode as well as in the
 
 .. clicmd:: bgp input-queue-limit (1-4294967295)
 
-   Set the BGP Input Queue limit for all peers when messaging parsing. Increase
-   this only if you have the memory to handle large queues of messages at once.
+   Set the BGP Input Queue limit for all peers. The limit is checked
+   before reading from the socket; messages from a single read are all
+   processed even if temporarily exceeding the limit. Increase this only
+   if you have the memory to handle large queues of messages at once.
 
 .. clicmd:: bgp output-queue-limit (1-4294967295)
 
@@ -5135,6 +5482,19 @@ incoming/outgoing directions.
 .. clicmd:: show bgp [<view|vrf> VIEWVRFNAME] [afi] [safi] neighbors PEER received prefix-filter [json]
 
    Display Address Prefix ORFs received from this peer.
+
+.. clicmd:: show [ip] bgp [<view|vrf> VIEWVRFNAME] [afi] [safi] neighbors PEER orf-prefix-list [json]
+
+   Display the ORF prefix-list entries received from this peer. This command
+   shows the individual prefix entries that make up the Outbound Route
+   Filtering (ORF) prefix-list sent by the peer, which is used to filter
+   outbound route advertisements to that peer.
+
+   Example output::
+
+      r1# show bgp ipv4 unicast neighbors 192.168.12.2 orf-prefix-list
+      ip prefix-list 192.168.12.2.1.1: 1 entries
+         seq 5 permit 10.0.0.1/32
 
 .. clicmd:: show bgp [afi] [safi] [all] dampening dampened-paths [wide|json]
 
@@ -5607,6 +5967,46 @@ Displaying Routes by Route Distinguisher
 
       Displayed 2 prefixes (2 paths)
 
+.. clicmd:: show [ip] bgp l2vpn evpn neighbors <A.B.C.D|X:X::X:X|WORD> routes [json [brief]]
+
+   Display EVPN routes from the BGP loc-rib that were received from the given
+   neighbor and accepted for the L2VPN EVPN address-family (same filter as the
+   non-JSON ``routes`` form).
+
+   With ``json``, output is JSON including per-prefix ``paths`` and table-level
+   counters such as ``numPrefix`` and ``totalPrefix``.
+
+   With ``json brief`` (``brief`` only after ``json``), output is compact JSON:
+   per-prefix ``pathCount``, ``multiPathCount``, and ``flags`` (for example
+   ``bestPathExists``) under each NLRI key, without a ``paths`` array and
+   without the outer ``numPrefix`` / ``totalPrefix`` fields.
+
+.. clicmd:: show [ip] bgp l2vpn evpn rd <ASN:NN_OR_IP-ADDRESS:NN|all> neighbors <A.B.C.D|X:X::X:X|WORD> routes [json]
+
+   Same intent as :clicmd:`show [ip] bgp l2vpn evpn neighbors <A.B.C.D|X:X::X:X|WORD> routes [json [brief]]`, but
+   the RIB is restricted to the given Route Distinguisher (or all RDs when
+   ``all`` is used instead of a specific RD). Only ``json`` is supported here;
+   there is no ``brief`` modifier on this variant.
+
+BGP EVPN Route RD Brief Command
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. clicmd:: show bgp l2vpn evpn route rd <ASN:NN_OR_IP-ADDRESS:NN|all> [json [brief]]
+
+   Display EVPN routes for the given Route Distinguisher. Without ``json``,
+   output is the usual detailed text. With ``json``, output is full detail in
+   JSON.
+
+   The ``brief`` keyword is only valid together with ``json``. Use
+   ``json brief`` for a reduced JSON structure: ``numPrefixes`` per RD and, per
+   prefix, ``pathCount``, ``multiPathCount``, and ``flags`` (including
+   ``bestPathExists``).
+
+.. clicmd:: show bgp l2vpn evpn route rd <ASN:NN_OR_IP-ADDRESS:NN|all> type <ead|1|macip|2|multicast|3|es|4|prefix|5> [json [brief]]
+
+   Same as above, restricted to the given EVPN route type. Use ``json brief``
+   for the same reduced JSON format.
+
 Displaying Update Group Information
 -----------------------------------
 
@@ -5756,7 +6156,8 @@ by route reflectors to avoid looping.
 
 To set and unset the BGP daemon ``-n`` / ``--no_kernel`` options during runtime
 to disable BGP route installation to the RIB (Zebra), the ``[no] bgp no-rib``
-commands can be used;
+commands can be used.  This is the supported replacement for the deprecated
+``-Z`` / ``--no_zebra`` option.
 
 Please note that setting the option during runtime will withdraw all routes in
 the daemons RIB from Zebra and unsetting it will announce all routes in the

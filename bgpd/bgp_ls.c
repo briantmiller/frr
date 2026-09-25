@@ -662,9 +662,10 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 	struct bgp_path_info *new;
 	struct attr attr;
 	struct attr *attr_new;
-	struct bgp_dest *dest;
 	struct bgp_ls_nlri *ls_nlri;
 	struct prefix p;
+
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
 
 	if (!bgp || !nlri) {
 		flog_err(EC_BGP_LS_PACKET, "BGP-LS: Invalid parameters to %s", __func__);
@@ -716,7 +717,6 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 			/* The attribute is not changed. */
 			bgp_attr_unintern(&attr_new);
 			aspath_unintern(&attr.aspath);
-			bgp_dest_unlock_node(dest);
 		} else {
 			/* The attribute is changed. */
 			bgp_path_info_set_flag(dest, bpi, BGP_PATH_ATTR_CHANGED);
@@ -731,7 +731,6 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 
 			/* Process change. */
 			bgp_process(bgp, dest, bpi, AFI_BGP_LS, SAFI_BGP_LS);
-			bgp_dest_unlock_node(dest);
 			aspath_unintern(&attr.aspath);
 		}
 
@@ -747,9 +746,6 @@ int bgp_ls_update(struct bgp *bgp, struct bgp_ls_nlri *nlri, struct bgp_ls_attr 
 
 	/* Process change */
 	bgp_process(bgp, dest, new, AFI_BGP_LS, SAFI_BGP_LS);
-
-	/* Unlock node from bgp_afi_node_get */
-	bgp_dest_unlock_node(dest);
 
 	/* Unintern original */
 	aspath_unintern(&attr.aspath);
@@ -1533,28 +1529,28 @@ static int bgp_ls_originate_bgp_link_internal(struct bgp *bgp, struct peer *peer
 	SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs, BGP_LS_LINK_DESC_LINK_ID_BIT);
 
 	/* Link Descriptor: IPv4 Neighbor Address (TLV 260) */
-	if (connection && connection->su.sa.sa_family == AF_INET) {
+	if (connection->su.sa.sa_family == AF_INET) {
 		nlri->nlri_data.link.link_desc.ipv4_neigh_addr = connection->su.sin.sin_addr;
 		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
 			 BGP_LS_LINK_DESC_IPV4_NEIGH_BIT);
 	}
 
 	/* Link Descriptor: IPv6 Neighbor Address (TLV 262) */
-	if (connection && connection->su.sa.sa_family == AF_INET6) {
+	if (connection->su.sa.sa_family == AF_INET6) {
 		nlri->nlri_data.link.link_desc.ipv6_neigh_addr = connection->su.sin6.sin6_addr;
 		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
 			 BGP_LS_LINK_DESC_IPV6_NEIGH_BIT);
 	}
 
 	/* Link Descriptor: IPv4 Interface Address (TLV 259) */
-	if (connection && connection->su_local && connection->su_local->sa.sa_family == AF_INET) {
+	if (connection->su_local && connection->su_local->sa.sa_family == AF_INET) {
 		nlri->nlri_data.link.link_desc.ipv4_intf_addr = connection->su_local->sin.sin_addr;
 		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
 			 BGP_LS_LINK_DESC_IPV4_INTF_BIT);
 	}
 
 	/* Link Descriptor: IPv6 Interface Address (TLV 261) */
-	if (connection && connection->su_local && connection->su_local->sa.sa_family == AF_INET6) {
+	if (connection->su_local && connection->su_local->sa.sa_family == AF_INET6) {
 		nlri->nlri_data.link.link_desc.ipv6_intf_addr =
 			connection->su_local->sin6.sin6_addr;
 		SET_FLAG(nlri->nlri_data.link.link_desc.present_tlvs,
@@ -1930,12 +1926,44 @@ int bgp_ls_originate_bgp_prefix(struct bgp *bgp, afi_t afi, safi_t safi, struct 
 	return bgp_ls_originate_prefix_internal(bgp, afi, p, route_type, NULL);
 }
 
+static bool bgp_ls_bgp_prefix_nlri_is_active(struct bgp *bgp, const struct prefix *p,
+					     enum bgp_ls_bgp_route_type route_type)
+{
+	struct bgp_ls_nlri *nlri;
+	struct bgp_dest *dest;
+	struct bgp_path_info *bpi;
+	struct prefix lookup;
+	bool active = false;
+
+	nlri = bgp_ls_lookup_bgp_prefix_nlri(bgp, p, route_type);
+	if (!nlri)
+		return false;
+
+	memset(&lookup, 0, sizeof(lookup));
+	lookup.family = AF_UNSPEC;
+	lookup.prefixlen = 32;
+	lookup.u.val32[0] = nlri->id;
+
+	dest = bgp_node_lookup(bgp->rib[AFI_BGP_LS][SAFI_BGP_LS], &lookup);
+	if (!dest)
+		return false;
+
+	for (bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi = bpi->next) {
+		if (bpi->peer == bgp->peer_self && !CHECK_FLAG(bpi->flags, BGP_PATH_REMOVED)) {
+			active = true;
+			break;
+		}
+	}
+
+	bgp_dest_unlock_node(dest);
+	return active;
+}
+
 int bgp_ls_originate_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locator *locator)
 {
 	struct bgp_ls_attr *ls_attr;
-	struct bgp_ls_nlri *existing_nlri;
 	bool had_srv6_cap;
-	bool is_new_locator_nlri;
+	bool was_active;
 	int ret;
 
 	if (!bgp || !bgp->ls_info || !locator)
@@ -1960,9 +1988,8 @@ int bgp_ls_originate_srv6_locator_prefix(struct bgp *bgp, const struct srv6_loca
 	}
 
 	had_srv6_cap = bgp_ls_has_srv6_capability(bgp);
-	existing_nlri = bgp_ls_lookup_bgp_prefix_nlri(bgp, (const struct prefix *)&locator->prefix,
+	was_active = bgp_ls_bgp_prefix_nlri_is_active(bgp, (const struct prefix *)&locator->prefix,
 						      BGP_LS_BGP_RT_LOCAL);
-	is_new_locator_nlri = (existing_nlri == NULL);
 
 	if (BGP_DEBUG(linkstate, LINKSTATE))
 		zlog_debug("BGP-LS [locator]: advertising locator %s prefix=%pFX algo=%u",
@@ -1992,7 +2019,7 @@ int bgp_ls_originate_srv6_locator_prefix(struct bgp *bgp, const struct srv6_loca
 		return -1;
 	}
 
-	if (is_new_locator_nlri)
+	if (!was_active)
 		bgp->ls_info->srv6_locator_nlri_count++;
 
 	if (!had_srv6_cap)
@@ -2013,6 +2040,7 @@ int bgp_ls_withdraw_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locat
 	struct bgp_ls_nlri *nlri;
 	int ret;
 	bool had_srv6_cap;
+	bool was_active;
 
 	if (!bgp || !bgp->ls_info || !locator)
 		return -1;
@@ -2029,6 +2057,8 @@ int bgp_ls_withdraw_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locat
 		return 0;
 
 	had_srv6_cap = bgp_ls_has_srv6_capability(bgp);
+	was_active = bgp_ls_bgp_prefix_nlri_is_active(bgp, (const struct prefix *)&locator->prefix,
+						      BGP_LS_BGP_RT_LOCAL);
 
 	if (BGP_DEBUG(linkstate, LINKSTATE))
 		zlog_debug("BGP-LS [locator]: withdrawn locator prefix NLRI for %s", locator->name);
@@ -2037,7 +2067,7 @@ int bgp_ls_withdraw_srv6_locator_prefix(struct bgp *bgp, const struct srv6_locat
 	if (ret != 0)
 		return ret;
 
-	if (bgp->ls_info->srv6_locator_nlri_count > 0)
+	if (was_active && bgp->ls_info->srv6_locator_nlri_count > 0)
 		bgp->ls_info->srv6_locator_nlri_count--;
 
 	if (bgp->ls_info->srv6_locator_nlri_count == 0 && had_srv6_cap)
@@ -2214,6 +2244,7 @@ static struct bgp_ls_nlri *bgp_ls_lookup_bgp_link_nlri(struct bgp *bgp, struct p
 				continue;
 		}
 
+		bgp_dest_unlock_node(dest);
 		return nlri;
 	}
 
@@ -2264,6 +2295,7 @@ static struct bgp_ls_nlri *bgp_ls_lookup_bgp_prefix_nlri(struct bgp *bgp, const 
 		if (!prefix_same(&nlri->nlri_data.prefix.prefix_desc.prefix, p))
 			continue;
 
+		bgp_dest_unlock_node(bn);
 		return nlri;
 	}
 

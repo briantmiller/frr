@@ -93,6 +93,32 @@
 #define ECOMMUNITY_OPAQUE_SUBTYPE_ENCAP     0x0c
 #define ECOMMUNITY_OPAQUE_SUBTYPE_COLOR	    0x0b
 
+/* UPA subtype — draft-ietf-idr-upa-02 Section 5.1
+ * Existing allocations: 0x0b = COLOR, 0x0c = ENCAP.
+ * Update this value when IANA assigns the permanent subtype.
+ */
+#define ECOMMUNITY_OPAQUE_SUBTYPE_UPA 0x09
+
+/* UPA flags byte — RFC bit-numbering: bit 0 is the MSB.
+ * In a uint8_t, MSB maps to (1 << 7) = 0x80.
+ */
+#define BGP_UPA_FLAG_DROP (1 << 7) /* D-bit (RFC bit 0, MSB): install drop entry */
+
+/* Absolute byte offsets within the 8-byte UPA Extended Community value.
+ * Bytes 0 (type) and 1 (subtype) are already named by ECOMMUNITY_ENCODE_OPAQUE
+ * and ECOMMUNITY_OPAQUE_SUBTYPE_UPA; only the remaining bytes need aliases.
+ */
+#define BGP_UPA_EXTCOM_OFF_FLAGS     2 /* flags byte (BGP_UPA_FLAG_DROP etc.) */
+#define BGP_UPA_EXTCOM_OFF_RSVD	     3 /* reserved, must be 0x00 */
+#define BGP_UPA_EXTCOM_OFF_ROUTER_ID 4 /* first byte of 4-byte Router-ID (network order) */
+
+/* UPA aggregation limits per prefix.
+ * WARN_THRESHOLD: log a warning when a single prefix has this many UPA originators.
+ * MAX_LIMIT: hard cap; log an error and stop adding Router-IDs beyond this count.
+ */
+#define BGP_UPA_EXTCOM_WARN_THRESHOLD 100
+#define BGP_UPA_EXTCOM_MAX_LIMIT      200
+
 /* Extended communities attribute string format.  */
 #define ECOMMUNITY_FORMAT_ROUTE_MAP            0
 #define ECOMMUNITY_FORMAT_COMMUNITY_LIST       1
@@ -120,23 +146,29 @@ enum ecommunity_origin_validation_states {
 #define ECOMMUNITY_NODE_TARGET 0x09
 #define ECOMMUNITY_NODE_TARGET_RESERVED 0
 
-/* Extended Communities attribute.  */
+/*
+ * Extended Communities attribute.
+ *
+ * All values in a single ecommunity must be of the same type (either regular
+ * 8-octet values or IPv6 20-octet values), never mix the two!
+ */
 struct ecommunity {
 	/* Reference counter.  */
 	unsigned long refcnt;
 
-	/* Size of Each Unit of Extended Communities attribute.
-	 * to differentiate between IPv6 ext comm and ext comm
+	/* Size in octets of each value in val, i.e. the size of one unit:
+	 * ECOMMUNITY_SIZE for regular values, IPV6_ECOMMUNITY_SIZE for IPv6
+	 * values. Distinguishes the two encodings
 	 */
 	uint8_t unit_size;
 
 	/* Disable IEEE floating-point encoding for extended community */
 	bool disable_ieee_floating;
 
-	/* Size of Extended Communities attribute.  */
+	/* Number of values held in val, each unit_size octets long */
 	uint32_t size;
 
-	/* Extended Communities value.  */
+	/* Payload, packed array of "size" values, each of size "unit_size" octets */
 	uint8_t *val;
 
 	/* Human readable format string.  */
@@ -163,12 +195,28 @@ struct ecommunity_val {
 	uint8_t val[ECOMMUNITY_SIZE];
 };
 
-/* IPv6 Extended community value is eight octet.  */
+/* Many places assume that an ecommunity_val can be used as a plain
+ * byte buffer of its value.
+ */
+static_assert(sizeof(struct ecommunity_val) == ECOMMUNITY_SIZE,
+	      "struct ecommunity_val size mismatch");
+
+/* IPv6 Extended community value is twenty octet.  */
 struct ecommunity_val_ipv6 {
 	uint8_t val[IPV6_ECOMMUNITY_SIZE];
 };
 
-#define ecom_length_size(X, Y)    ((X)->size * (Y))
+static_assert(sizeof(struct ecommunity_val_ipv6) == IPV6_ECOMMUNITY_SIZE,
+	      "struct ecommunity_val_ipv6 size mismatch");
+
+/*
+ * Length of the val payload of an ecommunity: the number of held communities
+ * (size) times the length of each held community (unit_size).
+ */
+static inline size_t ecom_val_size(const struct ecommunity *ecom)
+{
+	return (size_t)ecom->size * ecom->unit_size;
+}
 
 /*
  * Encode BGP Route Target AS:nn.
@@ -192,9 +240,8 @@ static inline void encode_route_target_as(as_t as, uint32_t val,
 /*
  * Encode BGP Route Target IP:nn.
  */
-static inline void encode_route_target_ip(struct in_addr *ip, uint16_t val,
-					  struct ecommunity_val *eval,
-					  bool trans)
+static inline void encode_route_target_ip(const struct in_addr *ip, uint16_t val,
+					  struct ecommunity_val *eval, bool trans)
 {
 	eval->val[0] = ECOMMUNITY_ENCODE_IP;
 	if (!trans)
@@ -224,8 +271,8 @@ static inline void encode_route_target_as4(as_t as, uint16_t val,
 	eval->val[7] = val & 0xff;
 }
 
-/* Helper function to convert uint32 to IEEE-754 Floating Point */
-static uint32_t uint32_to_ieee_float_uint32(uint32_t u)
+/* Helper function to convert uint64 to IEEE-754 Floating Point */
+static uint32_t uint64_to_ieee_float_uint32(uint64_t u)
 {
 	union {
 		float r;
@@ -243,9 +290,7 @@ static inline void encode_lb_extcomm(as_t as, uint64_t bw, bool non_trans,
 				     struct ecommunity_val *eval,
 				     bool disable_ieee_floating)
 {
-	uint64_t bandwidth = disable_ieee_floating
-				     ? bw
-				     : uint32_to_ieee_float_uint32(bw);
+	uint64_t bandwidth = disable_ieee_floating ? bw : uint64_to_ieee_float_uint32(bw);
 
 	memset(eval, 0, sizeof(*eval));
 	eval->val[0] = ECOMMUNITY_ENCODE_AS;
@@ -374,9 +419,8 @@ extern struct ecommunity *ecommunity_intern(struct ecommunity *);
 extern bool ecommunity_cmp(const void *arg1, const void *arg2);
 extern void ecommunity_unintern(struct ecommunity **ecommunity);
 extern unsigned int ecommunity_hash_make(const void *arg);
-extern struct ecommunity *ecommunity_str2com(const char *str, int type,
-					     int keyword_included);
-extern struct ecommunity *ecommunity_str2com_ipv6(const char *str, int type,
+extern struct ecommunity *ecommunity_str2com(const char *str, int sub_type, int keyword_included);
+extern struct ecommunity *ecommunity_str2com_ipv6(const char *str, int sub_type,
 						  int keyword_included);
 extern char *ecommunity_ecom2str(struct ecommunity *ecom, int format, int filter);
 extern char *ecommunity_ecom2str_one(struct ecommunity *ecom, int format, int number);
@@ -393,6 +437,8 @@ extern uint32_t ecommunity_select_color(const struct ecommunity *ecom);
 extern bool ecommunity_add_val(struct ecommunity *ecom,
 			       struct ecommunity_val *eval,
 			       bool unique, bool overwrite);
+extern void ecommunity_append_val_unchecked(struct ecommunity *ecom,
+					    const struct ecommunity_val *eval);
 extern bool ecommunity_add_val_ipv6(struct ecommunity *ecom,
 				    struct ecommunity_val_ipv6 *eval,
 				    bool unique, bool overwrite);
@@ -431,9 +477,9 @@ extern void bgp_remove_ecomm_from_aggregate_hash(
 extern void bgp_aggr_ecommunity_remove(void *arg);
 extern const uint8_t *ecommunity_linkbw_present(struct ecommunity *ecom,
 						uint64_t *bw);
-extern struct ecommunity *
-ecommunity_replace_linkbw(as_t as, struct ecommunity *ecom, uint64_t cum_bw,
-			  bool disable_ieee_floating, bool extended);
+extern struct ecommunity *ecommunity_replace_linkbw(as_t as, struct ecommunity *ecom,
+						    uint64_t cum_bw, bool disable_ieee_floating,
+						    bool extended, bool ignore_non_transitive);
 
 extern bool soo_in_ecom(struct ecommunity *ecom, struct ecommunity *soo);
 
@@ -451,6 +497,27 @@ ecommunity_add_origin_validation_state(enum rpki_states rpki_state,
 extern struct ecommunity *ecommunity_add_node_target(struct in_addr *node_id,
 						     struct ecommunity *old,
 						     bool non_trans);
+extern bool ecommunity_is_node_target(uint8_t type, uint8_t sub_type);
+extern bool ecommunity_has_node_target(struct ecommunity *ecom);
 extern bool ecommunity_node_target_match(struct ecommunity *ecomm,
 					 struct in_addr *local_id);
+
+/*
+ * UPA Extended Community — Transitive Opaque (type 0x03,
+ * subtype ECOMMUNITY_OPAQUE_SUBTYPE_UPA).
+ *
+ * Wire layout (8 bytes total):
+ *   [0] type     = 0x03 (ECOMMUNITY_ENCODE_OPAQUE)
+ *   [1] subtype  = ECOMMUNITY_OPAQUE_SUBTYPE_UPA
+ *   [2] flags    = BGP_UPA_FLAG_DROP | reserved
+ *   [3] reserved = 0x00
+ *   [4..7] BGP Router-ID of the originator (network byte order)
+ */
+extern void bgp_upa_extcom_new(struct in_addr router_id, uint8_t flags,
+			       struct ecommunity_val *eval);
+extern bool bgp_upa_extcom_parse(const struct ecommunity_val *eval, uint8_t *flags_out,
+				 struct in_addr *router_id_out);
+extern bool bgp_ecommunity_has_upa(const struct ecommunity *ecom);
+extern struct ecommunity *bgp_upa_extcom_filter(const struct ecommunity *ecom);
+
 #endif /* _QUAGGA_BGP_ECOMMUNITY_H */

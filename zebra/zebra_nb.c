@@ -497,6 +497,13 @@ const struct frr_yang_module_info frr_zebra_info = {
 			},
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-params/srlg",
+			.cbs = {
+				.create = lib_interface_zebra_link_params_srlg_create,
+				.destroy = lib_interface_zebra_link_params_srlg_destroy,
+			},
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-params/affinities",
 			.cbs = {
 				.create = lib_interface_zebra_affinities_create,
@@ -1144,6 +1151,12 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/srv6-segs-stack/encap-behavior",
 			.cbs = {
 				.get_elem = lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_srv6_segs_stack_encap_behavior_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/srv6-segs-stack/encap-source",
+			.cbs = {
+				.get_elem = lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_srv6_segs_stack_encap_source_get_elem,
 			}
 		},
 

@@ -62,6 +62,8 @@ pcep_lib_parse_open_objfun_list(struct pcep_caps *caps,
 				struct pcep_object_tlv_header *tlv_header);
 static void pcep_lib_parse_rp(struct path *path, struct pcep_object_rp *rp);
 static void pcep_lib_parse_srp(struct path *path, struct pcep_object_srp *srp);
+static void pcep_lib_parse_path_binding(struct path *path,
+					struct pcep_object_tlv_te_path_binding *binding);
 static void pcep_lib_parse_lsp(struct path *path, struct pcep_object_lsp *lsp);
 static void pcep_lib_parse_lspa(struct path *path,
 				struct pcep_object_lspa *lspa);
@@ -858,6 +860,7 @@ void pcep_lib_parse_open(struct pcep_caps *caps, struct pcep_object_open *open)
 		case PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID:
 		case PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE:
 		case PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY:
+		case PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_ID:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_NAME:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_ID:
@@ -936,6 +939,7 @@ void pcep_lib_parse_rp(struct path *path, struct pcep_object_rp *rp)
 		case PCEP_OBJ_TLV_TYPE_LSP_DB_VERSION:
 		case PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID:
 		case PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY:
+		case PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_ID:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_NAME:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_ID:
@@ -988,6 +992,7 @@ void pcep_lib_parse_srp(struct path *path, struct pcep_object_srp *srp)
 		case PCEP_OBJ_TLV_TYPE_SPEAKER_ENTITY_ID:
 		case PCEP_OBJ_TLV_TYPE_SR_PCE_CAPABILITY:
 		case PCEP_OBJ_TLV_TYPE_PATH_SETUP_TYPE_CAPABILITY:
+		case PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_ID:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_POL_NAME:
 		case PCEP_OBJ_TLV_TYPE_SRPOLICY_CPATH_ID:
@@ -1003,12 +1008,31 @@ void pcep_lib_parse_srp(struct path *path, struct pcep_object_srp *srp)
 	}
 }
 
+void pcep_lib_parse_path_binding(struct path *path, struct pcep_object_tlv_te_path_binding *binding)
+{
+	switch (binding->type) {
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS:
+		if (binding->flags & BINDING_REMOVE)
+			path->binding_sid = 0;
+		else
+			path->binding_sid = binding->value.label;
+		break;
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_MPLS_ENTRY:
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6:
+	case PCEP_OBJ_TLV_TE_PATH_BINDING_SRV6_BEHAVIOR:
+		flog_warn(EC_PATH_PCEP_UNSUPPORTED_PATH_BINDING,
+			  "Unsupported LSP TLV binding type (%u)", binding->type);
+		break;
+	}
+}
+
 void pcep_lib_parse_lsp(struct path *path, struct pcep_object_lsp *lsp)
 {
 	double_linked_list *tlvs = lsp->header.tlv_list;
 	double_linked_list_node *node;
 	struct pcep_object_tlv_header *tlv;
 	struct pcep_object_tlv_symbolic_path_name *name;
+	struct pcep_object_tlv_te_path_binding *binding;
 	struct pcep_object_tlv_arbitrary *arb_tlv;
 
 	path->plsp_id = lsp->plsp_id;
@@ -1032,6 +1056,10 @@ void pcep_lib_parse_lsp(struct path *path, struct pcep_object_lsp *lsp)
 		case PCEP_OBJ_TLV_TYPE_SYMBOLIC_PATH_NAME:
 			name = (struct pcep_object_tlv_symbolic_path_name *)tlv;
 			pcep_lib_parse_lsp_symbolic_name(path, name);
+			break;
+		case PCEP_OBJ_TLV_TYPE_TE_PATH_BINDING:
+			binding = (struct pcep_object_tlv_te_path_binding *)tlv;
+			pcep_lib_parse_path_binding(path, binding);
 			break;
 		case PCEP_OBJ_TYPE_CISCO_BSID:
 			arb_tlv = (struct pcep_object_tlv_arbitrary *)tlv;
@@ -1105,19 +1133,15 @@ void pcep_lib_parse_metric(struct path *path, struct pcep_object_metric *obj)
 void pcep_lib_parse_endpoints_ipv4(struct path *path,
 				   struct pcep_object_endpoints_ipv4 *obj)
 {
-	SET_IPADDR_V4(&path->pcc_addr);
-	path->pcc_addr.ipaddr_v4 = obj->src_ipv4;
-	SET_IPADDR_V4(&path->nbkey.endpoint);
-	path->nbkey.endpoint.ipaddr_v4 = obj->dst_ipv4;
+	ipaddr_set_v4(&path->pcc_addr, obj->src_ipv4);
+	ipaddr_set_v4(&path->nbkey.endpoint, obj->dst_ipv4);
 }
 
 void pcep_lib_parse_endpoints_ipv6(struct path *path,
 				   struct pcep_object_endpoints_ipv6 *obj)
 {
-	SET_IPADDR_V6(&path->pcc_addr);
-	path->pcc_addr.ipaddr_v6 = obj->src_ipv6;
-	SET_IPADDR_V6(&path->nbkey.endpoint);
-	path->nbkey.endpoint.ipaddr_v6 = obj->dst_ipv6;
+	ipaddr_set_v6(&path->pcc_addr, &obj->src_ipv6);
+	ipaddr_set_v6(&path->nbkey.endpoint, &obj->dst_ipv6);
 }
 
 void pcep_lib_parse_vendor_info(struct path *path,

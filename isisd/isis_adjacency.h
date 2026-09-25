@@ -6,7 +6,7 @@
  * Copyright (C) 2001,2002   Sampo Saaristo
  *                           Tampere University of Technology
  *                           Institute of Communications Engineering
- *
+ * Copyright (C) 2003        Ofer Wald, Hannes Gredler
  */
 
 #ifndef _ZEBRA_ISIS_ADJACENCY_H
@@ -146,4 +146,6 @@ void isis_adj_build_up_list(struct list *adjdb, struct list *list);
 int isis_adj_usage2levels(enum isis_adj_usage usage);
 void isis_bfd_startup_timer(struct event *event);
 const char *isis_adj_name(const struct isis_adjacency *adj);
+bool isis_adj_ipv4_usable(const struct isis_adjacency *adj);
+bool isis_adj_ipv6_usable(const struct isis_adjacency *adj);
 #endif /* ISIS_ADJACENCY_H */

@@ -85,6 +85,8 @@ struct fpm_nhg {
 	uint8_t scope;	      /* Scope */
 	bool is_blackhole;    /* Is this a blackhole nexthop? */
 	uint8_t num_nexthops; /* Number of nexthops in the group */
+	/* Resolving nexthop group ID, if the resolved-via attr was received */
+	uint32_t resolved_via;
 
 	/* Individual nexthops in the group */
 	struct {
@@ -98,7 +100,11 @@ struct fpm_nhg {
 /* Comparison function for nexthop groups */
 static int fpm_nhg_cmp(const struct fpm_nhg *a, const struct fpm_nhg *b)
 {
-	return a->id - b->id;
+	if (a->id > b->id)
+		return 1;
+	if (a->id < b->id)
+		return -1;
+	return 0;
 }
 
 /* Hash function for nexthop groups */
@@ -653,7 +659,7 @@ static void handle_nexthop_update(struct nlmsghdr *hdr, struct nhmsg *nhmsg, str
 static int parse_nexthop_msg(struct nlmsghdr *hdr)
 {
 	struct nhmsg *nhmsg;
-	struct rtattr *tb[NHA_MAX + 1] = {};
+	struct rtattr *tb[NHA_FPM_MAX] = {};
 	int len;
 	uint32_t nhgid = 0;
 	uint16_t nhg_count = 0;
@@ -932,6 +938,7 @@ static void handle_nexthop_update(struct nlmsghdr *hdr, struct nhmsg *nhmsg, str
 	struct fpm_nhg *existing;
 	struct fpm_nhg lookup = { 0 };
 	uint32_t nhgid = 0;
+	uint32_t resolved_via = 0;
 	uint16_t nhg_count = 0;
 
 	/* Get Nexthop Group ID */
@@ -939,6 +946,11 @@ static void handle_nexthop_update(struct nlmsghdr *hdr, struct nhmsg *nhmsg, str
 		nhgid = *(uint32_t *)RTA_DATA(tb[NHA_ID]);
 	else
 		return; /* Can't process without an ID */
+
+	/* Get resolving nexthop group ID, if present */
+	if (tb[NHA_FPM_RESOLVED_VIA] &&
+	    RTA_PAYLOAD(tb[NHA_FPM_RESOLVED_VIA]) >= sizeof(resolved_via))
+		resolved_via = *(uint32_t *)RTA_DATA(tb[NHA_FPM_RESOLVED_VIA]);
 
 	/* Count nexthops in the group */
 	if (tb[NHA_GROUP]) {
@@ -967,6 +979,7 @@ static void handle_nexthop_update(struct nlmsghdr *hdr, struct nhmsg *nhmsg, str
 			existing->scope = nhmsg->nh_scope;
 			existing->is_blackhole = tb[NHA_BLACKHOLE] ? true : false;
 			existing->num_nexthops = nhg_count;
+			existing->resolved_via = resolved_via;
 
 			/* Update individual nexthop IDs and weights */
 			if (tb[NHA_GROUP]) {
@@ -995,6 +1008,7 @@ static void handle_nexthop_update(struct nlmsghdr *hdr, struct nhmsg *nhmsg, str
 			nhg->scope = nhmsg->nh_scope;
 			nhg->is_blackhole = tb[NHA_BLACKHOLE] ? true : false;
 			nhg->num_nexthops = nhg_count;
+			nhg->resolved_via = resolved_via;
 
 			/* Store individual nexthop IDs and weights */
 			if (tb[NHA_GROUP]) {
@@ -1154,6 +1168,9 @@ static void sigusr1_handler(int signum)
 			netlink_prot_to_s(nhg->protocol), nhg->protocol, nhg->family,
 			nhg->num_nexthops ? nhg->num_nexthops : 1,
 			nhg->is_blackhole ? "BLACKHOLE" : "");
+
+		if (nhg->resolved_via)
+			fprintf(out, ", ResolvedVia: %u", nhg->resolved_via);
 
 		/* Display individual nexthops if any */
 		if (nhg->num_nexthops > 0 && !nhg->is_blackhole) {

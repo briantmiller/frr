@@ -324,6 +324,10 @@ static void set_linkparams_link_header(struct mpls_te_link *lp)
 	if (ntohs(lp->llri.header.type) != 0)
 		length += TLV_SIZE(&lp->llri.header);
 
+	/* TE_LINK_SUBTLV_SRLG */
+	if (ntohs(lp->srlg.header.type) != 0)
+		length += TLV_SIZE(&lp->srlg.header);
+
 	/* TE_LINK_SUBTLV_RIP */
 	if (ntohs(lp->rip.header.type) != 0)
 		length += TLV_SIZE(&lp->rip.header);
@@ -514,6 +518,26 @@ void set_linkparams_llri(struct mpls_te_link *lp, uint32_t local,
 	lp->llri.remote = htonl(remote);
 }
 
+static void set_linkparams_srlg(struct mpls_te_link *lp, uint32_t *srlgs, uint8_t num)
+{
+	int i;
+
+	if (num == 0 || srlgs == NULL) {
+		lp->srlg.header.type = htons(0);
+		lp->srlg.header.length = htons(0);
+		return;
+	}
+
+	if (num > LP_MAX_SRLG)
+		num = LP_MAX_SRLG;
+
+	/* Note that TLV-length field is the size of the value array. */
+	lp->srlg.header.type = htons(TE_LINK_SUBTLV_SRLG);
+	lp->srlg.header.length = htons(num * sizeof(uint32_t));
+	for (i = 0; i < num; i++)
+		lp->srlg.value[i] = htonl(srlgs[i]);
+}
+
 void set_linkparams_lrrid(struct mpls_te_link *lp, struct in_addr local,
 			  struct in_addr remote)
 {
@@ -687,6 +711,12 @@ static void update_linkparams(struct mpls_te_link *lp)
 		set_linkparams_use_bw(lp, ifp->link_params->use_bw);
 	else
 		TLV_TYPE(lp->use_bw) = 0;
+
+	/* RFC4203: Shared Risk Link Group */
+	if (IS_PARAM_SET(ifp->link_params, LP_SRLG))
+		set_linkparams_srlg(lp, ifp->link_params->srlgs, ifp->link_params->srlg_num);
+	else
+		TLV_TYPE(lp->srlg) = 0;
 
 	/* RFC5392 */
 	if (IS_PARAM_SET(ifp->link_params, LP_RMT_AS)) {
@@ -1115,6 +1145,7 @@ static void build_link_tlv(struct stream *s, struct mpls_te_link *lp)
 	build_link_subtlv(s, &lp->rsc_clsclr.header);
 	build_link_subtlv(s, &lp->lrrid.header);
 	build_link_subtlv(s, &lp->llri.header);
+	build_link_subtlv(s, &lp->srlg.header);
 	build_link_subtlv(s, &lp->rip.header);
 	build_link_subtlv(s, &lp->ras.header);
 	build_link_subtlv(s, &lp->av_delay.header);
@@ -1873,10 +1904,11 @@ static void ospf_te_delete_subnet(struct ls_ted *ted, struct in_addr addr)
  */
 static int ospf_te_parse_router_lsa(struct ls_ted *ted, struct ospf_lsa *lsa)
 {
-	struct router_lsa *rl;
+	const struct router_lsa *rl;
+	const struct router_link *rlnk;
 	enum ls_node_type type;
 	struct ls_vertex *vertex;
-	int len, links;
+	int i, len, links;
 
 	/* Sanity Check */
 	if (!ted || !lsa || !lsa->data)
@@ -1920,34 +1952,41 @@ static int ospf_te_parse_router_lsa(struct ls_ted *ted, struct ospf_lsa *lsa)
 	/* Then, process Link Information */
 	len = lsa->size - OSPF_LSA_HEADER_SIZE - OSPF_ROUTER_LSA_MIN_SIZE;
 	links = ntohs(rl->links);
-	for (int i = 0; i < links && len > 0; len -= 12, i++) {
+	for (i = 0; i < links && len > 0; i++) {
 		struct prefix p;
 		uint32_t metric;
 
-		switch (rl->link[i].type) {
+		if (i == 0)
+			rlnk = &(rl->link[0]);
+		else
+			rlnk = OSPF_ROUTER_LINK_NEXT(rlnk);
+
+		switch (rlnk->type) {
 		case LSA_LINK_TYPE_POINTOPOINT:
-			ospf_te_update_link(ted, vertex, rl->link[i].link_data,
-					    ntohs(rl->link[i].metric));
+			ospf_te_update_link(ted, vertex, rlnk->link_data,
+					    ntohs(rlnk->metric));
 			/* Add corresponding subnet */
 			p.family = AF_INET;
 			p.prefixlen = IPV4_MAX_BITLEN;
-			p.u.prefix4 = rl->link[i].link_data;
-			metric = ntohs(rl->link[i].metric);
+			p.u.prefix4 = rlnk->link_data;
+			metric = ntohs(rlnk->metric);
 			ospf_te_update_subnet(ted, vertex, &p, metric);
 			break;
 		case LSA_LINK_TYPE_STUB:
 			/* Keep only /32 prefix */
-			p.prefixlen = ip_masklen(rl->link[i].link_data);
+			p.prefixlen = ip_masklen(rlnk->link_data);
 			if (p.prefixlen == IPV4_MAX_BITLEN) {
 				p.family = AF_INET;
-				p.u.prefix4 = rl->link[i].link_id;
-				metric = ntohs(rl->link[i].metric);
+				p.u.prefix4 = rlnk->link_id;
+				metric = ntohs(rlnk->metric);
 				ospf_te_update_subnet(ted, vertex, &p, metric);
 			}
 			break;
 		default:
 			break;
 		}
+
+		len -= (OSPF_ROUTER_LSA_LINK_SIZE + (rlnk->tos * 4));
 	}
 
 	return 0;
@@ -3195,7 +3234,7 @@ static int ospf_te_delete_ext_link(struct ls_ted *ted, struct ospf_lsa *lsa)
 	atr = edge->attributes;
 	UNSET_FLAG(atr->flags, LS_ATTR_ADJ_SID);
 	UNSET_FLAG(atr->flags, LS_ATTR_BCK_ADJ_SID);
-	memset(atr->adj_sid, 0, 2 * sizeof(struct ls_sid));
+	memset(atr->adj_sid, 0, 2 * sizeof(atr->adj_sid[0]));
 	edge->status = UPDATE;
 
 	/* Edge has been updated: export it */
@@ -3864,6 +3903,37 @@ static uint16_t show_vty_link_subtlv_llri(struct vty *vty,
 	return TLV_SIZE(tlvh);
 }
 
+static uint16_t show_vty_link_subtlv_srlg(struct vty *vty, struct tlv_header *tlvh,
+					  json_object *json)
+{
+	struct te_link_subtlv_srlg *top;
+	uint32_t count, i, value;
+	json_object *json_srlg = NULL;
+
+	top = (struct te_link_subtlv_srlg *)tlvh;
+	count = ntohs(tlvh->length) / sizeof(uint32_t);
+	if (count > LP_MAX_SRLG)
+		count = LP_MAX_SRLG;
+
+	if (json) {
+		json_srlg = json_object_new_array();
+		json_object_object_add(json, "sharedRiskLinkGroups", json_srlg);
+	}
+
+	for (i = 0; i < count; i++) {
+		value = (uint32_t)ntohl(top->value[i]);
+		if (vty != NULL)
+			if (!json)
+				vty_out(vty, "  Shared Risk Link Group: %u\n", value);
+			else
+				json_object_array_add(json_srlg, json_object_new_int64(value));
+		else
+			zlog_debug("    Shared Risk Link Group: %u", value);
+	}
+
+	return TLV_SIZE(tlvh);
+}
+
 static uint16_t show_vty_link_subtlv_rip(struct vty *vty,
 					 struct tlv_header *tlvh,
 					 json_object *json)
@@ -4205,6 +4275,9 @@ static uint16_t ospf_mpls_te_show_link_subtlv(struct vty *vty,
 			break;
 		case TE_LINK_SUBTLV_LLRI:
 			sum += show_vty_link_subtlv_llri(vty, tlvh, json);
+			break;
+		case TE_LINK_SUBTLV_SRLG:
+			sum += show_vty_link_subtlv_srlg(vty, tlvh, json);
 			break;
 		case TE_LINK_SUBTLV_RIP:
 			sum += show_vty_link_subtlv_rip(vty, tlvh, json);
@@ -4724,6 +4797,8 @@ static void show_mpls_te_link_sub(struct vty *vty, struct interface *ifp,
 		if (TLV_TYPE(lp->use_bw) != 0)
 			show_vty_link_subtlv_use_bw(vty, &lp->use_bw.header,
 						    json);
+		if (TLV_TYPE(lp->srlg) != 0)
+			show_vty_link_subtlv_srlg(vty, &lp->srlg.header, json);
 		vty_out(vty, "---------------\n\n");
 	} else {
 		vty_out(vty, "  %s: MPLS-TE is disabled on this interface\n",
@@ -4792,114 +4867,136 @@ DEFUN (show_ip_ospf_mpls_te_db,
        "Verbose output\n"
        JSON_STR)
 {
-	int idx = 0;
+	int idx = 5;
+	int ret = CMD_SUCCESS;
 	struct in_addr ip_addr;
 	struct prefix pref;
-	struct ls_vertex *vertex;
-	struct ls_edge *edge;
-	struct ls_subnet *subnet;
+	struct ls_vertex *vertex = NULL;
+	struct ls_edge *edge = NULL;
+	struct ls_subnet *subnet = NULL;
 	uint64_t key;
 	struct ls_edge_key ekey;
+	enum {
+		SHOW_TED,
+		SHOW_VERTEX,
+		SHOW_EDGE,
+		SHOW_SUBNET
+	} show_type = SHOW_TED;
 	bool verbose = false;
 	bool uj = use_json(argc, argv);
 	json_object *json = NULL;
 
 	if (!OspfMplsTE.enabled || !OspfMplsTE.ted) {
-		vty_out(vty, "MPLS-TE database is not enabled\n");
-		return CMD_WARNING;
+		if (!uj)
+			vty_out(vty, "MPLS-TE database is not enabled\n");
+		ret = CMD_WARNING;
+		goto out;
 	}
 
-	if (uj)
-		json = json_object_new_object();
-
-	if (argv[argc - 1]->arg && strmatch(argv[argc - 1]->text, "verbose"))
-		verbose = true;
-
-	idx = 5;
 	if (argv_find(argv, argc, "vertex", &idx)) {
-		/* Show Vertex */
 		if (argv_find(argv, argc, "self-originate", &idx))
 			vertex = OspfMplsTE.ted->self;
 		else if (argv_find(argv, argc, "adv-router", &idx)) {
 			if (!inet_aton(argv[idx + 1]->arg, &ip_addr)) {
-				vty_out(vty,
-					"Specified Router ID %s is invalid\n",
-					argv[idx + 1]->arg);
-				return CMD_WARNING_CONFIG_FAILED;
+				if (!uj)
+					vty_out(vty, "Specified Router ID %s is invalid\n",
+						argv[idx + 1]->arg);
+				ret = CMD_WARNING_CONFIG_FAILED;
+				goto out;
 			}
 			/* Get the Vertex from the Link State Database */
 			key = ((uint64_t)ntohl(ip_addr.s_addr)) & 0xffffffff;
 			vertex = ls_find_vertex_by_key(OspfMplsTE.ted, key);
 			if (!vertex) {
-				vty_out(vty, "No vertex found for ID %pI4\n",
-					&ip_addr);
-				return CMD_WARNING;
+				if (!uj)
+					vty_out(vty, "No vertex found for ID %pI4\n", &ip_addr);
+				ret = CMD_WARNING;
+				goto out;
 			}
-		} else
-			vertex = NULL;
-
-		if (vertex)
-			ls_show_vertex(vertex, vty, json, verbose);
-		else
-			ls_show_vertices(OspfMplsTE.ted, vty, json, verbose);
+		}
+		show_type = SHOW_VERTEX;
 
 	} else if (argv_find(argv, argc, "edge", &idx)) {
-		/* Show Edge */
 		if (argv_find(argv, argc, "A.B.C.D", &idx)) {
 			if (!inet_aton(argv[idx]->arg, &ip_addr)) {
-				vty_out(vty,
-					"Specified Edge ID %s is invalid\n",
-					argv[idx]->arg);
-				return CMD_WARNING_CONFIG_FAILED;
+				if (!uj)
+					vty_out(vty, "Specified Edge ID %s is invalid\n",
+						argv[idx]->arg);
+				ret = CMD_WARNING_CONFIG_FAILED;
+				goto out;
 			}
 			/* Get the Edge from the Link State Database */
 			ekey.family = AF_INET;
 			IPV4_ADDR_COPY(&ekey.k.addr, &ip_addr);
 			edge = ls_find_edge_by_key(OspfMplsTE.ted, ekey);
 			if (!edge) {
-				vty_out(vty, "No edge found for ID %pI4\n",
-					&ip_addr);
-				return CMD_WARNING;
+				if (!uj)
+					vty_out(vty, "No edge found for ID %pI4\n", &ip_addr);
+				ret = CMD_WARNING;
+				goto out;
 			}
-		} else
-			edge = NULL;
-
-		if (edge)
-			ls_show_edge(edge, vty, json, verbose);
-		else
-			ls_show_edges(OspfMplsTE.ted, vty, json, verbose);
+		}
+		show_type = SHOW_EDGE;
 
 	} else if (argv_find(argv, argc, "subnet", &idx)) {
-		/* Show Subnet */
 		if (argv_find(argv, argc, "A.B.C.D/M", &idx)) {
 			if (!str2prefix(argv[idx]->arg, &pref)) {
-				vty_out(vty, "Invalid prefix format %s\n",
-					argv[idx]->arg);
-				return CMD_WARNING_CONFIG_FAILED;
+				if (!uj)
+					vty_out(vty, "Invalid prefix format %s\n", argv[idx]->arg);
+				ret = CMD_WARNING_CONFIG_FAILED;
+				goto out;
 			}
 			/* Get the Subnet from the Link State Database */
 			subnet = ls_find_subnet(OspfMplsTE.ted, &pref);
 			if (!subnet) {
-				vty_out(vty, "No subnet found for ID %pFX\n",
-					&pref);
-				return CMD_WARNING;
+				if (!uj)
+					vty_out(vty, "No subnet found for ID %pFX\n", &pref);
+				ret = CMD_WARNING;
+				goto out;
 			}
-		} else
-			subnet = NULL;
+		}
+		show_type = SHOW_SUBNET;
+	}
 
+	if (argv[argc - 1]->arg && strmatch(argv[argc - 1]->text, "verbose"))
+		verbose = true;
+
+	if (uj)
+		json = json_object_new_object();
+
+	switch (show_type) {
+	case SHOW_VERTEX:
+		if (vertex)
+			ls_show_vertex(vertex, vty, json, verbose);
+		else
+			ls_show_vertices(OspfMplsTE.ted, vty, json, verbose);
+		break;
+	case SHOW_EDGE:
+		if (edge)
+			ls_show_edge(edge, vty, json, verbose);
+		else
+			ls_show_edges(OspfMplsTE.ted, vty, json, verbose);
+		break;
+	case SHOW_SUBNET:
 		if (subnet)
 			ls_show_subnet(subnet, vty, json, verbose);
 		else
 			ls_show_subnets(OspfMplsTE.ted, vty, json, verbose);
-
-	} else {
-		/* Show the complete TED */
+		break;
+	case SHOW_TED:
 		ls_show_ted(OspfMplsTE.ted, vty, json, verbose);
+		break;
 	}
 
-	if (uj)
-		vty_json(vty, json);
-	return CMD_SUCCESS;
+out:
+	if (uj) {
+		if (ret == CMD_SUCCESS)
+			vty_json(vty, json);
+		else
+			vty_json_empty(vty, NULL);
+	}
+
+	return ret;
 }
 
 static void ospf_mpls_te_register_vty(void)

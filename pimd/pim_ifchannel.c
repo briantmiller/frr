@@ -451,6 +451,7 @@ void pim_ifchannel_find(struct interface *ifp, pim_sgaddr *sg, struct pim_ifchan
 			  __func__, sg, ifp->name);
 		*ch = NULL;
 		*chrpt = NULL;
+		return;
 	}
 
 	lookup.sg = *sg;
@@ -734,12 +735,17 @@ static void on_ifjoin_prune_pending_timer(struct event *t)
 			 * On that scenario, SG entry wouldn't have
 			 * got installed until Prune pending timer
 			 * expired. So install now.
+			 *
+			 * Keep the OIF when the (*,G) on this interface still
+			 * justifies it on its own: the pruning neighbour cannot
+			 * withdraw a local receiver.
 			 */
-			pim_channel_del_oif(
-				ch->upstream->channel_oil, ifp,
-				PIM_OIF_FLAG_PROTO_STAR, __func__);
-			pim_channel_del_oif(ch->upstream->channel_oil, ifp,
-					    PIM_OIF_FLAG_PROTO_PIM, __func__);
+			if (!ch->parent || !pim_macro_chisin_pim_include(ch->parent)) {
+				pim_channel_del_oif(ch->upstream->channel_oil, ifp,
+						    PIM_OIF_FLAG_PROTO_STAR, __func__);
+				pim_channel_del_oif(ch->upstream->channel_oil, ifp,
+						    PIM_OIF_FLAG_PROTO_PIM, __func__);
+			}
 			if (!ch->upstream->channel_oil->installed)
 				pim_upstream_mroute_add(
 					ch->upstream->channel_oil,

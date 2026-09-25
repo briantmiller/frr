@@ -87,8 +87,6 @@ static struct pim_instance *pim_instance_init(struct vrf *vrf)
 	pim_ssm_init(pim);
 	pim_dm_init(pim);
 
-	pim_if_init(pim);
-
 	pim->mcast_if_count = 0;
 	pim->keep_alive_time = PIM_KEEPALIVE_PERIOD;
 	pim->rp_keep_alive_time = PIM_RP_KEEPALIVE_PERIOD;
@@ -212,6 +210,14 @@ static int pim_vrf_enable(struct vrf *vrf)
 	frr_with_privs (&pimd_privs) {
 		vrf_bind(pim->vrf->vrf_id, pim->global_scope.unicast_sock, NULL);
 	}
+
+	/*
+	 * Any RP / upstream nexthop registrations attempted during config
+	 * load were skipped (or silently dropped by zebra) because they
+	 * carried vrf_id == VRF_UNKNOWN. Re-register them now that the vrf
+	 * id is resolved so zebra can track these nexthops.
+	 */
+	pim_nht_reregister_all(pim);
 
 	return 0;
 }

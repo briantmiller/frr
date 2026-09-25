@@ -145,6 +145,8 @@ static const struct message bgp_pmsi_tnltype_str[] = {
 
 static int clear_batch_rib_helper(struct bgp_clearing_info *cinfo);
 static void bgp_gr_start_tier2_timer_if_required(struct bgp *bgp, afi_t afi, safi_t safi);
+static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, const struct prefix *p, afi_t afi,
+					    safi_t safi, struct bgp_path_info *new_select);
 
 /*
  * Typesafe Hash Functions for bgp_path_info
@@ -237,6 +239,20 @@ DEFINE_HOOK(bgp_process,
 	     struct peer *peer, bool withdraw),
 	    (bgp, afi, safi, bn, peer, withdraw));
 
+DEFINE_HOOK(bgp_adj_in_needed, (struct peer *peer, afi_t afi, safi_t safi), (peer, afi, safi));
+
+/* The peer's Adj-RIB-In is maintained when soft-reconfiguration inbound is
+ * configured, or when another component consuming it (BMP pre-policy
+ * monitoring) claims it through the bgp_adj_in_needed hook.
+ */
+bool bgp_adj_in_needed(struct peer *peer, afi_t afi, safi_t safi)
+{
+	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG))
+		return true;
+
+	return hook_call(bgp_adj_in_needed, peer, afi, safi) > 0;
+}
+
 /** Test if path is suppressed. */
 bool bgp_path_suppressed(struct bgp_path_info *pi)
 {
@@ -246,6 +262,12 @@ bool bgp_path_suppressed(struct bgp_path_info *pi)
 	return listcount(pi->extra->aggr_suppressors) > 0;
 }
 
+/* Return (creating if needed) the destination node for the given prefix.
+ * SAFI_MPLS_VPN, SAFI_ENCAP and SAFI_EVPN use a two-level table: the top
+ * level is keyed by the Route Distinguisher and each of its nodes holds
+ * another table containing the actual prefixes, whose nodes point back
+ * to the RD node via dest->pdest.
+ */
 struct bgp_dest *bgp_afi_node_get(struct bgp_table *table, afi_t afi,
 				  safi_t safi, const struct prefix *p,
 				  struct prefix_rd *prd)
@@ -283,7 +305,7 @@ struct bgp_dest *bgp_safi_node_lookup(struct bgp_table *table, safi_t safi,
 				      struct prefix_rd *prd)
 {
 	struct bgp_dest *dest;
-	struct bgp_dest *pdest = NULL;
+	struct bgp_dest *pdest BGP_DEST_AUTOUNLOCK = NULL;
 
 	if (!table)
 		return NULL;
@@ -294,10 +316,8 @@ struct bgp_dest *bgp_safi_node_lookup(struct bgp_table *table, safi_t safi,
 		if (!pdest)
 			return NULL;
 
-		if (!bgp_dest_has_bgp_path_info_data(pdest)) {
-			bgp_dest_unlock_node(pdest);
+		if (!bgp_dest_has_bgp_path_info_data(pdest))
 			return NULL;
-		}
 
 		table = bgp_dest_get_bgp_table_info(pdest);
 	}
@@ -1010,6 +1030,32 @@ int bgp_path_info_cmp(struct bgp *bgp, struct bgp_path_info *new,
 	newattr = new->attr;
 	existattr = exist->attr;
 
+	/* UPA routes always lose to non-UPA routes.
+	 * This must be checked before any other path selection criteria
+	 * to ensure UPA (unreachable) routes are never preferred over
+	 * any reachable route.
+	 *
+	 * Note: bgp_path_selection_local_route reason is used (following
+	 * the pattern of step 3) to indicate this decision was made based
+	 * on route UPA flag comparison, even though UPA is de-preferred
+	 * rather than preferred.
+	 */
+	if (CHECK_FLAG(new->flags, BGP_PATH_UPA) && !CHECK_FLAG(exist->flags, BGP_PATH_UPA)) {
+		*reason = bgp_path_selection_local_route;
+		if (debug)
+			zlog_debug("%s: %s loses to %s due to UPA (unreachable) flag", pfx_buf,
+				   new_buf, exist_buf);
+		return 0;
+	}
+
+	if (!CHECK_FLAG(new->flags, BGP_PATH_UPA) && CHECK_FLAG(exist->flags, BGP_PATH_UPA)) {
+		*reason = bgp_path_selection_local_route;
+		if (debug)
+			zlog_debug("%s: %s wins over %s due to exist being UPA (unreachable)",
+				   pfx_buf, new_buf, exist_buf);
+		return 1;
+	}
+
 	/* A BGP speaker that has advertised the "Long-lived Graceful Restart
 	 * Capability" to a neighbor MUST perform the following upon receiving
 	 * a route from that neighbor with the "LLGR_STALE" community, or upon
@@ -1542,11 +1588,9 @@ int bgp_path_info_cmp(struct bgp *bgp, struct bgp_path_info *new,
 	     new_sub_sort == BGP_PEER_EBGP_OAD)) {
 		*reason = bgp_path_selection_peer;
 		if (debug)
-			zlog_debug("%s: %s loses to %s due to %s peer < eBGP peer",
-				   pfx_buf, new_buf, exist_buf,
-				   (exist_sub_sort == BGP_PEER_EBGP_OAD)
-					   ? "eBGP-OAD"
-					   : "iBGP");
+			zlog_debug("%s: %s loses to %s due to %s peer < eBGP peer", pfx_buf,
+				   new_buf, exist_buf,
+				   (new_sub_sort == BGP_PEER_EBGP_OAD) ? "eBGP-OAD" : "iBGP");
 		if (!CHECK_FLAG(bgp->flags, BGP_FLAG_PEERTYPE_MULTIPATH_RELAX))
 			return 0;
 		peer_sort_ret = 0;
@@ -2073,11 +2117,15 @@ static bool bgp_cluster_filter(struct peer *peer, struct attr *attr)
 
 static bool bgp_otc_filter(struct peer *peer, struct attr *attr)
 {
+	if (!CHECK_FLAG(peer->flags, PEER_FLAG_ROLE))
+		return false;
+
 	if (bgp_attr_exists(attr, BGP_ATTR_OTC)) {
 		if (peer->local_role == ROLE_PROVIDER ||
 		    peer->local_role == ROLE_RS_SERVER)
 			return true;
-		if (peer->local_role == ROLE_PEER && bgp_attr_get_otc(attr) != peer->as)
+		if ((peer->local_role == ROLE_PEER || peer->local_role == ROLE_RS_CLIENT) &&
+		    bgp_attr_get_otc(attr) != peer->as)
 			return true;
 		return false;
 	}
@@ -2091,6 +2139,9 @@ static bool bgp_otc_filter(struct peer *peer, struct attr *attr)
 
 static bool bgp_otc_egress(struct peer *peer, struct attr *attr)
 {
+	if (!CHECK_FLAG(peer->flags, PEER_FLAG_ROLE))
+		return false;
+
 	if (bgp_attr_exists(attr, BGP_ATTR_OTC)) {
 		if (peer->local_role == ROLE_CUSTOMER ||
 		    peer->local_role == ROLE_RS_CLIENT ||
@@ -2101,7 +2152,7 @@ static bool bgp_otc_egress(struct peer *peer, struct attr *attr)
 	if (peer->local_role == ROLE_PROVIDER ||
 	    peer->local_role == ROLE_PEER ||
 	    peer->local_role == ROLE_RS_SERVER) {
-		bgp_attr_set_otc(attr, peer->bgp->as);
+		bgp_attr_set_otc(attr, bgp_local_as_for_peer(peer));
 	}
 	return false;
 }
@@ -2439,6 +2490,22 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 		return false;
 	}
 
+	/* Filter UPA routes based on peer capability.
+	 * Filter both:
+	 * 1. Locally originated UPA routes (BGP_PATH_UPA flag set)
+	 * 2. Received routes with UPA extended community (BGP_PATH_UPA flag set)
+	 * These should only be announced to peers with PEER_FLAG_UPA
+	 * configured via 'neighbor X upa'
+	 */
+	if (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_UPA)) {
+		if (CHECK_FLAG(pi->flags, BGP_PATH_UPA)) {
+			if (BGP_DEBUG(upa, UPA))
+				zlog_debug("%s: UPA route %pFX FILTERED - peer lacks 'neighbor upa' configuration",
+					   peer->host, p);
+			return false;
+		}
+	}
+
 #ifdef ENABLE_BGP_VNC
 	if (((afi == AFI_IP) || (afi == AFI_IP6)) && (safi == SAFI_MPLS_VPN)
 	    && ((pi->type == ZEBRA_ROUTE_BGP_DIRECT)
@@ -2715,6 +2782,32 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 
 	/* don't confuse inbound and outbound setting */
 	RESET_FLAG(attr->rmap_change_flags);
+
+	/* Strip UPA Extended Community for non-UPA peers.
+	 * If the peer does not support UPA (lacks PEER_FLAG_UPA),
+	 * remove UPA ExtCom from the attributes before sending. This handles
+	 * cases where non-UPA routes carry UPA ExtComs (e.g., received from
+	 * another router). Note: Full UPA routes (BGP_PATH_UPA flag set)
+	 * are already filtered earlier.
+	 */
+	if (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_UPA)) {
+		struct ecommunity *ecom = bgp_attr_get_ecommunity(attr);
+		struct ecommunity *ecom_filtered = NULL;
+
+		if (ecom && bgp_ecommunity_has_upa(ecom)) {
+			ecom_filtered = bgp_upa_extcom_filter(ecom);
+
+			if (ecom_filtered && ecom_filtered->size > 0) {
+				/* Replace with filtered ExtCom (UPA removed) */
+				bgp_attr_set_ecommunity(attr, ecom_filtered);
+			} else {
+				/* No ExtComs remain after filtering, remove attribute */
+				bgp_attr_unset(attr, BGP_ATTR_EXT_COMMUNITIES);
+				if (ecom_filtered)
+					ecommunity_free(&ecom_filtered);
+			}
+		}
+	}
 
 	/* If local-preference is not set. */
 	if ((peer->sort == BGP_PEER_IBGP || peer->sort == BGP_PEER_CONFED ||
@@ -3153,25 +3246,77 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	 * the most sense. However, don't modify if the link-bandwidth has
 	 * been explicitly set by user policy.
 	 */
+	struct attr *rmap_src_attr = post_attr ? post_attr : piattr;
+	bool link_bw_was_set = CHECK_FLAG(rmap_src_attr->rmap_change_flags, BATTR_RMAP_LINK_BW_SET);
+
 	if (nh_reset && bgp_path_info_mpath_chkwtd(bgp, pi->net) == BGP_WECMP_BEHAVIOR_LINK_BW &&
-	    (cum_bw = bgp_path_info_mpath_cumbw(pi->net)) != 0 &&
+	    (cum_bw = bgp_path_info_mpath_cumbw(pi->net)) != 0 && !link_bw_was_set &&
 	    !CHECK_FLAG(attr->rmap_change_flags, BATTR_RMAP_LINK_BW_SET)) {
-		if (CHECK_FLAG(peer->flags, PEER_FLAG_EXTENDED_LINK_BANDWIDTH))
-			bgp_attr_set_ipv6_ecommunity(
-				attr,
-				ecommunity_replace_linkbw(bgp->as,
-							  bgp_attr_get_ipv6_ecommunity(
-								  attr),
-							  cum_bw, false, true));
-		else
-			bgp_attr_set_ecommunity(
-				attr,
-				ecommunity_replace_linkbw(
-					bgp->as, bgp_attr_get_ecommunity(attr),
-					cum_bw,
+		as_t link_bw_as = bgp_local_as_for_peer(peer);
+
+		if (CHECK_FLAG(peer->flags, PEER_FLAG_EXTENDED_LINK_BANDWIDTH)) {
+			struct ecommunity *old_ecom, *new_ecom;
+
+			old_ecom = bgp_attr_get_ipv6_ecommunity(attr);
+			new_ecom = ecommunity_replace_linkbw(link_bw_as, old_ecom, cum_bw, false,
+							     true, false);
+			bgp_attr_set_ipv6_ecommunity(attr, new_ecom);
+			if (old_ecom && new_ecom != old_ecom && !old_ecom->refcnt)
+				ecommunity_free(&old_ecom);
+		} else {
+			struct ecommunity *old_ecom, *new_ecom;
+			bool disable_ieee = CHECK_FLAG(peer->flags,
+						       PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE);
+
+			old_ecom = bgp_attr_get_ecommunity(attr);
+			new_ecom = ecommunity_replace_linkbw(link_bw_as, old_ecom, cum_bw,
+							     disable_ieee, false, false);
+			bgp_attr_set_ecommunity(attr, new_ecom);
+			if (old_ecom && new_ecom != old_ecom && !old_ecom->refcnt)
+				ecommunity_free(&old_ecom);
+		}
+	}
+
+	/*
+	 * If link-bandwidth was set by a route-map (either at origination or
+	 * per-neighbor), we still need to adjust the AS number based on the
+	 * destination peer type, even though the bandwidth value itself should
+	 * not be changed.
+	 *
+	 * This ensures consistency: external eBGP peers see confederation AS,
+	 * while iBGP and confederation peers see local AS.
+	 */
+	if (link_bw_was_set || CHECK_FLAG(attr->rmap_change_flags, BATTR_RMAP_LINK_BW_SET)) {
+		as_t link_bw_as = bgp_local_as_for_peer(peer);
+		uint64_t bw_val = 0;
+
+		/* Replace AS number in existing link-bandwidth extended community */
+		if (CHECK_FLAG(peer->flags, PEER_FLAG_EXTENDED_LINK_BANDWIDTH)) {
+			struct ecommunity *old_ecom, *new_ecom;
+
+			old_ecom = bgp_attr_get_ipv6_ecommunity(attr);
+			if (old_ecom && ecommunity_linkbw_present(old_ecom, &bw_val)) {
+				new_ecom = ecommunity_replace_linkbw(link_bw_as, old_ecom, bw_val,
+								     false, true, true);
+				bgp_attr_set_ipv6_ecommunity(attr, new_ecom);
+				if (new_ecom != old_ecom && !old_ecom->refcnt)
+					ecommunity_free(&old_ecom);
+			}
+		} else {
+			struct ecommunity *old_ecom, *new_ecom;
+
+			old_ecom = bgp_attr_get_ecommunity(attr);
+			if (old_ecom && ecommunity_linkbw_present(old_ecom, &bw_val)) {
+				new_ecom = ecommunity_replace_linkbw(
+					link_bw_as, old_ecom, bw_val,
 					CHECK_FLAG(peer->flags,
 						   PEER_FLAG_DISABLE_LINK_BW_ENCODING_IEEE),
-					false));
+					false, true);
+				bgp_attr_set_ecommunity(attr, new_ecom);
+				if (new_ecom != old_ecom && !old_ecom->refcnt)
+					ecommunity_free(&old_ecom);
+			}
+		}
 	}
 
 	/*
@@ -3194,21 +3339,21 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	}
 
 	/* Extended communities can be transitive and non-transitive.
-	 * If the extended community is non-transitive, strip it off,
-	 * unless it's a locally originated route (static, aggregate,
-	 * redistributed, etc.).
-	 * draft-uttaro-idr-bgp-oad says:
-	 * Extended communities which are non-transitive across an AS
-	 * boundary MAY be advertised over an EBGP-OAD session if allowed
-	 * by explicit policy configuration. If allowed, all the members
-	 * of the OAD SHOULD be configured to use the same criteria.
-	 * For example, the Origin Validation State Extended Community,
-	 * defined as non-transitive in [RFC8097], can be advertised to
-	 * peers in the same OAD.
+	 *
+	 * RFC 4360 says:
+	 * If a route has a non-transitivity extended community, then before
+	 * advertising the route across the Autonomous System boundary the
+	 * community SHOULD be removed from the route.
+	 * So strip them whenever we are about to cross an AS boundary,
+	 * regardless of where we learnt the route from. This includes routes
+	 * we originate locally: an aggregate with "as-set" inherits the
+	 * extended communities of its contributors, so exempting locally
+	 * originated routes would let a received non-transitive community
+	 * launder itself across the boundary.
+	 *
+	 * Except: OAD sessions, confederations.
 	 */
-	if (from->sort == BGP_PEER_EBGP && from->sub_sort != BGP_PEER_EBGP_OAD &&
-	    peer->sort == BGP_PEER_EBGP && peer->sub_sort != BGP_PEER_EBGP_OAD &&
-	    pi->sub_type == BGP_ROUTE_NORMAL) {
+	if (peer->sort == BGP_PEER_EBGP && peer->sub_sort != BGP_PEER_EBGP_OAD) {
 		struct ecommunity *new_ecomm;
 		struct ecommunity *old_ecomm;
 
@@ -3259,6 +3404,90 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	if (peer->sort == BGP_PEER_EBGP && peer->sub_sort != BGP_PEER_EBGP_OAD) {
 		attr->local_pref = 0;
 		bgp_attr_unset(attr, BGP_ATTR_LOCAL_PREF);
+	}
+
+	/* UPA Extended Community aggregation.
+	 * When announcing a UPA route, aggregate all UPA ExtComs from all
+	 * UPA paths for this prefix. Each Router-ID gets its own 8-byte ExtCom.
+	 * Enforce 200-ExtCom hard cap (log ERROR and drop oldest).
+	 * Log WARNING if count exceeds 100.
+	 */
+	if (CHECK_FLAG(pi->flags, BGP_PATH_UPA)) {
+		struct bgp_path_info *pi_walker;
+		struct ecommunity *aggregated_ecomm = NULL;
+		struct ecommunity_val eval;
+		uint8_t upa_flags;
+		struct in_addr router_id;
+		int upa_count = 0;
+
+		/* Walk all paths for this prefix to collect UPA ExtComs */
+		for (pi_walker = bgp_dest_get_bgp_path_info(dest); pi_walker;
+		     pi_walker = pi_walker->next) {
+			struct ecommunity *path_ecomm;
+			struct ecommunity_val *upa_eval;
+
+			/* Only collect from UPA paths */
+			if (!CHECK_FLAG(pi_walker->flags, BGP_PATH_UPA))
+				continue;
+
+			/* Get extended communities from this path */
+			path_ecomm = bgp_attr_get_ecommunity(pi_walker->attr);
+			if (!path_ecomm)
+				continue;
+
+			/* Look for UPA ExtCom in this path's ecommunities */
+			upa_eval = ecommunity_lookup(path_ecomm, ECOMMUNITY_ENCODE_OPAQUE,
+						     ECOMMUNITY_OPAQUE_SUBTYPE_UPA);
+			if (!upa_eval)
+				continue;
+
+			/* Parse UPA ExtCom to get Router-ID */
+			if (!bgp_upa_extcom_parse(upa_eval, &upa_flags, &router_id))
+				continue;
+
+			/* Create aggregated ecommunity on first UPA */
+			if (!aggregated_ecomm)
+				aggregated_ecomm = ecommunity_new();
+
+			/* Build UPA ExtCom for this Router-ID */
+			bgp_upa_extcom_new(router_id, upa_flags, &eval);
+
+			/* Add to aggregated list (deduplicate automatically) */
+			if (ecommunity_add_val(aggregated_ecomm, &eval, true, false))
+				upa_count++;
+
+			/* Check limits */
+			if (upa_count >= BGP_UPA_EXTCOM_MAX_LIMIT) {
+				flog_err(EC_BGP_UPA,
+					 "UPA ExtCom aggregation: %pFX reached limit of %d Router-IDs",
+					 p, BGP_UPA_EXTCOM_MAX_LIMIT);
+				break;
+			}
+		}
+
+		/* Log warning if approaching limit */
+		if (upa_count >= BGP_UPA_EXTCOM_WARN_THRESHOLD) {
+			zlog_warn("UPA ExtCom aggregation: %pFX has %d Router-IDs (threshold=%d)",
+				  p, upa_count, BGP_UPA_EXTCOM_WARN_THRESHOLD);
+		}
+
+		/* Replace attr's ecommunity with aggregated version */
+		if (aggregated_ecomm) {
+			struct ecommunity *old_ecomm = NULL;
+
+			if (bgp_attr_exists(attr, BGP_ATTR_EXT_COMMUNITIES))
+				old_ecomm = bgp_attr_get_ecommunity(attr);
+
+			bgp_attr_set_ecommunity(attr, aggregated_ecomm);
+
+			/* Free old ecommunity if not referenced elsewhere */
+			if (old_ecomm && !old_ecomm->refcnt)
+				ecommunity_free(&old_ecomm);
+
+			if (BGP_DEBUG(update, UPDATE_OUT))
+				zlog_debug("%s: UPA %pFX aggregated %d Router-IDs", peer->host, p,
+					   upa_count);
+		}
 	}
 
 	return true;
@@ -3898,12 +4127,12 @@ static void bgp_process_evpn_route_injection(struct bgp *bgp, afi_t afi,
 {
 	const struct prefix *p = bgp_dest_get_prefix(dest);
 
-	if ((afi != AFI_IP && afi != AFI_IP6) || (safi != SAFI_UNICAST))
+	if ((afi != AFI_IP && afi != AFI_IP6) || (safi != SAFI_UNICAST && safi != SAFI_MPLS_VPN))
 		return;
 
 
-	if (advertise_type5_routes_bestpath(bgp, afi) && new_select &&
-	    is_route_injectable_into_evpn(new_select)) {
+	if (advertise_type5_routes_bestpath(bgp, afi, safi) && new_select &&
+	    is_route_injectable_into_evpn(bgp, afi, safi, new_select)) {
 		/* apply the route-map */
 		if (bgp->adv_cmd_rmap[afi][safi].map) {
 			route_map_result_t ret;
@@ -3940,8 +4169,8 @@ static void bgp_process_evpn_route_injection(struct bgp *bgp, afi_t afi,
 			bgp_evpn_advertise_type5_route(bgp, new_select, p, new_select->attr, afi,
 						       safi, 0);
 		}
-	} else if (advertise_type5_routes_bestpath(bgp, afi) && old_select &&
-		   is_route_injectable_into_evpn(old_select))
+	} else if (advertise_type5_routes_bestpath(bgp, afi, safi) && old_select &&
+		   is_route_injectable_into_evpn(bgp, afi, safi, old_select))
 		bgp_evpn_withdraw_type5_route(bgp, old_select, p, afi, safi, 0);
 }
 
@@ -4378,6 +4607,22 @@ void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, saf
 	/* Reap old select bgp_path_info, if it has been removed */
 	if (old_select && CHECK_FLAG(old_select->flags, BGP_PATH_REMOVED))
 		bgp_path_info_reap(dest, old_select);
+
+	/* UPA (Unreachable Prefix Announcement) check after best path selection.
+	 *
+	 * If global UPA is enabled for this AFI/SAFI, check if the prefix has
+	 * become unreachable (no new_select) or reachable (new_select exists).
+	 * This triggers dynamic UPA origination/withdrawal based on reachability.
+	 */
+	if (bgp->upa_enabled[afi][safi])
+		bgp_upa_check_prefix_global(bgp, bgp_dest_get_prefix(dest), afi, safi);
+
+	/* Check for aggregate-scoped UPA.
+	 *
+	 * Find if this prefix falls under any aggregate with UPA enabled.
+	 * If so, dynamically originate/withdraw UPA based on reachability.
+	 */
+	bgp_upa_check_prefix_aggregates(bgp, bgp_dest_get_prefix(dest), afi, safi, new_select);
 
 	return;
 }
@@ -5476,7 +5721,8 @@ static void bgp_rib_withdraw(const struct prefix *p, struct bgp_dest *dest, stru
 	if (safi == SAFI_EVPN)
 		bgp_evpn_unimport_route(peer->bgp, afi, safi, p, pi);
 	/* If this is a route exported to EVPN, process for un-export */
-	if (advertise_type5_routes_multipath(peer->bgp, afi) && is_route_injectable_into_evpn(pi))
+	if (advertise_type5_routes_multipath(peer->bgp, afi, safi) &&
+	    is_route_injectable_into_evpn(peer->bgp, afi, safi, pi))
 		bgp_evpn_unexport_type5_route(peer->bgp, dest, pi, afi, safi);
 
 	bgp_ls_withdraw_bgp_prefix(peer->bgp, afi, safi, dest, pi);
@@ -5819,14 +6065,15 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			bgp_labels.label[i] = label[i];
 	}
 
-	/* When peer's soft reconfiguration enabled.  Record input packet in
-	   Adj-RIBs-In.  */
-	if (!soft_reconfig && CHECK_FLAG(peer->af_flags[afi][orig_safi], PEER_FLAG_SOFT_RECONFIG) &&
-	    peer != bgp->peer_self) {
+	/*
+	 * When the peer's Adj-RIB-In is maintained (soft reconfiguration or
+	 * BMP pre-policy monitoring), record the input route in it.
+	 */
+	if (!soft_reconfig && bgp_adj_in_needed(peer, afi, orig_safi) && peer != bgp->peer_self) {
 		/*
-		 * If the trigger is not from soft_reconfig and if
-		 * PEER_FLAG_SOFT_RECONFIG is enabled for the peer, then attr
-		 * will not be interned. In which case, it is ok to update the
+		 * If the trigger is not from soft_reconfig and if the
+		 * Adj-RIB-In is maintained for the peer, then attr will not
+		 * be interned. In which case, it is ok to update the
 		 * attr->evpn_overlay, so that, this can be stored in adj_in.
 		 */
 		if (evpn && afi == AFI_L2VPN) {
@@ -6059,8 +6306,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (bgp_attr_exists(attr, BGP_ATTR_EXT_COMMUNITIES)) {
 		struct ecommunity *ecomm = bgp_attr_get_ecommunity(attr);
 
-		if (ecommunity_lookup(ecomm, ECOMMUNITY_ENCODE_IP,
-				      ECOMMUNITY_NODE_TARGET) &&
+		if (ecommunity_has_node_target(ecomm) &&
 		    !ecommunity_node_target_match(ecomm, &peer->local_id)) {
 			reason =
 				"Node-Target Extended Communities do not contain own BGP Identifier;";
@@ -6088,8 +6334,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	 * attr->evpn_overlay with evpn directly. Instead memcpy
 	 * evpn to new_atr.evpn_overlay before it is interned.
 	 */
-	if (evpn && afi == AFI_L2VPN &&
-	    (soft_reconfig || !CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG))) {
+	if (evpn && afi == AFI_L2VPN && (soft_reconfig || !bgp_adj_in_needed(peer, afi, safi))) {
 		bgp_attr_set_evpn_overlay(&new_attr, evpn);
 		evpn = NULL;
 		p_evpn = NULL;
@@ -6276,12 +6521,10 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			{
 				peer->pcount_dup[afi][safi]++;
 				if (unlikely(bgp_debug_update(peer, p, NULL, 1))) {
-					if (!peer->rcvd_attr_printed) {
-						zlog_debug(
-							"%pBP rcvd UPDATE w/ attr: %s",
-							peer,
-							peer->rcvd_attr_str);
-						peer->rcvd_attr_printed = true;
+					if (!bm->rcvd_attr_printed && bm->rcvd_attr_str[0]) {
+						zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
+							   bm->rcvd_attr_str);
+						bm->rcvd_attr_printed = true;
 					}
 
 					bgp_debug_rdpfxpath2str(
@@ -6394,8 +6637,8 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		}
 #endif
 
-		if (advertise_type5_routes_multipath(bgp, afi) &&
-		    is_route_injectable_into_evpn(pi)) {
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, pi)) {
 			/* Implicit withdraw case */
 			bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 			force_evpn_export = true;
@@ -6515,8 +6758,8 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		}
 #endif
 
-		if (advertise_type5_routes_multipath(bgp, afi) &&
-		    is_route_injectable_into_evpn(pi) && force_evpn_export) {
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, pi) && force_evpn_export) {
 			/* Add back the route with its new attributes (e.g. local-pref). */
 			bgp_evpn_export_type5_route(bgp, dest, pi, afi, safi);
 		}
@@ -6627,10 +6870,9 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* Received Logging. */
 	if (unlikely(bgp_debug_update(peer, p, NULL, 1))) {
-		if (!peer->rcvd_attr_printed) {
-			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
-				   peer->rcvd_attr_str);
-			peer->rcvd_attr_printed = true;
+		if (!bm->rcvd_attr_printed && bm->rcvd_attr_str[0]) {
+			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer, bm->rcvd_attr_str);
+			bm->rcvd_attr_printed = true;
 		}
 
 		bgp_debug_rdpfxpath2str(afi, safi, prd, p, label, num_labels,
@@ -6641,6 +6883,45 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* Make new BGP info. */
 	new = info_make(type, sub_type, 0, peer, attr_new, dest);
+
+	/* Mark as UPA if route has UPA Extended Community */
+	{
+		struct ecommunity *ecom = bgp_attr_get_ecommunity(attr_new);
+
+		if (ecom) {
+			/* Search for UPA ExtCom and extract D-bit in single pass */
+			for (uint32_t idx = 0; idx < ecom->size; idx++) {
+				uint8_t *ptr = ecom->val + (idx * ecom->unit_size);
+				struct in_addr rid;
+
+				if (ptr[0] != ECOMMUNITY_ENCODE_OPAQUE ||
+				    ptr[1] != ECOMMUNITY_OPAQUE_SUBTYPE_UPA)
+					continue;
+
+				/* A UPA ExtCom must carry a valid (non-zero)
+				 * originator Router-ID; ignore it otherwise.
+				 */
+				memcpy(&rid.s_addr, &ptr[BGP_UPA_EXTCOM_OFF_ROUTER_ID],
+				       sizeof(rid.s_addr));
+				if (rid.s_addr == INADDR_ANY) {
+					if (BGP_DEBUG(upa, UPA))
+						zlog_debug("%s: ignoring UPA ExtCom with zero Router-ID for %pFX from %pBP",
+							   __func__, p, peer);
+					continue;
+				}
+
+				SET_FLAG(new->flags, BGP_PATH_UPA);
+				if (CHECK_FLAG(ptr[BGP_UPA_EXTCOM_OFF_FLAGS], BGP_UPA_FLAG_DROP)) {
+					if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_UPA))
+						SET_FLAG(new->flags, BGP_PATH_UPA_DROP);
+					else if (BGP_DEBUG(upa, UPA))
+						zlog_debug("%s: not honoring UPA D-bit for %pFX from %pBP (neighbor UPA not enabled)",
+							   __func__, p, peer);
+				}
+				break;
+			}
+		}
+	}
 
 	/* Update MPLS label */
 	bgp_path_info_extra_get(new);
@@ -6716,7 +6997,8 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (safi == SAFI_EVPN && CHECK_FLAG(new->flags, BGP_PATH_VALID))
 		bgp_evpn_import_route(bgp, afi, safi, p, new);
 	/* If this is a route we should export for EVPN, process for export */
-	if (advertise_type5_routes_multipath(bgp, afi) && is_route_injectable_into_evpn(new))
+	if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+	    is_route_injectable_into_evpn(bgp, afi, safi, new))
 		bgp_evpn_export_type5_route(bgp, dest, new, afi, safi);
 
 	bgp_ls_originate_bgp_prefix(bgp, afi, safi, dest, new);
@@ -6769,10 +7051,9 @@ filtered:
 	hook_call(bgp_process, bgp, afi, safi, dest, peer, true);
 
 	if (bgp_debug_update(peer, p, NULL, 1)) {
-		if (!peer->rcvd_attr_printed) {
-			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
-				   peer->rcvd_attr_str);
-			peer->rcvd_attr_printed = true;
+		if (!bm->rcvd_attr_printed && bm->rcvd_attr_str[0]) {
+			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer, bm->rcvd_attr_str);
+			bm->rcvd_attr_printed = true;
 		}
 
 		bgp_debug_rdpfxpath2str(afi, safi, prd, p, label, num_labels,
@@ -6788,7 +7069,8 @@ filtered:
 		if (safi == SAFI_EVPN)
 			bgp_evpn_unimport_route(bgp, afi, safi, p, pi);
 		/* If this route is exported to EVPN, process for un-export as it is now filtered */
-		if (advertise_type5_routes_multipath(bgp, afi) && is_route_injectable_into_evpn(pi))
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 			bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 		bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -6834,7 +7116,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 {
 	struct bgp *bgp;
 	char pfx_buf[BGP_PRD_PATH_STRLEN];
-	struct bgp_dest *dest;
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
 	struct bgp_path_info *pi;
 
 #ifdef ENABLE_BGP_VNC
@@ -6849,8 +7131,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	/* Lookup node. */
 	dest = bgp_afi_node_get(bgp->rib[afi][safi], afi, safi, p, prd);
 
-	/* If peer is soft reconfiguration enabled.  Record input packet for
-	 * further calculation.
+	/* If the peer's Adj-RIB-In is maintained, drop the route from it.
 	 *
 	 * Cisco IOS 12.4(24)T4 on session establishment sends withdraws for all
 	 * routes that are filtered.  This tanks out Quagga RS pretty badly due
@@ -6860,8 +7141,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	 * and
 	 * if there was no entry, we don't need to do anything more.
 	 */
-	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
-	    && peer != bgp->peer_self)
+	if (bgp_adj_in_needed(peer, afi, safi) && peer != bgp->peer_self)
 		if (!bgp_adj_in_unset(&dest, peer, addpath_id)) {
 			assert(dest);
 			peer->stat_pfx_dup_withdraw++;
@@ -6875,7 +7155,6 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 					"%s withdrawing route %s not in adj-in",
 					peer->host, pfx_buf);
 			}
-			bgp_dest_unlock_node(dest);
 			return;
 		}
 
@@ -6911,9 +7190,6 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 					pfx_buf, sizeof(pfx_buf));
 		zlog_debug("%s Can't find the route %s", peer->host, pfx_buf);
 	}
-
-	/* Unlock bgp_node_get() lock. */
-	bgp_dest_unlock_node(dest);
 
 	return;
 }
@@ -7339,8 +7615,8 @@ static wq_item_status bgp_clear_route_node(struct work_queue *wq, void *data)
 					bgp, afi, safi,
 					bgp_dest_get_prefix(dest), pi);
 			/* If this is a route exported to EVPN, process for un-export. */
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+			    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 				bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 			bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -7598,7 +7874,8 @@ static void clearing_clear_one_pi(struct bgp_table *table, struct bgp_dest *dest
 				bgp, afi, safi,
 				bgp_dest_get_prefix(dest), pi);
 		/* If this is a route exported to EVPN, process for un-export */
-		if (advertise_type5_routes_multipath(bgp, afi) && is_route_injectable_into_evpn(pi))
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 			bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 		bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -8151,8 +8428,8 @@ void bgp_clear_stale_route(struct peer *peer, afi_t afi, safi_t safi)
 					vpn_leak_from_vrf_withdraw(
 						bgp_get_default(), peer->bgp,
 						pi);
-				if (advertise_type5_routes_multipath(peer->bgp, afi) &&
-				    is_route_injectable_into_evpn(pi))
+				if (advertise_type5_routes_multipath(peer->bgp, afi, safi) &&
+				    is_route_injectable_into_evpn(peer->bgp, afi, safi, pi))
 					bgp_evpn_unexport_type5_route(peer->bgp, dest, pi, afi,
 								      safi);
 
@@ -8285,8 +8562,8 @@ static void bgp_cleanup_table(struct bgp *bgp, struct bgp_table *table, afi_t af
 				bgp_evpn_unimport_route(bgp, AFI_L2VPN,
 							SAFI_EVPN, p, pi);
 			/* If this is a route exported to EVPN, process for un-export */
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+			    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 				bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 			bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -8559,7 +8836,7 @@ static void bgp_static_free(struct bgp_static *bgp_static)
 void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 		       struct bgp_static *bgp_static, afi_t afi, safi_t safi)
 {
-	struct bgp_dest *dest;
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
 	struct bgp_path_info *pi;
 	struct bgp_path_info *new;
 	struct bgp_path_info_extra rmap_extra = {};
@@ -8620,20 +8897,14 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 				XCALLOC(MTYPE_BGP_EVPN_OVERLAY,
 					sizeof(struct bgp_route_evpn));
 
-			SET_IPADDR_V4(&bre->gw_ip);
-			memcpy(&bre->gw_ip.ipaddr_v4,
-			       &bgp_static->gatewayIp.u.prefix4,
-			       IPV4_MAX_BYTELEN);
+			ipaddr_set_v4(&bre->gw_ip, bgp_static->gatewayIp.u.prefix4);
 			bgp_attr_set_evpn_overlay(&attr, bre);
 		} else if (bgp_static->gatewayIp.family == AF_INET6) {
 			struct bgp_route_evpn *bre =
 				XCALLOC(MTYPE_BGP_EVPN_OVERLAY,
 					sizeof(struct bgp_route_evpn));
 
-			SET_IPADDR_V6(&bre->gw_ip);
-			memcpy(&bre->gw_ip.ipaddr_v6,
-			       &bgp_static->gatewayIp.u.prefix6,
-			       IPV6_MAX_BYTELEN);
+			ipaddr_set_v6(&bre->gw_ip, &bgp_static->gatewayIp.u.prefix6);
 			bgp_attr_set_evpn_overlay(&attr, bre);
 		}
 		memcpy(&attr.esi, bgp_static->eth_s_id, sizeof(esi_t));
@@ -8670,7 +8941,6 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 			/* Unintern original. */
 			aspath_unintern(&attr.aspath);
 			bgp_static_withdraw(bgp, p, afi, safi, &bgp_static->prd);
-			bgp_dest_unlock_node(dest);
 			return;
 		}
 
@@ -8698,7 +8968,6 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 		if (!CHECK_FLAG(pi->flags, BGP_PATH_REMOVED) &&
 		    !CHECK_FLAG(bgp->flags, BGP_FLAG_FORCE_STATIC_PROCESS) &&
 		    attrhash_cmp(pi->attr, attr_new) && bgp_path_info_extra_same(pi, &rmap_path)) {
-			bgp_dest_unlock_node(dest);
 			bgp_attr_unintern(&attr_new);
 			aspath_unintern(&attr.aspath);
 			return;
@@ -8775,13 +9044,12 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 				vpn_leak_from_vrf_update(bgp_get_default(), bgp,
 							 pi);
 			}
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+			    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 				bgp_evpn_export_type5_route(bgp, dest, pi, afi, safi);
 
 			bgp_ls_originate_bgp_prefix(bgp, afi, safi, dest, pi);
 
-			bgp_dest_unlock_node(dest);
 			aspath_unintern(&attr.aspath);
 			return;
 		}
@@ -8817,9 +9085,6 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 	/* Process change. */
 	bgp_process(bgp, dest, new, afi, safi);
 
-	/* route_node_get lock */
-	bgp_dest_unlock_node(dest);
-
 	if (SAFI_UNICAST == safi &&
 	    (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 	     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
@@ -8832,7 +9097,8 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 	}
 
 	/* If this is a route we should export to EVPN, process for export */
-	if (advertise_type5_routes_multipath(bgp, afi) && is_route_injectable_into_evpn(new))
+	if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+	    is_route_injectable_into_evpn(bgp, afi, safi, new))
 		bgp_evpn_export_type5_route(bgp, dest, new, afi, safi);
 
 	bgp_ls_originate_bgp_prefix(bgp, afi, safi, dest, new);
@@ -8884,7 +9150,8 @@ void bgp_static_withdraw(struct bgp *bgp, const struct prefix *p, afi_t afi,
 			vpn_leak_to_vrf_withdraw(pi);
 		}
 		/* If this is a route exported to EVPN, process for un-export. */
-		if (advertise_type5_routes_multipath(bgp, afi) && is_route_injectable_into_evpn(pi))
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 			bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 		bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -9427,8 +9694,7 @@ DEFPY(bgp_network,
 	if (address_str) {
 		int ret;
 
-		ret = netmask_str2prefix_str(address_str, netmask_str,
-					     addr_prefix_str,
+		ret = netmask_str2prefix_str(address_str, netmask_str, addr_prefix_str,
 					     sizeof(addr_prefix_str));
 		if (!ret) {
 			vty_out(vty, "%% Inconsistent address and mask\n");
@@ -9436,13 +9702,10 @@ DEFPY(bgp_network,
 		}
 	}
 
-	return bgp_static_set(vty, no,
-			      address_str ? addr_prefix_str : prefix_str, NULL,
-			      NULL, AFI_IP, bgp_node_safi(vty), map_name,
-			      backdoor ? 1 : 0,
-			      label_index ? (uint32_t)label_index
-					  : BGP_INVALID_LABEL_INDEX,
-			      0, NULL, NULL, NULL, NULL);
+	return bgp_static_set(vty, no, address_str ? addr_prefix_str : prefix_str, NULL, NULL,
+			      AFI_IP, bgp_node_safi(vty), map_name, backdoor ? 1 : 0,
+			      label_index ? (uint32_t)label_index : BGP_INVALID_LABEL_INDEX, 0,
+			      NULL, NULL, NULL, NULL);
 }
 
 DEFPY(ipv6_bgp_network,
@@ -9457,11 +9720,10 @@ DEFPY(ipv6_bgp_network,
 	"Label index to associate with the prefix\n"
 	"Label index value\n")
 {
-	return bgp_static_set(vty, no, prefix_str, NULL, NULL, AFI_IP6,
-			      bgp_node_safi(vty), map_name, 0,
-			      label_index ? (uint32_t)label_index
-					  : BGP_INVALID_LABEL_INDEX,
-			      0, NULL, NULL, NULL, NULL);
+	return bgp_static_set(vty, no, prefix_str, NULL, NULL, AFI_IP6, bgp_node_safi(vty),
+			      map_name, 0,
+			      label_index ? (uint32_t)label_index : BGP_INVALID_LABEL_INDEX, 0,
+			      NULL, NULL, NULL, NULL);
 }
 
 static struct bgp_aggregate *bgp_aggregate_new(void)
@@ -9475,8 +9737,569 @@ void bgp_aggregate_free(struct bgp_aggregate *aggregate)
 	route_map_counter_decrement(aggregate->suppress_map);
 	XFREE(MTYPE_ROUTE_MAP_NAME, aggregate->rmap.name);
 	route_map_counter_decrement(aggregate->rmap.map);
+
+	/* Free UPA routes tracking hash */
+	if (aggregate->upa_routes.hh.count > 0) {
+		struct bgp_upa_prefix_entry *entry;
+
+		while ((entry = bgp_upa_prefix_hash_pop(&aggregate->upa_routes)))
+			XFREE(MTYPE_BGP_AGGREGATE, entry);
+
+		bgp_upa_prefix_hash_fini(&aggregate->upa_routes);
+	}
+
 	XFREE(MTYPE_BGP_AGGREGATE, aggregate);
 }
+
+/*
+ * ============================================================================
+ * UPA (Unreachable Prefix Announcement) Functions
+ * ============================================================================
+ */
+
+bool bgp_upa_has_extcomm(struct bgp_path_info *pi)
+{
+	if (!pi)
+		return false;
+
+	return CHECK_FLAG(pi->flags, BGP_PATH_UPA);
+}
+
+bool bgp_upa_get_dbit(struct bgp_path_info *pi)
+{
+	if (!pi)
+		return false;
+
+	return CHECK_FLAG(pi->flags, BGP_PATH_UPA_DROP);
+}
+
+static bool bgp_upa_is_prefix_unreachable(struct bgp_dest *dest)
+{
+	struct bgp_path_info *pi;
+
+	for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
+		if (bgp_upa_has_extcomm(pi))
+			continue;
+		/*
+		 * NHT clears BGP_PATH_VALID synchronously when import-check
+		 * rejects our UPA blackhole, but BGP_PATH_SELECTED can linger
+		 * until best-path is reprocessed. A path in holddown must not
+		 * count as reachability, or UPA can withdraw and re-originate.
+		 */
+		if (BGP_PATH_HOLDDOWN(pi) || CHECK_FLAG(pi->flags, BGP_PATH_STALE))
+			continue;
+		if (CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
+			return false;
+	}
+	return true;
+}
+
+static struct ecommunity *bgp_upa_create_extcomm(struct bgp *bgp, bool drop)
+{
+	struct ecommunity *ecomm;
+	struct ecommunity_val eval;
+
+	memset(&eval, 0, sizeof(eval));
+	eval.val[0] = ECOMMUNITY_ENCODE_OPAQUE;
+	eval.val[1] = ECOMMUNITY_OPAQUE_SUBTYPE_UPA;
+	eval.val[BGP_UPA_EXTCOM_OFF_FLAGS] = drop ? BGP_UPA_FLAG_DROP : 0;
+	memcpy(&eval.val[BGP_UPA_EXTCOM_OFF_ROUTER_ID], &bgp->router_id.s_addr, 4);
+
+	ecomm = ecommunity_new();
+	ecommunity_add_val(ecomm, &eval, false, false);
+
+	return ecomm;
+}
+
+/*
+ * UPA Extended Communities carry the originating router's BGP Router-ID.
+ * A zero Router-ID (0.0.0.0) is invalid and would produce a UPA ExtCom that
+ * cannot be attributed to an originator, so origination must be refused until
+ * a valid Router-ID is configured/derived.
+ */
+static bool bgp_upa_router_id_valid(struct bgp *bgp)
+{
+	if (bgp->router_id.s_addr != INADDR_ANY)
+		return true;
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: skipping origination, BGP Router-ID is 0.0.0.0");
+
+	return false;
+}
+
+int bgp_upa_prefix_cmp(const struct bgp_upa_prefix_entry *e1, const struct bgp_upa_prefix_entry *e2)
+{
+	return prefix_cmp(&e1->prefix, &e2->prefix);
+}
+
+uint32_t bgp_upa_prefix_hashfn(const struct bgp_upa_prefix_entry *entry)
+{
+	return prefix_hash_key(&entry->prefix);
+}
+
+static void bgp_upa_track_route(struct bgp_aggregate *aggregate, const struct prefix *prefix)
+{
+	struct bgp_upa_prefix_entry *entry;
+
+	if (aggregate->upa_routes.hh.count == 0 && aggregate->upa_routes.hh.tabshift == 0)
+		bgp_upa_prefix_hash_init(&aggregate->upa_routes);
+
+	entry = XCALLOC(MTYPE_BGP_AGGREGATE, sizeof(*entry));
+	prefix_copy(&entry->prefix, prefix);
+
+	if (bgp_upa_prefix_hash_add(&aggregate->upa_routes, entry))
+		XFREE(MTYPE_BGP_AGGREGATE, entry);
+}
+
+static void bgp_upa_untrack_route(struct bgp_aggregate *aggregate, const struct prefix *prefix)
+{
+	struct bgp_upa_prefix_entry lookup, *entry;
+
+	if (aggregate->upa_routes.hh.count == 0)
+		return;
+
+	prefix_copy(&lookup.prefix, prefix);
+	entry = bgp_upa_prefix_hash_find(&aggregate->upa_routes, &lookup);
+	if (entry) {
+		bgp_upa_prefix_hash_del(&aggregate->upa_routes, entry);
+		XFREE(MTYPE_BGP_AGGREGATE, entry);
+	}
+}
+
+static unsigned int bgp_upa_count_tracked(struct bgp_aggregate *aggregate)
+{
+	return aggregate->upa_routes.hh.count;
+}
+
+static bool bgp_upa_is_tracked(struct bgp_aggregate *aggregate, const struct prefix *prefix)
+{
+	struct bgp_upa_prefix_entry lookup;
+
+	if (aggregate->upa_routes.hh.count == 0)
+		return false;
+
+	prefix_copy(&lookup.prefix, prefix);
+	return bgp_upa_prefix_hash_find(&aggregate->upa_routes, &lookup) != NULL;
+}
+
+static bool bgp_upa_originate_single(struct bgp *bgp, struct bgp_dest *dest,
+				     const struct prefix *aggr_p, struct bgp_aggregate *aggregate,
+				     afi_t afi, safi_t safi)
+{
+	struct attr attr = { 0 };
+	struct attr *new_attr;
+	struct bgp_path_info *pi, *new;
+	const struct prefix *dest_p = bgp_dest_get_prefix(dest);
+	struct ecommunity *ecomm_upa;
+
+	if (prefix_same(dest_p, aggr_p)) {
+		if (BGP_DEBUG(upa, UPA))
+			zlog_debug("UPA %pFX: SKIP - this IS the aggregate prefix", dest_p);
+		return false;
+	}
+
+	bgp_attr_default_set(&attr, bgp, BGP_ORIGIN_INCOMPLETE);
+	ecomm_upa = bgp_upa_create_extcomm(bgp, aggregate->upa_drop);
+	bgp_attr_set_ecommunity(&attr, ecomm_upa);
+
+	if (aggregate->upa_drop) {
+		attr.nh_type = NEXTHOP_TYPE_BLACKHOLE;
+		attr.bh_type = BLACKHOLE_UNSPEC;
+	}
+
+	new_attr = bgp_attr_intern(&attr);
+	bgp_attr_flush(&attr);
+
+	for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
+		if (pi->peer == bgp->peer_self && pi->type == ZEBRA_ROUTE_BGP &&
+		    bgp_upa_has_extcomm(pi)) {
+			if (attrhash_cmp(pi->attr, new_attr)) {
+				bgp_attr_unintern(&new_attr);
+				return false;
+			}
+			bgp_path_info_mark_for_delete(dest, pi);
+			bgp_process(bgp, dest, pi, afi, safi);
+			break;
+		}
+	}
+
+	new = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_NORMAL, 0, bgp->peer_self, new_attr, dest);
+	SET_FLAG(new->flags, BGP_PATH_VALID);
+	SET_FLAG(new->flags, BGP_PATH_UPA);
+	if (aggregate->upa_drop)
+		SET_FLAG(new->flags, BGP_PATH_UPA_DROP);
+
+	bgp_path_info_add(dest, new);
+	bgp_process(bgp, dest, new, afi, safi);
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA %pFX: originated for aggregate %pFX (drop=%d)", dest_p, aggr_p,
+			   aggregate->upa_drop);
+
+	return true;
+}
+
+static bool bgp_upa_withdraw_single(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, safi_t safi)
+{
+	struct bgp_path_info *pi;
+	const struct prefix *dest_p = bgp_dest_get_prefix(dest);
+
+	for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
+		if (pi->peer == bgp->peer_self && pi->type == ZEBRA_ROUTE_BGP &&
+		    bgp_upa_has_extcomm(pi)) {
+			bgp_path_info_mark_for_delete(dest, pi);
+			bgp_process(bgp, dest, pi, afi, safi);
+
+			if (BGP_DEBUG(upa, UPA))
+				zlog_debug("UPA %pFX: withdrawn", dest_p);
+			return true;
+		}
+	}
+	return false;
+}
+
+void bgp_upa_originate_all(struct bgp *bgp, const struct prefix *aggr_p, afi_t afi, safi_t safi,
+			   struct bgp_aggregate *aggregate)
+{
+	struct bgp_table *table;
+	struct bgp_dest *top, *dest;
+	unsigned int originated = 0;
+
+	if (!bgp_upa_router_id_valid(bgp))
+		return;
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Originating all for aggregate %pFX (max_routes=%u)", aggr_p,
+			   aggregate->upa_max_routes);
+
+	table = bgp->rib[afi][safi];
+	if (!table)
+		return;
+
+	top = bgp_node_get(table, aggr_p);
+	for (dest = bgp_node_get(table, aggr_p); dest; dest = bgp_route_next_until(dest, top)) {
+		const struct prefix *dest_p = bgp_dest_get_prefix(dest);
+
+		if (dest_p->prefixlen <= aggr_p->prefixlen)
+			continue;
+
+		if (!bgp_upa_is_prefix_unreachable(dest))
+			continue;
+
+		if (aggregate->upa_max_routes > 0 &&
+		    bgp_upa_count_tracked(aggregate) >= aggregate->upa_max_routes)
+			continue;
+
+		if (bgp_upa_originate_single(bgp, dest, aggr_p, aggregate, afi, safi)) {
+			bgp_upa_track_route(aggregate, dest_p);
+			originated++;
+		}
+	}
+
+	bgp_dest_unlock_node(top);
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Originated %u routes for aggregate %pFX", originated, aggr_p);
+}
+
+void bgp_upa_withdraw_all(struct bgp *bgp, const struct prefix *aggr_p, afi_t afi, safi_t safi)
+{
+	struct bgp_table *table;
+	struct bgp_dest *aggr_dest, *dest;
+	struct bgp_aggregate *aggregate;
+	struct bgp_upa_prefix_entry *entry;
+	unsigned int withdrawn = 0;
+
+	table = bgp->rib[afi][safi];
+	if (!table)
+		return;
+
+	aggr_dest = bgp_node_lookup(bgp->aggregate[afi][safi], aggr_p);
+	if (!aggr_dest)
+		return;
+
+	aggregate = bgp_dest_get_bgp_aggregate_info(aggr_dest);
+	bgp_dest_unlock_node(aggr_dest);
+
+	if (!aggregate || aggregate->upa_routes.hh.count == 0)
+		return;
+
+	frr_each_safe (bgp_upa_prefix_hash, &aggregate->upa_routes, entry) {
+		dest = bgp_node_lookup(table, &entry->prefix);
+
+		if (dest) {
+			if (bgp_upa_withdraw_single(bgp, dest, afi, safi))
+				withdrawn++;
+			bgp_dest_unlock_node(dest);
+		}
+	}
+
+	if (aggregate->upa_routes.hh.count > 0) {
+		while ((entry = bgp_upa_prefix_hash_pop(&aggregate->upa_routes)))
+			XFREE(MTYPE_BGP_AGGREGATE, entry);
+		bgp_upa_prefix_hash_fini(&aggregate->upa_routes);
+	}
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Withdrawn %u routes for aggregate %pFX", withdrawn, aggr_p);
+}
+
+static unsigned int bgp_upa_count_tracked_hash(struct bgp_upa_prefix_hash_head *hash)
+{
+	return hash->hh.count;
+}
+
+static void bgp_upa_track_route_hash(struct bgp_upa_prefix_hash_head *hash, const struct prefix *p)
+{
+	struct bgp_upa_prefix_entry *entry;
+
+	if (hash->hh.count == 0 && hash->hh.tabshift == 0)
+		bgp_upa_prefix_hash_init(hash);
+
+	entry = XCALLOC(MTYPE_BGP_AGGREGATE, sizeof(*entry));
+	prefix_copy(&entry->prefix, p);
+
+	if (bgp_upa_prefix_hash_add(hash, entry))
+		XFREE(MTYPE_BGP_AGGREGATE, entry);
+}
+
+static bool bgp_upa_originate_single_global(struct bgp *bgp, struct bgp_dest *dest, afi_t afi,
+					    safi_t safi, bool d_bit)
+{
+	struct bgp_path_info *pi;
+	struct attr attr = { 0 };
+	struct attr *new_attr;
+	struct ecommunity *upa_ecom;
+
+	for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
+		if (pi->peer == bgp->peer_self && bgp_upa_has_extcomm(pi))
+			return false;
+	}
+
+	bgp_attr_default_set(&attr, bgp, BGP_ORIGIN_INCOMPLETE);
+	upa_ecom = bgp_upa_create_extcomm(bgp, d_bit);
+	if (upa_ecom)
+		bgp_attr_set_ecommunity(&attr, upa_ecom);
+
+	if (d_bit) {
+		attr.nh_type = NEXTHOP_TYPE_BLACKHOLE;
+		attr.bh_type = BLACKHOLE_UNSPEC;
+	}
+
+	new_attr = bgp_attr_intern(&attr);
+	bgp_attr_flush(&attr);
+
+	pi = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_NORMAL, 0, bgp->peer_self, new_attr, dest);
+	SET_FLAG(pi->flags, BGP_PATH_VALID);
+	SET_FLAG(pi->flags, BGP_PATH_UPA);
+	if (d_bit)
+		SET_FLAG(pi->flags, BGP_PATH_UPA_DROP);
+
+	bgp_path_info_add(dest, pi);
+	bgp_process(bgp, dest, pi, afi, safi);
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Global originated UPA for %pFX (d_bit=%d)",
+			   bgp_dest_get_prefix(dest), d_bit);
+
+	return true;
+}
+
+void bgp_upa_check_prefix_global(struct bgp *bgp, const struct prefix *p, afi_t afi, safi_t safi)
+{
+	struct bgp_dest *dest BGP_DEST_AUTOUNLOCK = NULL;
+	bool is_unreachable;
+	bool upa_exists = false;
+	struct bgp_upa_prefix_entry *tracked_prefix = NULL;
+
+	if (!bgp->upa_enabled[afi][safi])
+		return;
+
+	dest = bgp_node_lookup(bgp->rib[afi][safi], p);
+	if (!dest)
+		return;
+
+	is_unreachable = bgp_upa_is_prefix_unreachable(dest);
+
+	if (bgp->upa_routes[afi][safi].hh.count > 0) {
+		struct bgp_upa_prefix_entry lookup;
+
+		prefix_copy(&lookup.prefix, p);
+		tracked_prefix = bgp_upa_prefix_hash_find(&bgp->upa_routes[afi][safi], &lookup);
+		upa_exists = (tracked_prefix != NULL);
+	}
+
+	if (is_unreachable && !upa_exists) {
+		uint32_t max_routes = bgp->upa_max_routes[afi][safi];
+		uint32_t current_count = bgp_upa_count_tracked_hash(&bgp->upa_routes[afi][safi]);
+
+		if (max_routes > 0 && current_count >= max_routes)
+			return;
+
+		if (bgp_upa_originate_single_global(bgp, dest, afi, safi,
+						    bgp->upa_drop[afi][safi])) {
+			bgp_upa_track_route_hash(&bgp->upa_routes[afi][safi], p);
+		}
+	} else if (!is_unreachable && upa_exists) {
+		if (bgp_upa_withdraw_single(bgp, dest, afi, safi)) {
+			bgp_upa_prefix_hash_del(&bgp->upa_routes[afi][safi], tracked_prefix);
+			XFREE(MTYPE_BGP_AGGREGATE, tracked_prefix);
+		}
+	}
+}
+
+void bgp_upa_originate_global(struct bgp *bgp, afi_t afi, safi_t safi)
+{
+	struct bgp_table *table = bgp->rib[afi][safi];
+	struct bgp_dest *dest;
+	uint32_t originated = 0;
+	uint32_t max_routes = bgp->upa_max_routes[afi][safi];
+	bool d_bit = bgp->upa_drop[afi][safi];
+
+	if (!bgp_upa_router_id_valid(bgp))
+		return;
+
+	if (!table)
+		return;
+
+	for (dest = bgp_table_top(table); dest; dest = bgp_route_next(dest)) {
+		const struct prefix *p = bgp_dest_get_prefix(dest);
+
+		if (!bgp_upa_is_prefix_unreachable(dest))
+			continue;
+
+		if (max_routes > 0 &&
+		    bgp_upa_count_tracked_hash(&bgp->upa_routes[afi][safi]) >= max_routes)
+			continue;
+
+		if (bgp_upa_originate_single_global(bgp, dest, afi, safi, d_bit)) {
+			bgp_upa_track_route_hash(&bgp->upa_routes[afi][safi], p);
+			originated++;
+		}
+	}
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Global origination complete: %u originated", originated);
+}
+
+void bgp_upa_withdraw_global(struct bgp *bgp, afi_t afi, safi_t safi)
+{
+	struct bgp_table *table = bgp->rib[afi][safi];
+	struct bgp_upa_prefix_hash_head *upa_hash = &bgp->upa_routes[afi][safi];
+	struct bgp_upa_prefix_entry *entry;
+	uint32_t withdrawn = 0;
+
+	if (!table || upa_hash->hh.count == 0)
+		return;
+
+	frr_each_safe (bgp_upa_prefix_hash, upa_hash, entry) {
+		struct bgp_dest *dest = bgp_node_lookup(table, &entry->prefix);
+
+		if (dest) {
+			if (bgp_upa_withdraw_single(bgp, dest, afi, safi))
+				withdrawn++;
+			bgp_dest_unlock_node(dest);
+		}
+	}
+
+	if (upa_hash->hh.count > 0) {
+		while ((entry = bgp_upa_prefix_hash_pop(upa_hash)))
+			XFREE(MTYPE_BGP_AGGREGATE, entry);
+		bgp_upa_prefix_hash_fini(upa_hash);
+	}
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("UPA: Global withdrawal complete: %u withdrawn", withdrawn);
+}
+
+static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, const struct prefix *p, afi_t afi,
+					    safi_t safi, struct bgp_path_info *new_select)
+{
+	struct bgp_table *table;
+	struct bgp_dest *aggr_dest, *dest;
+	struct bgp_aggregate *aggregate;
+	const struct prefix *aggr_prefix;
+
+	if (!bgp || !p)
+		return;
+
+	table = bgp->aggregate[afi][safi];
+	if (!table)
+		return;
+
+	dest = bgp_node_get(bgp->rib[afi][safi], p);
+	if (!dest)
+		return;
+
+	for (aggr_dest = bgp_table_top(table); aggr_dest; aggr_dest = bgp_route_next(aggr_dest)) {
+		aggr_prefix = bgp_dest_get_prefix(aggr_dest);
+		aggregate = bgp_dest_get_bgp_aggregate_info(aggr_dest);
+
+		if (!aggregate || !aggregate->upa_enabled)
+			continue;
+
+		if (!prefix_match(aggr_prefix, p))
+			continue;
+
+		bool is_tracked = bgp_upa_is_tracked(aggregate, p);
+		bool is_unreachable = true;
+		bool has_removed_paths = false;
+		bool has_suppressed_by_this_agg = false;
+		struct bgp_path_info *pi_check;
+
+		for (pi_check = bgp_dest_get_bgp_path_info(dest); pi_check;
+		     pi_check = pi_check->next) {
+			if (bgp_upa_has_extcomm(pi_check))
+				continue;
+
+			if (pi_check->extra && pi_check->extra->aggr_suppressors &&
+			    listnode_lookup(pi_check->extra->aggr_suppressors, aggregate))
+				has_suppressed_by_this_agg = true;
+
+			if (CHECK_FLAG(pi_check->flags, BGP_PATH_REMOVED)) {
+				has_removed_paths = true;
+				continue;
+			}
+
+			if (!CHECK_FLAG(pi_check->flags, BGP_PATH_VALID))
+				continue;
+
+			is_unreachable = false;
+			break;
+		}
+
+		if (has_suppressed_by_this_agg)
+			is_unreachable = false;
+
+		/* Don't originate UPA during route replacement transitions */
+		if (is_unreachable && !new_select && has_removed_paths)
+			is_unreachable = false;
+
+		if (is_unreachable && !is_tracked) {
+			if (aggregate->upa_max_routes > 0 &&
+			    bgp_upa_count_tracked(aggregate) >= aggregate->upa_max_routes)
+				continue;
+
+			/* Track BEFORE originating to reserve the slot and prevent races */
+			bgp_upa_track_route(aggregate, p);
+
+			if (!bgp_upa_originate_single(bgp, dest, aggr_prefix, aggregate, afi, safi))
+				bgp_upa_untrack_route(aggregate, p);
+		} else if (!is_unreachable && is_tracked) {
+			if (bgp_upa_withdraw_single(bgp, dest, afi, safi))
+				bgp_upa_untrack_route(aggregate, p);
+		}
+	}
+
+	bgp_dest_unlock_node(dest);
+}
+
+/*
+ * ============================================================================
+ * End UPA Functions
+ * ============================================================================
+ */
 
 /**
  * Helper function to avoid repeated code: prepare variables for a
@@ -9669,8 +10492,8 @@ static void bgp_aggregate_install(
 		if (SAFI_UNICAST == safi && (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 					     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 			vpn_leak_from_vrf_update(bgp_get_default(), bgp, new);
-		if (advertise_type5_routes_multipath(bgp, afi) &&
-		    is_route_injectable_into_evpn(new))
+		if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+		    is_route_injectable_into_evpn(bgp, afi, safi, new))
 			bgp_evpn_export_type5_route(bgp, dest, new, afi, safi);
 		bgp_ls_originate_bgp_prefix(bgp, afi, safi, dest, new);
 	} else {
@@ -9686,8 +10509,8 @@ static void bgp_aggregate_install(
 				     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
 					vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp, pi);
 				}
-				if (advertise_type5_routes_multipath(bgp, afi) &&
-				    is_route_injectable_into_evpn(pi))
+				if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+				    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 					bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 				bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -9756,8 +10579,10 @@ static bool bgp_aggregate_test_all_med(struct bgp_aggregate *aggregate,
 				break;
 			}
 		}
-		if (!med_matched)
+		if (!med_matched) {
+			bgp_dest_unlock_node(dest);
 			break;
+		}
 	}
 	bgp_dest_unlock_node(top);
 
@@ -9802,8 +10627,8 @@ void bgp_aggregate_toggle_suppressed(struct bgp_aggregate *aggregate,
 					     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 						vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp,
 									   pi);
-					if (advertise_type5_routes_multipath(bgp, afi) &&
-					    is_route_injectable_into_evpn(pi))
+					if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+					    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 						bgp_evpn_unexport_type5_route(bgp, dest, pi, afi,
 									      safi);
 
@@ -9819,8 +10644,8 @@ void bgp_aggregate_toggle_suppressed(struct bgp_aggregate *aggregate,
 				    (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 				     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 					vpn_leak_from_vrf_update(bgp_get_default(), bgp, pi);
-				if (advertise_type5_routes_multipath(bgp, afi) &&
-				    is_route_injectable_into_evpn(pi))
+				if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+				    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 					bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, safi);
 
 				bgp_ls_withdraw_bgp_prefix(bgp, afi, safi, dest, pi);
@@ -9956,8 +10781,8 @@ bool bgp_aggregate_route(struct bgp *bgp, const struct prefix *p, afi_t afi,
 					     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 						vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp,
 									   pi);
-					if (advertise_type5_routes_multipath(bgp, afi) &&
-					    is_route_injectable_into_evpn(pi))
+					if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+					    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 						bgp_evpn_unexport_type5_route(bgp, dest, pi, afi,
 									      safi);
 
@@ -9984,8 +10809,8 @@ bool bgp_aggregate_route(struct bgp *bgp, const struct prefix *p, afi_t afi,
 					     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 						vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp,
 									   pi);
-					if (advertise_type5_routes_multipath(bgp, afi) &&
-					    is_route_injectable_into_evpn(pi))
+					if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+					    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 						bgp_evpn_unexport_type5_route(bgp, dest, pi, afi,
 									      safi);
 
@@ -10111,6 +10936,14 @@ void bgp_aggregate_delete(struct bgp *bgp, const struct prefix *p, afi_t afi,
 	struct bgp_dest *dest;
 	struct bgp_path_info *pi, *next;
 
+	/* Withdraw all UPA routes if UPA was enabled on this aggregate */
+	if (aggregate && aggregate->upa_enabled) {
+		if (BGP_DEBUG(upa, UPA))
+			zlog_debug("%s: Aggregate %pFX being deleted, withdrawing all UPA routes",
+				   __func__, p);
+		bgp_upa_withdraw_all(bgp, p, afi, safi);
+	}
+
 	table = bgp->rib[afi][safi];
 
 	/* If routes exists below this node, generate aggregate routes. */
@@ -10144,14 +10977,17 @@ void bgp_aggregate_delete(struct bgp *bgp, const struct prefix *p, afi_t afi,
 					    (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 					     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 						vpn_leak_from_vrf_update(bgp_get_default(), bgp, pi);
-					if (advertise_type5_routes_multipath(bgp, afi) &&
-					    is_route_injectable_into_evpn(pi))
+					if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+					    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 						bgp_evpn_export_type5_route(bgp, dest, pi, afi,
 									    safi);
 
 					bgp_ls_originate_bgp_prefix(bgp, afi, safi, dest, pi);
 				}
 			}
+
+			if (!aggregate)
+				continue;
 
 			if (aggregate->count > 0)
 				aggregate->count--;
@@ -10194,7 +11030,7 @@ void bgp_aggregate_delete(struct bgp *bgp, const struct prefix *p, afi_t afi,
 			}
 		}
 	}
-	if (aggregate->as_set) {
+	if (aggregate && aggregate->as_set) {
 		aspath_free(aggregate->aspath);
 		aggregate->aspath = NULL;
 		if (aggregate->community)
@@ -10320,6 +11156,25 @@ static void bgp_add_route_to_aggregate(struct bgp *bgp,
 	bgp_aggregate_install(bgp, afi, safi, aggr_p, origin,
 			      aspath, community, ecommunity,
 			      lcommunity, atomic_aggregate, aggregate);
+
+	/* Runtime UPA origination - withdraw UPA when prefix becomes reachable.
+	 * After adding a route under a UPA-enabled aggregate, check if this prefix
+	 * previously had a UPA route originated. If so, withdraw the UPA (prefix
+	 * is now reachable).
+	 */
+	if (aggregate->upa_enabled && aggregate->upa_routes.hh.count > 0) {
+		const struct prefix *pi_prefix = bgp_dest_get_prefix(pinew->net);
+
+		if (bgp_upa_is_tracked(aggregate, pi_prefix)) {
+			/* UPA exists for this prefix - withdraw it (prefix is now reachable) */
+			if (bgp_debug_update(NULL, pi_prefix, NULL, 1))
+				zlog_debug("%s: Prefix %pFX became reachable, withdrawing UPA",
+					   __func__, pi_prefix);
+
+			if (bgp_upa_withdraw_single(bgp, pinew->net, afi, safi))
+				bgp_upa_untrack_route(aggregate, pi_prefix);
+		}
+	}
 }
 
 static void bgp_remove_route_from_aggregate(struct bgp *bgp, const struct prefix *aggr_p,
@@ -10339,8 +11194,8 @@ static void bgp_remove_route_from_aggregate(struct bgp *bgp, const struct prefix
 			if (SAFI_UNICAST == safi && (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 						     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 				vpn_leak_from_vrf_update(bgp_get_default(), bgp, pi);
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+			    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 				bgp_evpn_export_type5_route(bgp, pi->net, pi, afi, safi);
 
 			bgp_ls_originate_bgp_prefix(bgp, afi, safi, pi->net, pi);
@@ -10353,8 +11208,8 @@ static void bgp_remove_route_from_aggregate(struct bgp *bgp, const struct prefix
 			if (SAFI_UNICAST == safi && (bgp->inst_type == BGP_INSTANCE_TYPE_VRF ||
 						     bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT))
 				vpn_leak_from_vrf_update(bgp_get_default(), bgp, pi);
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, safi) &&
+			    is_route_injectable_into_evpn(bgp, afi, safi, pi))
 				bgp_evpn_export_type5_route(bgp, pi->net, pi, afi, safi);
 
 			bgp_ls_originate_bgp_prefix(bgp, afi, safi, pi->net, pi);
@@ -10434,6 +11289,60 @@ static void bgp_remove_route_from_aggregate(struct bgp *bgp, const struct prefix
 	bgp_aggregate_install(bgp, afi, safi, aggr_p, origin,
 			      aspath, community, ecommunity,
 			      lcommunity, atomic_aggregate, aggregate);
+
+	/* Runtime UPA origination - originate UPA when prefix becomes unreachable.
+	 * After removing a route from a UPA-enabled aggregate, check if there are any
+	 * OTHER valid paths remaining for this prefix. If not, originate a UPA route.
+	 *
+	 * Note: At the time this function is called (from bgp_aggregate_decrement), the path
+	 * being removed (pi) may still have BGP_PATH_VALID and BGP_PATH_SELECTED flags set,
+	 * even if it's being withdrawn. This is because mark_for_delete() runs after
+	 * aggregate_decrement(). Therefore, we must SKIP pi when checking for other valid paths.
+	 */
+	if (aggregate->upa_enabled) {
+		struct bgp_path_info *pi_check;
+		bool has_valid_path = false;
+		const struct prefix *pi_prefix = bgp_dest_get_prefix(pi->net);
+
+		for (pi_check = bgp_dest_get_bgp_path_info(pi->net); pi_check;
+		     pi_check = pi_check->next) {
+			/* Skip the path being removed */
+			if (pi_check == pi)
+				continue;
+
+			/* Skip holddown paths and locally originated UPA routes */
+			if (BGP_PATH_HOLDDOWN(pi_check) ||
+			    CHECK_FLAG(pi_check->flags, BGP_PATH_UPA))
+				continue;
+
+			/* Found a valid path - no need to originate UPA */
+			has_valid_path = true;
+			break;
+		}
+
+		/* Originate UPA only if NO valid paths remain */
+		if (!has_valid_path) {
+			/* Enforce max-routes limit */
+			if (aggregate->upa_max_routes > 0) {
+				unsigned int current_count = bgp_upa_count_tracked(aggregate);
+
+				if (current_count >= aggregate->upa_max_routes) {
+					if (bgp_debug_update(NULL, pi_prefix, NULL, 1))
+						zlog_debug("%s: Max-routes limit reached (%u/%u), not originating UPA for %pFX",
+							   __func__, current_count,
+							   aggregate->upa_max_routes, pi_prefix);
+					return;
+				}
+			}
+
+			if (bgp_debug_update(NULL, pi_prefix, NULL, 1))
+				zlog_debug("%s: Prefix %pFX became unreachable, originating UPA",
+					   __func__, pi_prefix);
+
+			if (bgp_upa_originate_single(bgp, pi->net, aggr_p, aggregate, afi, safi))
+				bgp_upa_track_route(aggregate, pi_prefix);
+		}
+	}
 }
 
 static void bgp_aggregate_adjust_count(struct bgp *bgp, const struct prefix *p,
@@ -10564,6 +11473,12 @@ static int bgp_aggregate_unset(struct vty *vty, const char *prefix_str,
 	}
 
 	aggregate = bgp_dest_get_bgp_aggregate_info(dest);
+	if (!aggregate) {
+		vty_out(vty, "%% There is no aggregate-address configuration.\n");
+		bgp_dest_unlock_node(dest);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
 	bgp_aggregate_delete(bgp, &p, afi, safi, aggregate);
 
 	/*
@@ -10589,10 +11504,13 @@ static int bgp_aggregate_unset(struct vty *vty, const char *prefix_str,
 
 static bool bgp_aggregate_cmp_params(struct bgp_aggregate *aggregate, const char *rmap,
 				     uint8_t summary_only, uint8_t as_set, uint8_t origin,
-				     bool match_med, const char *suppress_map)
+				     bool match_med, const char *suppress_map, bool upa_enabled,
+				     bool upa_drop, uint32_t upa_max_routes)
 {
 	if ((aggregate->origin != origin) || (aggregate->as_set != as_set) ||
-	    (aggregate->match_med != match_med) || (aggregate->summary_only != summary_only))
+	    (aggregate->match_med != match_med) || (aggregate->summary_only != summary_only) ||
+	    (aggregate->upa_enabled != upa_enabled) || (aggregate->upa_drop != upa_drop) ||
+	    (aggregate->upa_max_routes != upa_max_routes))
 		return false;
 
 	if ((!rmap && aggregate->rmap.name) || (rmap && !aggregate->rmap.name) ||
@@ -10608,17 +11526,17 @@ static bool bgp_aggregate_cmp_params(struct bgp_aggregate *aggregate, const char
 	return true;
 }
 
-static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
-			     safi_t safi, const char *rmap,
-			     uint8_t summary_only, uint8_t as_set,
-			     uint8_t origin, bool match_med,
-			     const char *suppress_map)
+static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi, safi_t safi,
+			     const char *rmap, uint8_t summary_only, uint8_t as_set,
+			     uint8_t origin, bool match_med, const char *suppress_map,
+			     bool upa_enabled, bool upa_drop, uint32_t upa_max_routes)
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int ret;
 	struct prefix p;
 	struct bgp_dest *dest;
 	struct bgp_aggregate *aggregate;
+	bool old_upa_enabled = false;
 
 	if (suppress_map && summary_only) {
 		vty_out(vty,
@@ -10646,10 +11564,15 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 	aggregate = bgp_dest_get_bgp_aggregate_info(dest);
 
 	if (aggregate) {
+		old_upa_enabled = aggregate->upa_enabled;
+
 		/* Check for duplicate configs */
 		if (bgp_aggregate_cmp_params(aggregate, rmap, summary_only, as_set, origin,
-					     match_med, suppress_map))
+					     match_med, suppress_map, upa_enabled, upa_drop,
+					     upa_max_routes)) {
+			bgp_dest_unlock_node(dest);
 			return CMD_SUCCESS;
+		}
 
 		vty_out(vty, "There is already same aggregate network.\n");
 		/* try to remove the old entry */
@@ -10713,12 +11636,39 @@ static int bgp_aggregate_set(struct vty *vty, const char *prefix_str, afi_t afi,
 		route_map_counter_increment(aggregate->suppress_map);
 	}
 
+	/* UPA (Unreachable Prefix Announcement) configuration */
+	aggregate->upa_enabled = upa_enabled;
+	aggregate->upa_drop = upa_drop;
+	aggregate->upa_max_routes = upa_max_routes;
+
+	if (BGP_DEBUG(upa, UPA))
+		zlog_debug("%s: aggregate %pFX upa_enabled=%d upa_drop=%d upa_max_routes=%u",
+			   __func__, &p, upa_enabled, upa_drop, upa_max_routes);
+
 	bgp_dest_set_bgp_aggregate_info(dest, aggregate);
 
 	/* Aggregate address insert into BGP routing table. */
 	if (!bgp_aggregate_route(bgp, &p, afi, safi, aggregate)) {
+		/* Keep table state consistent and avoid stale aggregate pointer. */
+		bgp_dest_set_bgp_aggregate_info(dest, NULL);
 		bgp_aggregate_free(aggregate);
 		bgp_dest_unlock_node(dest);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	/* Handle UPA origination/withdrawal based on configuration change */
+	if (upa_enabled && !old_upa_enabled) {
+		/* UPA was just enabled - originate for existing unreachable prefixes */
+		if (BGP_DEBUG(upa, UPA))
+			zlog_debug("%s: UPA enabled on aggregate %pFX, originating UPA routes",
+				   __func__, &p);
+		bgp_upa_originate_all(bgp, &p, afi, safi, aggregate);
+	} else if (!upa_enabled && old_upa_enabled) {
+		/* UPA was just disabled - withdraw all active UPA routes */
+		if (BGP_DEBUG(upa, UPA))
+			zlog_debug("%s: UPA disabled on aggregate %pFX, withdrawing UPA routes",
+				   __func__, &p);
+		bgp_upa_withdraw_all(bgp, &p, afi, safi);
 	}
 
 	return CMD_SUCCESS;
@@ -10732,6 +11682,7 @@ DEFPY(aggregate_addressv4, aggregate_addressv4_cmd,
       "|origin <egp|igp|incomplete>$origin_s"
       "|matching-MED-only$match_med"
       "|suppress-map RMAP_NAME$suppress_map"
+      "|upa$upa [drop$upa_drop] [max-routes (1-65535)$upa_max_routes]"
       "}]",
       NO_STR
       "Configure BGP aggregate entries\n"
@@ -10748,13 +11699,20 @@ DEFPY(aggregate_addressv4, aggregate_addressv4_cmd,
       "Unknown heritage\n"
       "Only aggregate routes with matching MED\n"
       "Suppress the selected more specific routes\n"
-      "Route map with the route selectors\n")
+      "Route map with the route selectors\n"
+      "Originate UPA (Unreachable Prefix Announcement) for unreachable prefixes\n"
+      "Set D-bit in UPA Extended Community (receivers install drop entry)\n"
+      "Cap simultaneous UPA routes for this aggregate\n"
+      "Maximum number of UPA routes\n")
 {
 	const char *prefix_s = NULL;
 	safi_t safi = bgp_node_safi(vty);
 	uint8_t origin = BGP_ORIGIN_UNSPECIFIED;
 	int as_set = AGGREGATE_AS_UNSET;
 	char prefix_buf[PREFIX2STR_BUFFER];
+	bool upa_enabled = false;
+	bool upa_drop_flag = false;
+	uint32_t upa_max = 0;
 
 	if (addr_str) {
 		if (netmask_str2prefix_str(addr_str, mask_str, prefix_buf,
@@ -10779,13 +11737,24 @@ DEFPY(aggregate_addressv4, aggregate_addressv4_cmd,
 	if (as_set_s)
 		as_set = AGGREGATE_AS_SET;
 
+	if (upa)
+		upa_enabled = true;
+	if (upa_drop) {
+		upa_drop_flag = true;
+		upa_enabled = true; /* drop implies upa enabled */
+	}
+	if (upa_max_routes) {
+		upa_max = upa_max_routes;
+		upa_enabled = true; /* max-routes implies upa enabled */
+	}
+
 	/* Handle configuration removal, otherwise installation. */
 	if (no)
 		return bgp_aggregate_unset(vty, prefix_s, AFI_IP, safi);
 
-	return bgp_aggregate_set(vty, prefix_s, AFI_IP, safi, rmap_name,
-				 summary_only != NULL, as_set, origin,
-				 match_med != NULL, suppress_map);
+	return bgp_aggregate_set(vty, prefix_s, AFI_IP, safi, rmap_name, summary_only != NULL,
+				 as_set, origin, match_med != NULL, suppress_map, upa_enabled,
+				 upa_drop_flag, upa_max);
 }
 
 void bgp_free_aggregate_info(struct bgp_aggregate *aggregate)
@@ -10813,6 +11782,16 @@ void bgp_free_aggregate_info(struct bgp_aggregate *aggregate)
 
 	hash_clean_and_free(&aggregate->aspath_hash, bgp_aggr_aspath_remove);
 
+	/* Free any UPA prefix entries still tracked for this aggregate. */
+	if (aggregate->upa_routes.hh.count > 0) {
+		struct bgp_upa_prefix_entry *entry;
+
+		while ((entry = bgp_upa_prefix_hash_pop(&aggregate->upa_routes)))
+			XFREE(MTYPE_BGP_AGGREGATE, entry);
+
+		bgp_upa_prefix_hash_fini(&aggregate->upa_routes);
+	}
+
 	bgp_aggregate_free(aggregate);
 }
 
@@ -10824,6 +11803,7 @@ DEFPY(aggregate_addressv6, aggregate_addressv6_cmd,
       "|origin <egp|igp|incomplete>$origin_s"
       "|matching-MED-only$match_med"
       "|suppress-map RMAP_NAME$suppress_map"
+      "|upa$upa [drop$upa_drop] [max-routes (1-65535)$upa_max_routes]"
       "}]",
       NO_STR
       "Configure BGP aggregate entries\n"
@@ -10838,10 +11818,17 @@ DEFPY(aggregate_addressv6, aggregate_addressv6_cmd,
       "Unknown heritage\n"
       "Only aggregate routes with matching MED\n"
       "Suppress the selected more specific routes\n"
-      "Route map with the route selectors\n")
+      "Route map with the route selectors\n"
+      "Originate UPA (Unreachable Prefix Announcement) for unreachable prefixes\n"
+      "Set D-bit in UPA Extended Community (receivers install drop entry)\n"
+      "Cap simultaneous UPA routes for this aggregate\n"
+      "Maximum number of UPA routes\n")
 {
 	uint8_t origin = BGP_ORIGIN_UNSPECIFIED;
 	int as_set = AGGREGATE_AS_UNSET;
+	bool upa_enabled = false;
+	bool upa_drop_flag = false;
+	uint32_t upa_max = 0;
 
 	if (origin_s) {
 		if (strcmp(origin_s, "egp") == 0)
@@ -10855,14 +11842,25 @@ DEFPY(aggregate_addressv6, aggregate_addressv6_cmd,
 	if (as_set_s)
 		as_set = AGGREGATE_AS_SET;
 
+	if (upa)
+		upa_enabled = true;
+	if (upa_drop) {
+		upa_drop_flag = true;
+		upa_enabled = true;
+	}
+	if (upa_max_routes) {
+		upa_max = upa_max_routes;
+		upa_enabled = true;
+	}
+
 	/* Handle configuration removal, otherwise installation. */
 	if (no)
 		return bgp_aggregate_unset(vty, prefix_str, AFI_IP6,
 					   SAFI_UNICAST);
 
-	return bgp_aggregate_set(vty, prefix_str, AFI_IP6, SAFI_UNICAST,
-				 rmap_name, summary_only != NULL, as_set,
-				 origin, match_med != NULL, suppress_map);
+	return bgp_aggregate_set(vty, prefix_str, AFI_IP6, SAFI_UNICAST, rmap_name,
+				 summary_only != NULL, as_set, origin, match_med != NULL,
+				 suppress_map, upa_enabled, upa_drop_flag, upa_max);
 }
 
 /* Redistribute route treatment. */
@@ -10875,13 +11873,14 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr 
 {
 	struct bgp_path_info *new;
 	struct bgp_path_info *bpi;
-	struct bgp_dest *bn;
 	struct attr attr;
 	struct attr *new_attr;
 	afi_t afi;
 	route_map_result_t ret;
 	struct bgp_redist *red;
 	struct interface *ifp;
+
+	struct bgp_dest *bn BGP_DEST_AUTOUNLOCK = NULL;
 
 	if (CHECK_FLAG(bgp->flags, BGP_FLAG_DELETE_IN_PROGRESS) ||
 	    bgp->peer_self == NULL)
@@ -11015,7 +12014,6 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr 
 			    bgp_path_info_extra_same(bpi, &rmap_path)) {
 				bgp_attr_unintern(&new_attr);
 				aspath_unintern(&attr.aspath);
-				bgp_dest_unlock_node(bn);
 				return;
 			} else {
 				/* The attribute is changed. */
@@ -11037,7 +12035,6 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr 
 				bgp_aggregate_increment(bgp, p, bpi, afi,
 							SAFI_UNICAST);
 				bgp_process(bgp, bn, bpi, afi, SAFI_UNICAST);
-				bgp_dest_unlock_node(bn);
 				aspath_unintern(&attr.aspath);
 
 				if ((bgp->inst_type == BGP_INSTANCE_TYPE_VRF)
@@ -11047,8 +12044,8 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr 
 					vpn_leak_from_vrf_update(
 						bgp_get_default(), bgp, bpi);
 				}
-				if (advertise_type5_routes_multipath(bgp, afi) &&
-				    is_route_injectable_into_evpn(bpi))
+				if (advertise_type5_routes_multipath(bgp, afi, SAFI_UNICAST) &&
+				    is_route_injectable_into_evpn(bgp, afi, SAFI_UNICAST, bpi))
 					bgp_evpn_export_type5_route(bgp, bn, bpi, afi,
 								    SAFI_UNICAST);
 				bgp_ls_originate_bgp_prefix(bgp, afi, SAFI_UNICAST, bn, bpi);
@@ -11065,18 +12062,17 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p, const union g_addr 
 		bgp_aggregate_increment(bgp, p, new, afi, SAFI_UNICAST);
 		SET_FLAG(bn->flags, BGP_NODE_FIB_INSTALLED);
 		bgp_process(bgp, bn, new, afi, SAFI_UNICAST);
-		bgp_dest_unlock_node(bn);
 
 		if ((bgp->inst_type == BGP_INSTANCE_TYPE_VRF)
 		    || (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
 
 			vpn_leak_from_vrf_update(bgp_get_default(), bgp, new);
 		}
-		if (advertise_type5_routes_multipath(bgp, afi) &&
-		    is_route_injectable_into_evpn(new))
+		if (advertise_type5_routes_multipath(bgp, afi, SAFI_UNICAST) &&
+		    is_route_injectable_into_evpn(bgp, afi, SAFI_UNICAST, new))
 			bgp_evpn_export_type5_route(bgp, bn, new, afi, SAFI_UNICAST);
 
-		if (bgp && bgp->ls_info && bgp->ls_info->enable_distribution)
+		if (bgp->ls_info && bgp->ls_info->enable_distribution)
 			bgp_ls_originate_bgp_prefix(bgp, afi, SAFI_UNICAST, bn, new);
 	}
 
@@ -11114,8 +12110,8 @@ void bgp_redistribute_delete(struct bgp *bgp, struct prefix *p, uint8_t type,
 				vpn_leak_from_vrf_withdraw(bgp_get_default(),
 							   bgp, pi);
 			}
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, SAFI_UNICAST) &&
+			    is_route_injectable_into_evpn(bgp, afi, SAFI_UNICAST, pi))
 				bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, SAFI_UNICAST);
 
 			bgp_ls_withdraw_bgp_prefix(bgp, afi, SAFI_UNICAST, dest, pi);
@@ -11153,8 +12149,8 @@ void bgp_redistribute_withdraw(struct bgp *bgp, afi_t afi, int type,
 				vpn_leak_from_vrf_withdraw(bgp_get_default(),
 							   bgp, pi);
 			}
-			if (advertise_type5_routes_multipath(bgp, afi) &&
-			    is_route_injectable_into_evpn(pi))
+			if (advertise_type5_routes_multipath(bgp, afi, SAFI_UNICAST) &&
+			    is_route_injectable_into_evpn(bgp, afi, SAFI_UNICAST, pi))
 				bgp_evpn_unexport_type5_route(bgp, dest, pi, afi, SAFI_UNICAST);
 
 			bgp_ls_withdraw_bgp_prefix(bgp, afi, SAFI_UNICAST, dest, pi);
@@ -14456,7 +15452,7 @@ static int bgp_show_table(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t sa
 		if (is_last) {
 			unsigned long i;
 			for (i = 0; i < *json_header_depth; ++i) {
-				if (i == *json_header_depth - 1)
+				if (!all && i == *json_header_depth - 1)
 					vty_out(vty, ",\"numRoutes\":%lu\n", output_count);
 				vty_out(vty, " } ");
 				/* Put this information before closing the last `}` */
@@ -14464,7 +15460,9 @@ static int bgp_show_table(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t sa
 					vty_out(vty, ", \"totalRoutes\": %ld, \"totalPaths\": %ld",
 						output_count, total_count);
 			}
-			if (!all)
+			if (all)
+				vty_out(vty, ",\n\"numRoutes\":%lu\n", output_count);
+			else
 				vty_out(vty, "\n");
 		}
 	} else {
@@ -18541,7 +19539,7 @@ DEFUN (bgp_distance_source,
        bgp_distance_source_cmd,
        "distance (1-255) A.B.C.D/M",
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n")
 {
 	int idx_number = 1;
@@ -18556,7 +19554,7 @@ DEFUN (no_bgp_distance_source,
        "no distance (1-255) A.B.C.D/M",
        NO_STR
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n")
 {
 	int idx_number = 2;
@@ -18570,7 +19568,7 @@ DEFUN (bgp_distance_source_access_list,
        bgp_distance_source_access_list_cmd,
        "distance (1-255) A.B.C.D/M WORD",
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n"
        "Access list name\n")
 {
@@ -18587,7 +19585,7 @@ DEFUN (no_bgp_distance_source_access_list,
        "no distance (1-255) A.B.C.D/M WORD",
        NO_STR
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n"
        "Access list name\n")
 {
@@ -18603,7 +19601,7 @@ DEFUN (ipv6_bgp_distance_source,
        ipv6_bgp_distance_source_cmd,
        "distance (1-255) X:X::X:X/M",
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n")
 {
 	bgp_distance_set(vty, argv[1]->arg, argv[2]->arg, NULL);
@@ -18615,7 +19613,7 @@ DEFUN (no_ipv6_bgp_distance_source,
        "no distance (1-255) X:X::X:X/M",
        NO_STR
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n")
 {
 	bgp_distance_unset(vty, argv[2]->arg, argv[3]->arg, NULL);
@@ -18626,7 +19624,7 @@ DEFUN (ipv6_bgp_distance_source_access_list,
        ipv6_bgp_distance_source_access_list_cmd,
        "distance (1-255) X:X::X:X/M WORD",
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n"
        "Access list name\n")
 {
@@ -18639,7 +19637,7 @@ DEFUN (no_ipv6_bgp_distance_source_access_list,
        "no distance (1-255) X:X::X:X/M WORD",
        NO_STR
        "Define an administrative distance\n"
-       "Administrative distance\n"
+       DISTANCE_STR
        "IP source prefix\n"
        "Access list name\n")
 {
@@ -18760,7 +19758,7 @@ static int bgp_clear_damp_route(struct vty *vty, const char *view_name,
 			if (rm == NULL)
 				continue;
 
-			const struct prefix *rm_p = bgp_dest_get_prefix(dest);
+			const struct prefix *rm_p = bgp_dest_get_prefix(rm);
 
 			if (!prefix_check
 			    || rm_p->prefixlen == match.prefixlen) {
@@ -18785,8 +19783,10 @@ static int bgp_clear_damp_route(struct vty *vty, const char *view_name,
 
 		const struct prefix *dest_p = bgp_dest_get_prefix(dest);
 
-		if (prefix_check || dest_p->prefixlen != match.prefixlen)
+		if (prefix_check && dest_p->prefixlen != match.prefixlen) {
+			bgp_dest_unlock_node(dest);
 			return CMD_SUCCESS;
+		}
 
 		pi = bgp_dest_get_bgp_path_info(dest);
 		while (pi) {
@@ -18798,8 +19798,10 @@ static int bgp_clear_damp_route(struct vty *vty, const char *view_name,
 			pi_temp = pi->next;
 			struct bgp_damp_info *bdi = pi->extra->damp_info;
 
-			if (bdi->lastrecord != BGP_RECORD_UPDATE)
+			if (bdi->lastrecord != BGP_RECORD_UPDATE) {
+				pi = pi_temp;
 				continue;
+			}
 
 			bgp_aggregate_increment(bgp,
 						bgp_dest_get_prefix(bdi->dest),
@@ -18881,8 +19883,7 @@ DEFUN (clear_ip_bgp_dampening_address_mask,
 		return CMD_WARNING;
 	}
 
-	return bgp_clear_damp_route(vty, NULL, prefix_str, AFI_IP, SAFI_UNICAST,
-				    NULL, 0);
+	return bgp_clear_damp_route(vty, NULL, prefix_str, AFI_IP, SAFI_UNICAST, NULL, 1);
 }
 
 static void show_bgp_connectionhash_entry(struct hash_bucket *bucket, void *arg)
@@ -19117,6 +20118,14 @@ void bgp_config_write_network(struct vty *vty, struct bgp *bgp, afi_t afi,
 			vty_out(vty, " suppress-map %s",
 				bgp_aggregate->suppress_map_name);
 
+		if (bgp_aggregate->upa_enabled) {
+			vty_out(vty, " upa");
+			if (bgp_aggregate->upa_drop)
+				vty_out(vty, " drop");
+			if (bgp_aggregate->upa_max_routes > 0)
+				vty_out(vty, " max-routes %u", bgp_aggregate->upa_max_routes);
+		}
+
 		vty_out(vty, "\n");
 	}
 }
@@ -19149,6 +20158,279 @@ void bgp_config_write_distance(struct vty *vty, struct bgp *bgp, afi_t afi,
 				bdistance->access_list ? bdistance->access_list
 						       : "");
 	}
+}
+
+/* Show UPA routes */
+DEFUN(show_bgp_upa, show_bgp_upa_cmd,
+      "show bgp [<ipv4|ipv6> [unicast]] upa [A.B.C.D/M|X:X::X:X/M] [json]",
+      SHOW_STR BGP_STR IP_STR IPV6_STR
+      "Address Family modifier\n"
+      "UPA (Unreachable Prefix Announcement) routes\n"
+      "IPv4 prefix\n"
+      "IPv6 prefix\n" JSON_STR)
+{
+	struct bgp *bgp;
+	afi_t afi = AFI_IP;
+	safi_t safi = SAFI_UNICAST;
+	struct prefix prefix;
+	bool use_json = false;
+	json_object *json = NULL;
+	int idx = 0;
+
+	bgp = bgp_get_default();
+	if (!bgp) {
+		vty_out(vty, "No BGP process is configured\n");
+		return CMD_WARNING;
+	}
+
+	if (argv_find(argv, argc, "ipv4", &idx))
+		afi = AFI_IP;
+	else if (argv_find(argv, argc, "ipv6", &idx))
+		afi = AFI_IP6;
+
+	memset(&prefix, 0, sizeof(prefix));
+	bool prefix_specified = false;
+
+	if (argv_find(argv, argc, "A.B.C.D/M", &idx) || argv_find(argv, argc, "X:X::X:X/M", &idx)) {
+		if (str2prefix(argv[idx]->arg, &prefix) == 0) {
+			vty_out(vty, "%% Malformed prefix\n");
+			return CMD_WARNING;
+		}
+		prefix_specified = true;
+	}
+
+	use_json = argv_find(argv, argc, "json", &idx);
+	if (use_json)
+		json = json_object_new_object();
+
+	struct bgp_table *table = bgp->rib[afi][safi];
+	struct bgp_dest *dest;
+	struct bgp_path_info *pi;
+	uint32_t count = 0;
+	json_object *json_routes = NULL;
+
+	if (use_json)
+		json_routes = json_object_new_array();
+	else {
+		vty_out(vty, "BGP UPA routes for %s/%s:\n", afi2str(afi), safi2str(safi));
+		if (prefix_specified)
+			vty_out(vty, "Filter: %pFX\n", &prefix);
+		vty_out(vty, "   Network            Next Hop         Metric LocPrf Weight Path\n");
+	}
+
+	if (table) {
+		for (dest = bgp_table_top(table); dest; dest = bgp_route_next(dest)) {
+			const struct prefix *p = bgp_dest_get_prefix(dest);
+
+			if (prefix_specified && !prefix_match(&prefix, p))
+				continue;
+
+			for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
+				if (!bgp_upa_has_extcomm(pi))
+					continue;
+
+				count++;
+				if (use_json) {
+					json_object *json_route = json_object_new_object();
+
+					json_object_string_addf(json_route, "network", "%pFX", p);
+					json_object_string_addf(json_route, "nextHop", "%pI4",
+								&pi->attr->nexthop);
+					json_object_array_add(json_routes, json_route);
+				} else {
+					vty_out(vty, "*> %-18pFX", p);
+					vty_out(vty, "%-16pI4", &pi->attr->nexthop);
+					if (pi->attr->flag &
+					    ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC))
+						vty_out(vty, "%10u", pi->attr->med);
+					else
+						vty_out(vty, "          ");
+					if (pi->attr->flag & ATTR_FLAG_BIT(BGP_ATTR_LOCAL_PREF))
+						vty_out(vty, " %7u", pi->attr->local_pref);
+					else
+						vty_out(vty, "        ");
+					vty_out(vty, " %6u", pi->attr->weight);
+					vty_out(vty, " UPA\n");
+				}
+			}
+		}
+	}
+
+	if (use_json) {
+		json_object_int_add(json, "totalUpaRoutes", count);
+		json_object_object_add(json, "routes", json_routes);
+		vty_json(vty, json);
+	} else {
+		vty_out(vty, "\nTotal UPA routes: %u\n", count);
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFUN(show_bgp_upa_statistics, show_bgp_upa_statistics_cmd,
+      "show bgp [<ipv4|ipv6> [unicast]] upa statistics [json]",
+      SHOW_STR BGP_STR IP_STR IPV6_STR
+      "Address Family modifier\n"
+      "UPA (Unreachable Prefix Announcement)\n"
+      "Statistics\n" JSON_STR)
+{
+	struct bgp *bgp;
+	afi_t afi = AFI_IP;
+	safi_t safi = SAFI_UNICAST;
+	bool use_json = false;
+	json_object *json = NULL;
+	int idx = 0;
+
+	bgp = bgp_get_default();
+	if (!bgp) {
+		vty_out(vty, "No BGP process is configured\n");
+		return CMD_WARNING;
+	}
+
+	if (argv_find(argv, argc, "ipv4", &idx))
+		afi = AFI_IP;
+	else if (argv_find(argv, argc, "ipv6", &idx))
+		afi = AFI_IP6;
+
+	use_json = argv_find(argv, argc, "json", &idx);
+	if (use_json)
+		json = json_object_new_object();
+
+	struct bgp_table *table = bgp->rib[afi][safi];
+	struct bgp_dest *dest;
+	struct bgp_path_info *pi;
+	uint32_t total_upa_routes = 0;
+
+	if (table) {
+		for (dest = bgp_table_top(table); dest; dest = bgp_route_next(dest))
+			for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next)
+				if (bgp_upa_has_extcomm(pi))
+					total_upa_routes++;
+	}
+
+	bool global_enabled = bgp->upa_enabled[afi][safi];
+	uint32_t max_routes = bgp->upa_max_routes[afi][safi];
+	bool d_bit = bgp->upa_drop[afi][safi];
+	uint32_t tracked_count = bgp->upa_routes[afi][safi].hh.count;
+
+	if (use_json) {
+		json_object_boolean_add(json, "globalUpaEnabled", global_enabled);
+		json_object_int_add(json, "activeUpaRoutes", total_upa_routes);
+		json_object_int_add(json, "globalTrackedRoutes", tracked_count);
+		json_object_int_add(json, "maxRoutesLimit", max_routes ? max_routes : 0);
+		json_object_boolean_add(json, "dropBitEnabled", d_bit);
+		vty_json(vty, json);
+	} else {
+		vty_out(vty, "UPA Statistics for AFI %s, SAFI %s:\n\n",
+			afi == AFI_IP ? "IPv4" : "IPv6",
+			"unicast");
+		vty_out(vty, "  Global UPA originate-all:      %s\n",
+			global_enabled ? "Enabled" : "Disabled");
+		vty_out(vty, "  Active UPA routes:             %u\n", total_upa_routes);
+		vty_out(vty, "  Global tracked routes:         %u\n", tracked_count);
+		vty_out(vty, "  Max-routes limit:              %s\n",
+			max_routes ? "limited" : "unlimited");
+		vty_out(vty, "  D-bit (drop) enabled:          %s\n", d_bit ? "Yes" : "No");
+	}
+
+	return CMD_SUCCESS;
+}
+
+/* Show aggregate-address configuration including UPA fields */
+DEFUN(show_bgp_aggregate, show_bgp_aggregate_cmd,
+      "show bgp [<ipv4|ipv6> [unicast]] aggregate [A.B.C.D/M|X:X::X:X/M] [json]",
+      SHOW_STR BGP_STR IP_STR IPV6_STR
+      "Address Family modifier\n"
+      "Show aggregate-address configuration\n"
+      "IPv4 aggregate prefix to filter\n"
+      "IPv6 aggregate prefix to filter\n"
+      JSON_STR)
+{
+	struct bgp *bgp;
+	struct bgp_dest *dest;
+	struct bgp_aggregate *aggregate;
+	const struct prefix *p;
+	afi_t afi = AFI_IP;
+	safi_t safi = SAFI_UNICAST;
+	bool use_json = false;
+	bool filter = false;
+	struct prefix match;
+	json_object *json_aggrs = NULL;
+	int idx = 0;
+
+	bgp = bgp_get_default();
+	if (!bgp) {
+		vty_out(vty, "No BGP process is configured\n");
+		return CMD_WARNING;
+	}
+
+	if (argv_find(argv, argc, "ipv6", &idx))
+		afi = AFI_IP6;
+	else if (argv_find(argv, argc, "ipv4", &idx))
+		afi = AFI_IP;
+
+	idx = 0;
+	use_json = argv_find(argv, argc, "json", &idx);
+
+	/* Optional prefix filter */
+	idx = 0;
+	if (argv_find(argv, argc, "A.B.C.D/M", &idx) || argv_find(argv, argc, "X:X::X:X/M", &idx)) {
+		if (str2prefix(argv[idx]->arg, &match)) {
+			filter = true;
+			if (match.family == AF_INET6)
+				afi = AFI_IP6;
+		} else {
+			vty_out(vty, "Invalid prefix: %s\n", argv[idx]->arg);
+			return CMD_WARNING;
+		}
+	}
+
+	if (use_json)
+		json_aggrs = json_object_new_object();
+
+	for (dest = bgp_table_top(bgp->aggregate[afi][safi]); dest; dest = bgp_route_next(dest)) {
+		aggregate = bgp_dest_get_bgp_aggregate_info(dest);
+		if (aggregate == NULL)
+			continue;
+
+		p = bgp_dest_get_prefix(dest);
+
+		if (filter && !prefix_same(p, &match))
+			continue;
+
+		if (use_json) {
+			char pbuf[PREFIX2STR_BUFFER];
+			json_object *entry = json_object_new_object();
+
+			prefix2str(p, pbuf, sizeof(pbuf));
+			json_object_boolean_add(entry, "asSet", aggregate->as_set);
+			json_object_boolean_add(entry, "summaryOnly", aggregate->summary_only);
+			json_object_boolean_add(entry, "upaEnabled", aggregate->upa_enabled);
+			json_object_boolean_add(entry, "upaDrop", aggregate->upa_drop);
+			json_object_int_add(entry, "upaMaxRoutes", aggregate->upa_max_routes);
+			json_object_object_add(json_aggrs, pbuf, entry);
+		} else {
+			vty_out(vty, "Aggregate: %pFX\n", p);
+			if (aggregate->as_set)
+				vty_out(vty, "  AS-set: yes\n");
+			if (aggregate->summary_only)
+				vty_out(vty, "  Summary-only: yes\n");
+			vty_out(vty, "  UPA enabled: %s\n", aggregate->upa_enabled ? "yes" : "no");
+			if (aggregate->upa_enabled) {
+				vty_out(vty, "  UPA drop (D-bit): %s\n",
+					aggregate->upa_drop ? "yes" : "no");
+				if (aggregate->upa_max_routes > 0)
+					vty_out(vty, "  UPA max-routes: %u\n",
+						aggregate->upa_max_routes);
+			}
+			vty_out(vty, "\n");
+		}
+	}
+
+	if (use_json)
+		vty_json(vty, json_aggrs);
+
+	return CMD_SUCCESS;
 }
 
 /* Allocate routing table structure and install commands. */
@@ -19302,6 +20584,9 @@ void bgp_route_init(void)
 
 	install_element(VIEW_NODE, &show_bgp_listeners_cmd);
 	install_element(VIEW_NODE, &show_bgp_peerhash_cmd);
+	install_element(VIEW_NODE, &show_bgp_upa_cmd);
+	install_element(VIEW_NODE, &show_bgp_upa_statistics_cmd);
+	install_element(VIEW_NODE, &show_bgp_aggregate_cmd);
 }
 
 void bgp_route_finish(void)

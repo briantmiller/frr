@@ -879,8 +879,10 @@ static void zebra_srv6_sid_entry_delete_all(struct zebra_srv6_sid *sid)
 {
 	struct zebra_srv6_sid_entry *entry;
 
-	frr_each_safe (zebra_srv6_sid_entry_list, &sid->entries, entry)
+	frr_each_safe (zebra_srv6_sid_entry_list, &sid->entries, entry) {
 		zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+		zebra_srv6_sid_entry_free(entry);
+	}
 }
 
 struct zebra_srv6_sid_entry *zebra_srv6_sid_entry_add(struct zebra_srv6_sid *sid,
@@ -2645,6 +2647,7 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 	int ret = -1;
 	char buf[256];
 	struct srv6_locator *locator = NULL;
+	struct in6_addr zero = {};
 
 	if (IS_ZEBRA_DEBUG_SRV6)
 		zlog_debug("%s: getting SRv6 SID for ctx %s, sid_value=%pI6, locator_name=%s",
@@ -2660,6 +2663,8 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 			flog_err(EC_ZEBRA_SRV6_LOCATOR_LOOKUP_FAIL,
 				 "%s: invalid SM request arguments: SRv6 locator '%s' does not exist",
 				 __func__, locator_name);
+			zsend_srv6_sid_notify(client, ctx, sid_value ? sid_value : &zero, 0, 0,
+					      locator_name, ZAPI_SRV6_SID_FAIL_ALLOC);
 			return -1;
 		}
 	}
@@ -2674,8 +2679,8 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 			 srv6_sid_ctx2str(buf, sizeof(buf), ctx), sid_value, locator_name, ret, 2);
 
 		/* Notify client about SID alloc failure */
-		zebra_srv6_sid_clients_notify_single(*sid, NULL, client, is_localonly,
-						     ZAPI_SRV6_SID_FAIL_ALLOC);
+		zsend_srv6_sid_notify(client, ctx, sid_value ? sid_value : &zero, 0, 0,
+				      locator_name, ZAPI_SRV6_SID_FAIL_ALLOC);
 	} else if (ret == 0) {
 		assert(*sid);
 		if (IS_ZEBRA_DEBUG_SRV6)

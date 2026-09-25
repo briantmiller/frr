@@ -160,6 +160,8 @@ int lib_interface_zebra_link_params_utilized_bandwidth_destroy(
 int lib_interface_zebra_legacy_admin_group_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_legacy_admin_group_destroy(
 	struct nb_cb_destroy_args *args);
+int lib_interface_zebra_link_params_srlg_create(struct nb_cb_create_args *args);
+int lib_interface_zebra_link_params_srlg_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_affinities_create(struct nb_cb_create_args *args);
 int lib_interface_zebra_affinities_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_affinity_create(struct nb_cb_create_args *args);
@@ -476,6 +478,9 @@ lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_srv6_segs_stack_e
 	struct nb_cb_get_elem_args *args);
 struct yang_data *
 lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_srv6_segs_stack_encap_behavior_get_elem(
+	struct nb_cb_get_elem_args *args);
+struct yang_data *
+lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_srv6_segs_stack_encap_source_get_elem(
 	struct nb_cb_get_elem_args *args);
 const void *
 lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_mpls_label_stack_entry_get_next(

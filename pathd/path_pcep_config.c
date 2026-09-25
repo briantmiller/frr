@@ -326,8 +326,8 @@ int path_pcep_config_initiate_path(struct path *path)
 			SET_FLAG(candidate->flags, F_CANDIDATE_NEW);
 		} else {
 			policy = candidate->policy;
-			if ((path->originator != candidate->originator)
-			    || (path->originator != policy->originator)) {
+			if (strcmp(path->originator, candidate->originator) ||
+			    strcmp(path->originator, policy->originator)) {
 				/* There is already an initiated path from
 				 * another PCE, show a warning and regect the
 				 * initiated path */
@@ -358,7 +358,7 @@ int path_pcep_config_update_path(struct path *path)
 {
 	assert(path != NULL);
 	assert(path->nbkey.preference != 0);
-	assert(path->nbkey.endpoint.ipa_type == IPADDR_V4);
+	assert(!IS_IPADDR_NONE(&path->nbkey.endpoint));
 
 	int number_of_sid_clashed = 0;
 	struct path_hop *hop;

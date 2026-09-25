@@ -147,6 +147,20 @@ To start OSPF process you have to specify the OSPF router.
 
    This command should NOT be set normally.
 
+.. clicmd:: compatible rfc7474
+
+   Controls strict :rfc:`7474` sequence number validation for OSPFv2
+   cryptographic authentication (MD5 and HMAC-SHA). When enabled (the
+   default), received packets must have a strictly increasing sequence
+   number. When disabled with ``no compatible rfc7474``, packets with
+   equal sequence numbers are also accepted.
+
+   Disable this for interoperability with implementations that may
+   reuse sequence numbers, such as Cisco NXOS.
+
+   This can also be controlled per-interface with
+   :clicmd:`ip ospf compatible rfc7474`.
+
 .. clicmd:: log-adjacency-changes [detail]
    :daemon: ospfd
 
@@ -714,6 +728,26 @@ Interfaces
       r1(config-if)#ip ospf authentication key-chain temp
       r1(config-if)#ip ospf area 0
 
+.. clicmd:: ip ospf compatible rfc7474 {enable | disable} [A.B.C.D]
+
+.. clicmd:: no ip ospf compatible rfc7474 [A.B.C.D]
+
+   Override the global :clicmd:`compatible rfc7474` setting for this
+   interface. The ``enable`` form forces strict RFC 7474 validation; the
+   ``disable`` form forces legacy (relaxed) validation. Either form overrides
+   the global setting. The ``no`` form removes the interface-specific
+   config. The optional address ``A.B.C.D`` scopes the override to a
+   specific address on multi-address interfaces.
+
+BFD monitoring can be enabled for OSPF neighbors on an interface with
+:clicmd:`ip ospf bfd [quick]`. BFD provides faster failure detection than the
+OSPF dead interval. The optional ``quick`` mode keeps BFD sessions active when
+OSPF removes a neighbor, allowing OSPF to reestablish the neighbor more quickly
+when BFD reports the peer up. Use :clicmd:`ip ospf bfd profile BFDPROF` to apply
+a BFD profile to these sessions.
+
+.. seealso:: :ref:`bfd-ospf-peer-config`
+
 .. clicmd:: ip ospf cost (1-65535)
 
 
@@ -756,6 +790,95 @@ Interfaces
    valid OSPF control packet, not only Hello packets. This implements
    Recommendation 2 from RFC 4222 to improve adjacency robustness under
    congestion.
+
+.. clicmd:: ip ospf adjacency-pacing static (1-65535)
+
+   Limit the number of adjacencies that may be formed concurrently on this
+   interface. The configured value is the maximum number of neighbors that may
+   be in ``ExStart``, ``Exchange``, or ``Loading`` at the same time.
+
+   When the limit is reached, additional neighbors that need adjacency
+   formation are queued until one of the active exchanges completes or
+   regresses.
+
+.. clicmd:: ip ospf adjacency-pacing dynamic
+
+   Enable adaptive adjacency pacing on this interface. In dynamic mode, OSPF
+   starts conservatively and adjusts the allowed number of concurrent
+   adjacencies according to retransmission pressure on the interface.
+
+   The current limit starts at 1 and is adjusted using the total number of
+   unacknowledged LSAs (``U``) across all neighbors on the interface. This
+   command is independent of whether explicit thresholds have been configured:
+   if :clicmd:`ip ospf adjacency-pacing dynamic thresholds` has not been issued,
+   the built-in defaults of high-water 100 and low-water 2 are used.
+
+.. clicmd:: ip ospf adjacency-pacing dynamic thresholds (1-1000) (1-1000)
+
+   Configure the dynamic pacing high-water and low-water thresholds used by the
+   adaptive algorithm. The second value must be lower than the first.
+
+   If the total number of unacknowledged LSAs rises above the high-water mark,
+   OSPF reduces the current adjacency limit. If it falls below the low-water
+   mark, OSPF increases the limit. Values between the two thresholds leave the
+   current limit unchanged.
+
+   The default thresholds are high-water 100 and low-water 2.
+
+.. clicmd:: no ip ospf adjacency-pacing
+
+   Disable adjacency pacing on this interface and clear the active pacing mode.
+
+.. clicmd:: ip ospf lsa-pacing
+
+   Enable per-neighbor LSA gap pacing on this interface (:rfc:`4222`
+   recommendation 4). When enabled, outbound LS Updates to each neighbor are
+   metered through a per-neighbor queue rather than sent back-to-back. The
+   inter-packet gap is adjusted adaptively based on the number of
+   unacknowledged LSAs for that neighbor.
+
+.. clicmd:: no ip ospf lsa-pacing
+
+   Disable LSA gap pacing on this interface and restore immediate LS Update
+   delivery.
+
+.. clicmd:: ip ospf lsa-pacing initial-gap (1-60000)
+
+   Set the initial inter-LSU gap in milliseconds applied when a new adjacency
+   becomes Full. The value must fall within the configured ``min-gap`` and
+   ``max-gap`` range. Default: 20 ms.
+
+.. clicmd:: ip ospf lsa-pacing min-gap (1-60000) max-gap (1-60000)
+
+   Set the floor and ceiling for adaptive gap adjustment. The ``min-gap``
+   is the fastest the paced sender will go; ``max-gap`` is the slowest.
+   ``min-gap`` must not exceed ``max-gap``. Defaults: min 20 ms, max 1000 ms.
+
+.. clicmd:: ip ospf lsa-pacing factor (1-64)
+
+   Set the multiplicative adjustment factor F used by the MIMD algorithm.
+   When the unacknowledged LSA count rises above the high-watermark, the gap
+   is multiplied by F (sends slow down). When it falls below the
+   low-watermark, the gap is divided by F (sends speed up). Default: 2.
+
+.. clicmd:: ip ospf lsa-pacing adjust-interval (1-60000)
+
+   Set the minimum time in milliseconds between consecutive gap adjustments.
+   Prevents oscillation during transient bursts. Default: 1000 ms.
+
+.. clicmd:: ip ospf lsa-pacing max-lsas-per-update (1-200)
+
+   Set the maximum number of LSAs packed into a single paced LS Update
+   packet. Default: 1.
+
+.. clicmd:: ip ospf lsa-pacing low-watermark (0-1000000) high-watermark (1-1000000)
+
+   Set the unacknowledged LSA count thresholds used by the adaptive algorithm.
+   When the per-neighbor unacked count falls below ``low-watermark``, the gap
+   is divided by the factor (rate increases). When it rises above
+   ``high-watermark``, the gap is multiplied by the factor (rate decreases).
+   ``low-watermark`` must be strictly less than ``high-watermark``.
+   Defaults: low 2, high 100.
 
 .. clicmd:: ip ospf dscp (all|low-control) (0-63)
 
@@ -1102,10 +1225,12 @@ Opaque LSA
 .. clicmd:: capability opaque
 
 
+   *ospfd* supports Opaque LSA (:rfc:`2370`), which is a pre-requisite for
+   Graceful Restart, Segment Routing, MPLS Traffic Engineering, and others.
 
    *ospfd* supports Opaque LSA (:rfc:`5250`) as partial support for
-   MPLS Traffic Engineering LSAs. The opaque-lsa capability must be
-   enabled in the configuration. An alternate command could be
+   MPLS Traffic Engineering LSAs. The opaque-lsa capability is enabled
+   by default in the configuration. An alternate command could be
    "mpls-te on" (:ref:`ospf-traffic-engineering`). Note that FRR
    offers only partial support for some of the routing protocol
    extensions that are used with MPLS-TE; it does not support a

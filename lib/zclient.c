@@ -85,6 +85,8 @@ struct zclient *zclient_new(struct event_loop *master,
 	zclient->synchronous = opt->synchronous;
 	zclient->auxiliary = opt->auxiliary;
 
+	zclient->sock = -1;
+
 	return zclient;
 }
 
@@ -993,8 +995,13 @@ static int zapi_nexthop_srv6_cmp(const struct zapi_nexthop *next1,
 {
 	int ret = 0;
 
-	ret = memcmp(&next1->seg6_segs, &next2->seg6_segs,
-		     sizeof(struct in6_addr));
+	if (next1->seg_num > next2->seg_num)
+		return 1;
+
+	if (next1->seg_num < next2->seg_num)
+		return -1;
+
+	ret = memcmp(next1->seg6_segs, next2->seg6_segs, next1->seg_num * sizeof(struct in6_addr));
 	if (ret != 0)
 		return ret;
 
@@ -1003,6 +1010,10 @@ static int zapi_nexthop_srv6_cmp(const struct zapi_nexthop *next1,
 
 	if (next1->srv6_encap_behavior < next2->srv6_encap_behavior)
 		return -1;
+
+	ret = IPV6_ADDR_CMP(&next1->srv6_encap_source, &next2->srv6_encap_source);
+	if (ret != 0)
+		return ret;
 
 	if (next1->seg6local_action > next2->seg6local_action)
 		return 1;
@@ -1226,6 +1237,7 @@ int zapi_nexthop_encode(struct stream *s, const struct zapi_nexthop *api_nh,
 		stream_put(s, &api_nh->seg6_segs[0],
 			   api_nh->seg_num * sizeof(struct in6_addr));
 		stream_putl(s, api_nh->srv6_encap_behavior);
+		stream_put(s, &api_nh->srv6_encap_source, sizeof(struct in6_addr));
 	}
 done:
 	return ret;
@@ -1668,6 +1680,8 @@ int zapi_nexthop_decode(struct stream *s, struct zapi_nexthop *api_nh,
 			   api_nh->seg_num * sizeof(struct in6_addr));
 
 		STREAM_GETL(s, api_nh->srv6_encap_behavior);
+
+		STREAM_GET(&api_nh->srv6_encap_source, s, sizeof(struct in6_addr));
 	}
 
 	/* Success */
@@ -2387,7 +2401,7 @@ bool zapi_srv6_sid_notify_decode(struct stream *s, struct srv6_sid_ctx *ctx,
 		}
 	} else if (len > 0) {
 		/* Advance the stream */
-		stream_forward_getp(s, len);
+		STREAM_FORWARD_GETP(s, len);
 	}
 
 	return true;
@@ -2446,7 +2460,8 @@ struct nexthop *nexthop_from_zapi_nexthop(const struct zapi_nexthop *znh)
 					   &znh->seg6local_ctx);
 
 	if (znh->seg_num && !sid_zero_ipv6(znh->seg6_segs))
-		nexthop_add_srv6_seg6(n, &znh->seg6_segs[0], znh->seg_num, znh->srv6_encap_behavior);
+		nexthop_add_srv6_seg6(n, &znh->seg6_segs[0], znh->seg_num,
+				      znh->srv6_encap_behavior, &znh->srv6_encap_source);
 
 	return n;
 }
@@ -2516,6 +2531,7 @@ int zapi_nexthop_from_nexthop(struct zapi_nexthop *znh,
 				       &nh->nh_srv6->seg6_segs->seg[i],
 				       sizeof(struct in6_addr));
 			znh->srv6_encap_behavior = nh->nh_srv6->seg6_segs->encap_behavior;
+			znh->srv6_encap_source = nh->nh_srv6->seg6_segs->encap_source;
 		}
 	}
 
@@ -2997,6 +3013,12 @@ static int link_params_set_value(struct stream *s, struct interface *ifp)
 	STREAM_GETF(s, iflp->ava_bw);
 	STREAM_GETF(s, iflp->use_bw);
 
+	STREAM_GETC(s, iflp->srlg_num);
+	if (iflp->srlg_num > LP_MAX_SRLG)
+		iflp->srlg_num = LP_MAX_SRLG;
+	for (size_t i = 0; i < iflp->srlg_num; i++)
+		STREAM_GETL(s, iflp->srlgs[i]);
+
 	return 0;
 stream_failure:
 	return -1;
@@ -3158,6 +3180,10 @@ size_t zebra_interface_link_params_write(struct stream *s,
 	w += stream_putf(s, iflp->res_bw);
 	w += stream_putf(s, iflp->ava_bw);
 	w += stream_putf(s, iflp->use_bw);
+
+	w += stream_putc(s, iflp->srlg_num);
+	for (size_t idx = 0; idx < iflp->srlg_num; idx++)
+		w += stream_putl(s, iflp->srlgs[idx]);
 
 	return w;
 }
