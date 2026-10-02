@@ -78,11 +78,11 @@ def wait_link(r1, name, expect, timeout=15):
     return result
 
 
-def kind_supported(r1, kind, args=""):
+def kind_supported(r1, kind, args="", pre_args=""):
     "Probe whether the test host kernel supports link KIND."
     ok = r1.cmd(
-        "ip link add probe0 type {} {} 2>&1 && echo OK; ip link del probe0 2>/dev/null".format(
-            kind, args
+        "ip link add probe0 {} type {} {} 2>&1 && echo OK; ip link del probe0 2>/dev/null".format(
+            pre_args, kind, args
         )
     )
     return "OK" in ok
@@ -122,8 +122,11 @@ def test_master_generic(tgen):
 
 def test_vlan_dependency_and_encap(tgen):
     r1 = tgen.gears["r1"]
-    if not kind_supported(r1, "vlan", "link lo id 5"):
+    r1.cmd("ip link add dum10 type dummy")
+    if not kind_supported(r1, "vlan", "id 5", pre_args="link dum10"):
+        r1.cmd("ip link del dum10")
         pytest.skip("kernel lacks vlan support")
+    r1.cmd("ip link del dum10")
 
     # Configured before the parent exists: must wait, then be created.
     conf(r1, "interface br1.10", "link-type vlan parent br1 id 10")
