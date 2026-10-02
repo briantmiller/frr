@@ -227,6 +227,43 @@ Standard Commands
 
    In FRR, link-detect is on by default.
 
+.. clicmd:: link-type bridge
+
+   Have zebra create this interface as a Linux bridge using netlink.
+
+.. clicmd:: link-type veth peer IFNAME
+
+   Create this interface as one end of a veth pair; ``IFNAME`` is the name of
+   the peer end, which the kernel creates together with this interface.
+
+.. clicmd:: link-type vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]
+
+   Create this interface as a VLAN on top of ``IFNAME``. Both ``parent`` and
+   ``id`` are required. Encapsulation defaults to ``dot1q`` (802.1Q);
+   ``q-in-q`` uses 802.1ad. Creation is deferred until the parent exists.
+
+.. clicmd:: link-type gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]
+
+   Create this interface as a standard (IPv4) GRE tunnel. At least one of
+   ``local`` or ``dev`` is required. ``remote`` is an address or ``any``.
+   ``key``, ``ttl`` and ``tos`` are optional.
+
+.. clicmd:: no link-type [...]
+
+   Remove the link-type configuration. Zebra deletes the kernel interface it
+   created. Changing a link-type's parameters deletes and re-creates the
+   interface. This must be done before ``no interface NAME`` can succeed,
+   since an interface that still exists in the kernel cannot be removed from
+   the configuration.
+
+   If a configured interface is removed from the kernel by other means, zebra
+   re-creates it.
+
+.. clicmd:: master IFNAME
+
+   Enslave this interface to ``IFNAME`` (for example a bridge). Works for any
+   interface, whether or not zebra created it. ``no master`` releases it.
+
 .. _link-parameters-commands:
 
 Link Parameters Commands
