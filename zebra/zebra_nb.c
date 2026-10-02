@@ -9,6 +9,7 @@
 #include "northbound.h"
 #include "libfrr.h"
 #include "zebra_nb.h"
+#include "zebra/zebra_link_opts.h"
 
 const char *features[] = {
 #if HAVE_BFDD == 0
@@ -426,6 +427,27 @@ const struct frr_yang_module_info frr_zebra_info = {
 				.destroy = lib_interface_zebra_master_destroy,
 			}
 		},
+/* One entry per setting, from the table in zebra_link_opts.h */
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-options/" name, \
+			.cbs = {                                                                   \
+				.modify = lib_interface_zebra_bridge_options_modify,               \
+				.destroy = lib_interface_zebra_bridge_options_destroy,             \
+			}                                                                          \
+		},
+		ZEBRA_BRIDGE_OPT_LIST(X)
+#undef X
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-port-options/" name, \
+			.cbs = {                                                                   \
+				.modify = lib_interface_zebra_bridge_port_options_modify,          \
+				.destroy = lib_interface_zebra_bridge_port_options_destroy,        \
+			}                                                                          \
+		},
+		ZEBRA_BRPORT_OPT_LIST(X)
+#undef X
 		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan",
 			.cbs = {
@@ -445,12 +467,6 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.cbs = {
 				.modify = lib_interface_zebra_bridge_pvid_modify,
 				.destroy = lib_interface_zebra_bridge_pvid_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bridge/vlan-filtering",
-			.cbs = {
-				.modify = lib_interface_zebra_link_type_param_modify,
 			}
 		},
 		{

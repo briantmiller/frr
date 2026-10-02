@@ -105,6 +105,23 @@ const char *zebra_link_brport_validate(const struct zebra_link_brport_req *r)
 	return "unknown bridge port request";
 }
 
+const char *zebra_link_opts_validate(const struct zebra_link_opts_req *r)
+{
+	unsigned int i, count;
+
+	if (!r || r->scope >= ZLO_SCOPE_MAX)
+		return "missing settings request";
+	zebra_link_opt_table(r->scope, &count);
+	if (!r->count || r->count > ZLO_MAX)
+		return "no settings to apply";
+	for (i = 0; i < r->count; i++) {
+		if (r->item[i].idx >= count)
+			return "unknown setting";
+		/* Range and enum checks were made when the value was parsed */
+	}
+	return NULL;
+}
+
 #ifdef HAVE_NETLINK
 
 /*
@@ -170,15 +187,108 @@ static bool veth_put_data(struct nlmsghdr *n, size_t buflen,
 	return true;
 }
 
-/* ---- bridge ---- */
+/* ---- bridge and bridge port settings, from the options table ---- */
 
-static bool bridge_put_data(struct nlmsghdr *n, size_t buflen,
-			    const struct zebra_link_params *p, int link_ifindex)
+static bool put_opt(struct nlmsghdr *n, size_t buflen, const struct zebra_link_opt_def *def,
+		    uint64_t val)
 {
-	/* Only send what was asked for: the kernel default is "off" */
-	if (p->u.bridge.vlan_filtering)
-		return nl_attr_put8(n, buflen, IFLA_BR_VLAN_FILTERING, 1);
-	return true;
+	uint8_t mac[6];
+	int i;
+
+	switch (def->kind) {
+	case ZLO_BOOL:
+	case ZLO_UINT:
+		switch (def->width) {
+		case 1:
+			return nl_attr_put8(n, buflen, def->attr, val);
+		case 2:
+			return nl_attr_put16(n, buflen, def->attr, val);
+		case 4:
+			return nl_attr_put32(n, buflen, def->attr, val);
+		case 8:
+			return nl_attr_put64(n, buflen, def->attr, val);
+		}
+		return false;
+	case ZLO_SECS:
+		/* The kernel takes clock ticks (USER_HZ is always 100) */
+		return nl_attr_put32(n, buflen, def->attr, val * 100);
+	case ZLO_ENUM:
+		return nl_attr_put8(n, buflen, def->attr, val);
+	case ZLO_VLANPROTO:
+		/* an ethertype, big-endian on the wire */
+		return nl_attr_put16(n, buflen, def->attr,
+				     htons(val == 1 ? ETH_P_8021AD : ETH_P_8021Q));
+	case ZLO_MAC:
+		for (i = 0; i < 6; i++)
+			mac[i] = (val >> (8 * (5 - i))) & 0xff;
+		return nl_attr_put(n, buflen, def->attr, mac, sizeof(mac));
+	}
+	return false;
+}
+
+static ssize_t encode_opts(const struct zebra_link_nl_req *req, void *buf, size_t buflen,
+			   const char **err)
+{
+	struct {
+		struct nlmsghdr n;
+		struct ifinfomsg ifi;
+		char buf[];
+	} *msg = buf;
+	const struct zebra_link_opts_req *r = req->opts;
+	const struct zebra_link_opt_def *t;
+	struct rtattr *linkinfo, *data, *nest;
+	const char *verr;
+	unsigned int i, count;
+
+	if (req->ifindex <= 0) {
+		*err = "interface does not exist";
+		return 0;
+	}
+	verr = zebra_link_opts_validate(r);
+	if (verr) {
+		*err = verr;
+		return 0;
+	}
+	t = zebra_link_opt_table(r->scope, &count);
+
+	msg->n.nlmsg_flags = NLM_F_REQUEST;
+	msg->ifi.ifi_index = req->ifindex;
+
+	if (r->scope == ZLO_SCOPE_BRIDGE) {
+		/* Change the bridge in place: RTM_NEWLINK without CREATE */
+		msg->n.nlmsg_type = RTM_NEWLINK;
+		msg->ifi.ifi_family = AF_UNSPEC;
+
+		linkinfo = nl_attr_nest(&msg->n, buflen, IFLA_LINKINFO);
+		if (!linkinfo || !nl_attr_put(&msg->n, buflen, IFLA_INFO_KIND, "bridge", 6))
+			goto nospace;
+		data = nl_attr_nest(&msg->n, buflen, IFLA_INFO_DATA);
+		if (!data)
+			goto nospace;
+		for (i = 0; i < r->count; i++)
+			if (!put_opt(&msg->n, buflen, &t[r->item[i].idx], r->item[i].val))
+				goto nospace;
+		nl_attr_nest_end(&msg->n, data);
+		nl_attr_nest_end(&msg->n, linkinfo);
+	} else {
+		/* Port settings: "bridge link set", IFLA_PROTINFO */
+		msg->n.nlmsg_type = RTM_SETLINK;
+		msg->ifi.ifi_family = AF_BRIDGE;
+
+		nest = nl_attr_nest(&msg->n, buflen, IFLA_PROTINFO);
+		if (!nest)
+			goto nospace;
+		for (i = 0; i < r->count; i++)
+			if (!put_opt(&msg->n, buflen, &t[r->item[i].idx], r->item[i].val))
+				goto nospace;
+		nl_attr_nest_end(&msg->n, nest);
+	}
+
+	return NLMSG_ALIGN(msg->n.nlmsg_len);
+
+nospace:
+	*err = "netlink message buffer too small";
+	return 0;
 }
 
 /* ---- bridge port (vlan membership, isolation) ---- */
@@ -329,7 +439,7 @@ static const struct link_kind_ops link_kinds[] = {
 	{
 		.kind = ZEBRA_LINK_BRIDGE,
 		.name = "bridge",
-		.put_data = bridge_put_data,
+		/* plain bridge; its settings are applied through the options */
 	},
 	{
 		.kind = ZEBRA_LINK_VETH,
@@ -467,6 +577,9 @@ ssize_t zebra_link_nl_encode(const struct zebra_link_nl_req *req, void *buf,
 
 	case ZEBRA_LINK_NL_BRPORT:
 		return encode_brport(req, buf, buflen, err);
+
+	case ZEBRA_LINK_NL_OPTS:
+		return encode_opts(req, buf, buflen, err);
 
 	case ZEBRA_LINK_NL_SET_MASTER:
 		if (req->ifindex <= 0) {

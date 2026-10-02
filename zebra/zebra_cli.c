@@ -9,6 +9,7 @@
 #include "frrdistance.h"
 #include "northbound_cli.h"
 #include "if.h"
+#include "zebra/zebra_link_opts.h"
 #include "vrf.h"
 
 #include "zebra/rtadv.h"
@@ -550,16 +551,12 @@ static void link_type_enqueue_container(struct vty *vty, const char *kind)
 
 DEFPY_YANG (link_type_bridge,
 	link_type_bridge_cmd,
-	"link-type bridge [vlan-filtering$vlan_filtering]",
+	"link-type bridge",
 	"Create this interface in the kernel\n"
-	"Linux bridge\n"
-	"Enable VLAN filtering: ports only forward the VLANs they are members of\n")
+	"Linux bridge\n")
 {
 	link_type_enqueue_destroy_others(vty, "bridge");
 	link_type_enqueue_container(vty, "bridge");
-	/* The command is the full definition: without the keyword it is off */
-	link_type_enqueue_leaf(vty, "bridge", "vlan-filtering",
-			       vlan_filtering ? "true" : "false");
 
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -661,11 +658,10 @@ DEFPY_YANG (link_type_gre,
 
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge [vlan-filtering]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
-"Linux bridge\n"
-	"Enable VLAN filtering\n"
+	"Linux bridge\n"
 	"Virtual ethernet pair\n"
 	"Other end of the pair\n"
 	"Name of the peer interface\n"
@@ -702,8 +698,7 @@ static void lib_interface_zebra_link_type_bridge_cli_write(struct vty *vty,
 							    const struct lyd_node *dnode,
 							    bool show_defaults)
 {
-	vty_out(vty, " link-type bridge%s\n",
-		yang_dnode_get_bool(dnode, "vlan-filtering") ? " vlan-filtering" : "");
+	vty_out(vty, " link-type bridge\n");
 }
 
 static void lib_interface_zebra_link_type_veth_cli_write(struct vty *vty,
@@ -777,6 +772,95 @@ static void lib_interface_zebra_master_cli_write(struct vty *vty,
 						 bool show_defaults)
 {
 	vty_out(vty, " master %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+/*
+ * Settings of bridges and bridge ports.  The commands are generated from the
+ * table in zebra_link_opts.h:
+ *
+ *   [no] bridge <setting> <value>        (this interface is a bridge)
+ *   [no] bridge-port <setting> <value>   (this interface is a bridge port)
+ *
+ * A boolean takes on|off; "no" removes the setting, which puts the kernel
+ * default back.
+ */
+static int link_opt_cli(struct vty *vty, int argc, struct cmd_token *argv[],
+			enum zebra_link_opt_scope scope, const char *container,
+			const char *name)
+{
+	char xpath[XPATH_MAXLEN];
+	const char *val = NULL;
+	bool no = argc > 0 && strcmp(argv[0]->text, "no") == 0;
+
+	snprintf(xpath, sizeof(xpath), "./frr-zebra:zebra/%s/%s", container, name);
+
+	if (no) {
+		nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+	} else {
+		const struct zebra_link_opt_def *t;
+		unsigned int count;
+		int idx = zebra_link_opt_find(scope, name);
+
+		val = argv[argc - 1]->arg;
+		t = zebra_link_opt_table(scope, &count);
+		/* The northbound boolean is true/false */
+		if (idx >= 0 && t[idx].kind == ZLO_BOOL)
+			val = strcmp(val, "on") == 0 ? "true" : "false";
+		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, val);
+	}
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+#define X(sym, name, kind, w, mn, mx, def, attr, enums, vs, vh, hlp)                               \
+	DEFUN_YANG(bridge_opt_##sym, bridge_opt_##sym##_cmd, "[no] bridge " name " ![" vs "]",    \
+		   NO_STR "Setting of this interface as a bridge\n" hlp "\n" vh)                   \
+	{                                                                                          \
+		return link_opt_cli(vty, argc, argv, ZLO_SCOPE_BRIDGE, "bridge-options", name);    \
+	}
+ZEBRA_BRIDGE_OPT_LIST(X)
+#undef X
+
+#define X(sym, name, kind, w, mn, mx, def, attr, enums, vs, vh, hlp)                               \
+	DEFUN_YANG(brport_opt_##sym, brport_opt_##sym##_cmd, "[no] bridge-port " name " ![" vs "]", \
+		   NO_STR "Setting of this interface as a bridge port\n" hlp "\n" vh)              \
+	{                                                                                          \
+		return link_opt_cli(vty, argc, argv, ZLO_SCOPE_PORT, "bridge-port-options", name); \
+	}
+ZEBRA_BRPORT_OPT_LIST(X)
+#undef X
+
+static void link_opt_cli_write(struct vty *vty, const struct lyd_node *dnode,
+			       enum zebra_link_opt_scope scope, const char *keyword)
+{
+	const struct zebra_link_opt_def *t;
+	unsigned int count;
+	char buf[64];
+	uint64_t val;
+	int idx = zebra_link_opt_find(scope, dnode->schema->name);
+
+	if (idx < 0)
+		return;
+	t = zebra_link_opt_table(scope, &count);
+	if (!zebra_link_opt_parse(&t[idx], yang_dnode_get_string(dnode, NULL), &val))
+		return;
+
+	vty_out(vty, " %s %s %s\n", keyword, t[idx].name,
+		zebra_link_opt_format(&t[idx], val, buf, sizeof(buf)));
+}
+
+static void lib_interface_zebra_bridge_options_cli_write(struct vty *vty,
+							 const struct lyd_node *dnode,
+							 bool show_defaults)
+{
+	link_opt_cli_write(vty, dnode, ZLO_SCOPE_BRIDGE, "bridge");
+}
+
+static void lib_interface_zebra_bridge_port_options_cli_write(struct vty *vty,
+							      const struct lyd_node *dnode,
+							      bool show_defaults)
+{
+	link_opt_cli_write(vty, dnode, ZLO_SCOPE_PORT, "bridge-port");
 }
 
 /*
@@ -3536,6 +3620,20 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/master",
 			.cbs.cli_show = lib_interface_zebra_master_cli_write,
 		},
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-options/" name, \
+			.cbs.cli_show = lib_interface_zebra_bridge_options_cli_write,              \
+		},
+		ZEBRA_BRIDGE_OPT_LIST(X)
+#undef X
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-port-options/" name, \
+			.cbs.cli_show = lib_interface_zebra_bridge_port_options_cli_write,         \
+		},
+		ZEBRA_BRPORT_OPT_LIST(X)
+#undef X
 		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan",
 			.cbs.cli_show = lib_interface_zebra_bridge_vlan_cli_write,
@@ -3801,6 +3899,12 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &no_link_type_cmd);
 	install_element(INTERFACE_NODE, &interface_master_cmd);
 	install_element(INTERFACE_NODE, &interface_bridge_vlan_cmd);
+#define X(sym, ...) install_element(INTERFACE_NODE, &bridge_opt_##sym##_cmd);
+	ZEBRA_BRIDGE_OPT_LIST(X)
+#undef X
+#define X(sym, ...) install_element(INTERFACE_NODE, &brport_opt_##sym##_cmd);
+	ZEBRA_BRPORT_OPT_LIST(X)
+#undef X
 	install_element(INTERFACE_NODE, &interface_bridge_pvid_cmd);
 	install_element(INTERFACE_NODE, &ip_address_cmd);
 	install_element(INTERFACE_NODE, &ip_address_peer_cmd);

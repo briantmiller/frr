@@ -9,6 +9,7 @@
 
 #include "lib/if.h"
 #include "zebra/zebra_link_cfg.h"
+#include "zebra/zebra_link_opts.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,17 @@ extern void zebra_link_cfg_unset_bridge_vlan(struct interface *ifp, uint16_t vid
 
 /* Native VLAN (PVID) of the port; 0 to unset */
 extern void zebra_link_cfg_set_bridge_pvid(struct interface *ifp, uint16_t vid);
+
+/*
+ * Settings of a bridge (scope ZLO_SCOPE_BRIDGE, on a bridge interface) or of
+ * a bridge port (ZLO_SCOPE_PORT, once enslaved), see zebra_link_opts.h.
+ * Applied in place; 'val' is the stored form of the value.  Removing a
+ * setting that was applied sets the kernel default again.
+ */
+extern void zebra_link_cfg_set_opt(struct interface *ifp, enum zebra_link_opt_scope scope,
+				   unsigned int idx, uint64_t val);
+extern void zebra_link_cfg_unset_opt(struct interface *ifp, enum zebra_link_opt_scope scope,
+				     unsigned int idx);
 
 /* Lookups for show/config-write */
 extern const struct zebra_link_params *

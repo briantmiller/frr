@@ -258,7 +258,7 @@ def test_bridge_vlans(tgen):
     if probe is None:
         pytest.skip("kernel lacks bridge vlan filtering")
 
-    conf(r1, "interface br2", "link-type bridge vlan-filtering")
+    conf(r1, "interface br2", "link-type bridge", "bridge vlan-filtering on")
     assert (
         wait_link(r1, "br2", {"linkinfo": {"info_data": {"vlan_filtering": 1}}})
         is None
@@ -297,7 +297,7 @@ def test_bridge_vlans(tgen):
     out = r1.vtysh_cmd("show running-config")
     assert " bridge-vlan 10 untagged" in out
     assert " bridge-pvid 20" in out
-    assert " link-type bridge vlan-filtering" in out
+    assert " bridge vlan-filtering on" in out
 
 
 def test_bridge_vlan_private(tgen):
@@ -346,6 +346,140 @@ def test_bridge_vlans_reapplied(tgen):
     conf(r1, "interface br2", "no link-type")
     assert wait_link(r1, "br2", None) is None
     conf(r1, "no interface p1", "no interface br2")
+
+
+def link_data(r1, name, which):
+    "info_data (bridge) or info_slave_data (port) of link NAME"
+    return (link(r1, name) or {}).get("linkinfo", {}).get(which, {})
+
+
+def wait_data(r1, name, which, expect, timeout=15):
+    def check():
+        return topotest.json_cmp(link_data(r1, name, which), expect)
+
+    _, result = topotest.run_and_expect(check, None, count=timeout * 2, wait=0.5)
+    return result
+
+
+def test_bridge_options(tgen):
+    "bridge <setting> on a bridge: set, change, remove restores the default"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bridge", ""):
+        pytest.skip("kernel lacks bridge support")
+
+    conf(
+        r1,
+        "interface br3",
+        "link-type bridge",
+        "bridge stp on",
+        "bridge ageing-time 120",
+        "bridge priority 4096",
+        "bridge forward-delay 10",
+        "bridge multicast-snooping off",
+        "bridge multicast-querier on",
+        "bridge multicast-router enabled",
+        "bridge multicast-query-interval 6000",
+    )
+    expect = {
+        "stp_state": 1,
+        "ageing_time": 12000,
+        "priority": 4096,
+        "forward_delay": 1000,
+        "mcast_snooping": 0,
+        "mcast_querier": 1,
+        "mcast_router": 2,
+        "mcast_query_interval": 6000,
+    }
+    assert wait_data(r1, "br3", "info_data", expect) is None
+
+    # change one, remove others: the kernel defaults come back
+    conf(
+        r1,
+        "interface br3",
+        "bridge ageing-time 60",
+        "no bridge stp",
+        "no bridge multicast-snooping",
+    )
+    expect = {
+        "stp_state": 0,
+        "ageing_time": 6000,
+        "mcast_snooping": 1,
+        "priority": 4096,
+    }
+    assert wait_data(r1, "br3", "info_data", expect) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " bridge ageing-time 60" in out
+    assert " bridge priority 4096" in out
+    assert " bridge stp" not in out
+
+
+def test_bridge_port_options(tgen):
+    "bridge-port <setting> on a bridge port, applied once enslaved"
+    r1 = tgen.gears["r1"]
+    if link(r1, "br3") is None:
+        pytest.skip("bridge not available")
+
+    conf(
+        r1,
+        "interface q1",
+        "link-type veth peer q2",
+        "bridge-port learning off",
+        "bridge-port hairpin on",
+        "bridge-port bpdu-guard on",
+        "bridge-port priority 7",
+        "bridge-port cost 55",
+        "bridge-port multicast-flood off",
+        "bridge-port unicast-flood off",
+        "bridge-port broadcast-flood off",
+        "bridge-port fast-leave on",
+        "bridge-port isolated on",
+        "bridge-port multicast-router permanent",
+    )
+    assert wait_link(r1, "q1", {"linkinfo": {"info_kind": "veth"}}) is None
+    assert link_data(r1, "q1", "info_slave_data") == {}
+
+    conf(r1, "interface q1", "master br3")
+    expect = {
+        "learning": False,
+        "hairpin": True,
+        "guard": True,
+        "priority": 7,
+        "cost": 55,
+        "mcast_flood": False,
+        "flood": False,
+        "bcast_flood": False,
+        "fastleave": True,
+        "isolated": True,
+        "mcast_router": 2,
+    }
+    assert wait_data(r1, "q1", "info_slave_data", expect) is None
+
+    conf(
+        r1,
+        "interface q1",
+        "no bridge-port learning",
+        "no bridge-port hairpin",
+        "no bridge-port isolated",
+        "no bridge-port priority",
+    )
+    expect = {"learning": True, "hairpin": False, "isolated": False, "cost": 55}
+    assert wait_data(r1, "q1", "info_slave_data", expect) is None
+
+    # settings are applied again when the port is re-created
+    r1.cmd("ip link del q1")
+    expect = {"guard": True, "cost": 55, "flood": False, "fastleave": True}
+    assert wait_data(r1, "q1", "info_slave_data", expect) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " bridge-port cost 55" in out
+    assert " bridge-port multicast-router permanent" in out
+
+    conf(r1, "interface q1", "no link-type", "no master")
+    assert wait_link(r1, "q1", None) is None
+    conf(r1, "interface br3", "no link-type")
+    assert wait_link(r1, "br3", None) is None
+    conf(r1, "no interface q1", "no interface br3")
 
 
 def test_removal(tgen):

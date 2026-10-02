@@ -1410,6 +1410,73 @@ int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-options/<name>
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-port-options/<name>
+ *
+ * All settings share these callbacks; the option is found from the leaf name
+ * in the table in zebra_link_opts.h.
+ */
+static int link_opt_modify(struct nb_cb_modify_args *args, enum zebra_link_opt_scope scope)
+{
+	const struct zebra_link_opt_def *t;
+	unsigned int count;
+	struct interface *ifp;
+	uint64_t val;
+	int idx;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	idx = zebra_link_opt_find(scope, args->dnode->schema->name);
+	t = zebra_link_opt_table(scope, &count);
+	if (idx < 0 || !zebra_link_opt_parse(&t[idx], yang_dnode_get_string(args->dnode, NULL), &val))
+		return NB_ERR;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_opt(ifp, scope, idx, val);
+
+	return NB_OK;
+}
+
+static int link_opt_destroy(struct nb_cb_destroy_args *args, enum zebra_link_opt_scope scope)
+{
+	struct interface *ifp;
+	int idx;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	idx = zebra_link_opt_find(scope, args->dnode->schema->name);
+	if (idx < 0)
+		return NB_ERR;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_opt(ifp, scope, idx);
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_options_modify(struct nb_cb_modify_args *args)
+{
+	return link_opt_modify(args, ZLO_SCOPE_BRIDGE);
+}
+
+int lib_interface_zebra_bridge_options_destroy(struct nb_cb_destroy_args *args)
+{
+	return link_opt_destroy(args, ZLO_SCOPE_BRIDGE);
+}
+
+int lib_interface_zebra_bridge_port_options_modify(struct nb_cb_modify_args *args)
+{
+	return link_opt_modify(args, ZLO_SCOPE_PORT);
+}
+
+int lib_interface_zebra_bridge_port_options_destroy(struct nb_cb_destroy_args *args)
+{
+	return link_opt_destroy(args, ZLO_SCOPE_PORT);
+}
+
+/*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan
  *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-pvid
  *
@@ -1517,7 +1584,6 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 
 	if (strmatch(kind, "bridge")) {
 		p->kind = ZEBRA_LINK_BRIDGE;
-		p->u.bridge.vlan_filtering = yang_dnode_get_bool(dnode, "vlan-filtering");
 	} else if (strmatch(kind, "veth")) {
 		p->kind = ZEBRA_LINK_VETH;
 		strlcpy(p->u.veth.peer_name, yang_dnode_get_string(dnode, "peer-name"),

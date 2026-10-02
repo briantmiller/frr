@@ -227,12 +227,10 @@ Standard Commands
 
    In FRR, link-detect is on by default.
 
-.. clicmd:: link-type bridge [vlan-filtering]
+.. clicmd:: link-type bridge
 
-   Have zebra create this interface as a Linux bridge using netlink.
-   ``vlan-filtering`` enables VLAN filtering on the bridge, which is required
-   for the ``bridge-vlan`` settings of its ports to have any effect. Changing
-   it re-creates the bridge.
+   Have zebra create this interface as a Linux bridge using netlink. The
+   bridge settings are configured with ``bridge <setting>`` (see below).
 
 .. clicmd:: link-type veth peer IFNAME
 
@@ -297,6 +295,187 @@ Standard Commands
    Native VLAN of this interface as a bridge port: untagged frames it
    receives are classified into this VLAN. The VLAN should also be a member
    (``on``, ``untagged`` or ``private``).
+
+.. clicmd:: [no] bridge SETTING VALUE
+
+   Settings of this interface when it is a Linux bridge, whether zebra
+   created it or not. They are applied in place (the bridge is not
+   re-created) and applied again if the bridge is re-created. Booleans take
+   ``on`` or ``off``. ``no bridge SETTING`` removes the setting and puts the
+   kernel default back. The kernel default is given where it matters. Times
+   in seconds are converted for the kernel; the multicast intervals are in
+   centiseconds, like ``ip link``.
+
+   ``bridge stp <on|off>``
+      Spanning tree protocol (kernel STP).
+
+   ``bridge ageing-time (0-10000)``
+      FDB ageing time in seconds (kernel default 300).
+
+   ``bridge forward-delay (2-30)``
+      STP forward delay in seconds (kernel default 15).
+
+   ``bridge hello-time (1-10)``
+      STP hello time in seconds (kernel default 2).
+
+   ``bridge max-age (6-40)``
+      STP max age in seconds (kernel default 20).
+
+   ``bridge priority (0-65535)``
+      STP bridge priority (kernel default 32768).
+
+   ``bridge vlan-filtering <on|off>``
+      VLAN filtering.
+
+   ``bridge vlan-protocol <dot1q|dot1ad>``
+      VLAN ethertype used by the bridge.
+
+   ``bridge vlan-default-pvid (0-4094)``
+      Default PVID given to new ports, 0 for none (kernel default 1).
+
+   ``bridge vlan-stats <on|off>``
+      Per-VLAN statistics.
+
+   ``bridge vlan-stats-per-port <on|off>``
+      Per-VLAN per-port statistics.
+
+   ``bridge group-fwd-mask (0-65535)``
+      Bitmask of link-local group addresses (01-80-C2-00-00-0X) the bridge forwards.
+
+   ``bridge group-address X:X:X:X:X:X``
+      Destination address of STP frames.
+
+   ``bridge multicast-snooping <on|off>``
+      IGMP/MLD snooping.
+
+   ``bridge multicast-router <disabled|auto|enabled>``
+      Whether the bridge itself is a multicast router.
+
+   ``bridge multicast-querier <on|off>``
+      Act as IGMP/MLD querier.
+
+   ``bridge multicast-query-use-ifaddr <on|off>``
+      Use the bridge address as source of IGMP queries.
+
+   ``bridge multicast-stats <on|off>``
+      Multicast statistics.
+
+   ``bridge multicast-igmp-version (2-3)``
+      IGMP version.
+
+   ``bridge multicast-mld-version (1-2)``
+      MLD version.
+
+   ``bridge multicast-hash-max (1-4294967295)``
+      Maximum multicast group hash table size.
+
+   ``bridge multicast-last-member-count (1-4294967295)``
+      Last member query count (kernel default 2).
+
+   ``bridge multicast-startup-query-count (1-4294967295)``
+      Startup query count (kernel default 2).
+
+   ``bridge multicast-last-member-interval (0-4294967295)``
+      Last member query interval, centiseconds (kernel default 100).
+
+   ``bridge multicast-membership-interval (0-4294967295)``
+      Group membership interval, centiseconds (kernel default 26000).
+
+   ``bridge multicast-querier-interval (0-4294967295)``
+      Other querier present interval, centiseconds (kernel default 25500).
+
+   ``bridge multicast-query-interval (0-4294967295)``
+      Query interval, centiseconds (kernel default 12500).
+
+   ``bridge multicast-query-response-interval (0-4294967295)``
+      Query response interval, centiseconds (kernel default 1000).
+
+   ``bridge multicast-startup-query-interval (0-4294967295)``
+      Startup query interval, centiseconds (kernel default 3125).
+
+   ``bridge fdb-max-learned (0-4294967295)``
+      Maximum number of learned FDB entries, 0 for no limit.
+
+.. clicmd:: [no] bridge-port SETTING VALUE
+
+   Settings of this interface when it is a bridge port (see ``master``),
+   whether zebra enslaved it or not. They are applied once the interface is
+   enslaved to a bridge and applied again if the interface or the bridge is
+   re-created. Removing a setting puts the kernel default back.
+   ``bridge-port isolated`` takes precedence over the isolation implied by a
+   ``private`` ``bridge-vlan``.
+
+   ``bridge-port state <disabled|listening|learning|forwarding|blocking>``
+      STP state of the port.
+
+   ``bridge-port priority (0-255)``
+      STP port priority (kernel default 32).
+
+   ``bridge-port cost (0-4294967295)``
+      STP path cost, 0 for automatic.
+
+   ``bridge-port hairpin <on|off>``
+      Hairpin mode: reflect frames back out of the port they came in on.
+
+   ``bridge-port bpdu-guard <on|off>``
+      Disable the port if it receives a BPDU.
+
+   ``bridge-port root-block <on|off>``
+      Do not let the port become a root port.
+
+   ``bridge-port fast-leave <on|off>``
+      Multicast fast leave.
+
+   ``bridge-port learning <on|off>``
+      Learn MAC addresses on the port (kernel default on).
+
+   ``bridge-port unicast-flood <on|off>``
+      Flood unknown unicast to the port (kernel default on).
+
+   ``bridge-port multicast-flood <on|off>``
+      Flood unknown multicast to the port (kernel default on).
+
+   ``bridge-port broadcast-flood <on|off>``
+      Flood broadcast to the port (kernel default on).
+
+   ``bridge-port multicast-to-unicast <on|off>``
+      Send multicast as unicast to the port.
+
+   ``bridge-port proxy-arp <on|off>``
+      Proxy ARP.
+
+   ``bridge-port proxy-arp-wifi <on|off>``
+      Proxy ARP for wireless clients.
+
+   ``bridge-port neigh-suppress <on|off>``
+      ARP/ND suppression.
+
+   ``bridge-port neigh-vlan-suppress <on|off>``
+      Per-VLAN ARP/ND suppression.
+
+   ``bridge-port vlan-tunnel <on|off>``
+      VLAN to tunnel id mapping.
+
+   ``bridge-port isolated <on|off>``
+      Isolate the port from other isolated ports (overrides private VLANs).
+
+   ``bridge-port locked <on|off>``
+      Locked port: drop traffic from addresses not in the FDB.
+
+   ``bridge-port mab <on|off>``
+      MAC authentication bypass on a locked port.
+
+   ``bridge-port multicast-router <disabled|learning|permanent|temp>``
+      Multicast router state of the port.
+
+   ``bridge-port group-fwd-mask (0-65535)``
+      Link-local group addresses forwarded through this port.
+
+   ``bridge-port multicast-max-groups (0-4294967295)``
+      Maximum multicast groups learned on the port, 0 for no limit.
+
+   ``bridge-port multicast-eht-hosts-limit (0-4294967295)``
+      Maximum explicit-host-tracking hosts per port.
 
 .. _link-parameters-commands:
 

@@ -54,6 +54,15 @@ struct zebra_link_cfg {
 	ifindex_t vl_applied_bridge; /* bridge it was applied for */
 	bool isolated_set;	   /* we set the port isolated flag */
 	unsigned int brport_inflight;
+
+	/* Bridge / bridge port settings, per enum zebra_link_opt_scope */
+	struct zebra_link_optset *opt[ZLO_SCOPE_MAX];
+	uint32_t opt_gen[ZLO_SCOPE_MAX];
+	uint32_t opt_applied_gen[ZLO_SCOPE_MAX];
+	ifindex_t opt_applied_bridge; /* port scope: the bridge applied for */
+	uint64_t opt_applied_mask[ZLO_SCOPE_MAX]; /* settings pushed to the kernel */
+	uint64_t opt_reset[ZLO_SCOPE_MAX];	  /* removed: set the default again */
+	unsigned int opt_inflight[ZLO_SCOPE_MAX];
 };
 
 static struct event *t_link_cfg_kick;
@@ -85,7 +94,9 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	 */
 	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_inflight ||
 	    cfg->master_inflight || cfg->vl || cfg->brport_inflight ||
-	    cfg->isolated_set)
+	    cfg->isolated_set || cfg->opt[ZLO_SCOPE_BRIDGE] || cfg->opt[ZLO_SCOPE_PORT] ||
+	    cfg->opt_reset[ZLO_SCOPE_BRIDGE] || cfg->opt_reset[ZLO_SCOPE_PORT] ||
+	    cfg->opt_inflight[ZLO_SCOPE_BRIDGE] || cfg->opt_inflight[ZLO_SCOPE_PORT])
 		return;
 
 	XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
@@ -203,13 +214,68 @@ static void brport_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
 		}
 	}
 
-	/* The kernel only has a per-port isolation flag, see zebra_link_vlan_mode */
-	if (any_private || cfg->isolated_set) {
+	/*
+	 * The kernel only has a per-port isolation flag, see zebra_link_vlan_mode.
+	 * An explicitly configured isolated setting takes precedence and is
+	 * applied with the other port settings.
+	 */
+	if (cfg->opt[ZLO_SCOPE_PORT] && (cfg->opt[ZLO_SCOPE_PORT]->mask & (1ULL << ZPO_ISOLATED))) {
+		cfg->isolated_set = false;
+	} else if (any_private || cfg->isolated_set) {
 		memset(&req, 0, sizeof(req));
 		req.type = ZEBRA_LINK_BRPORT_ISOLATED;
 		req.isolated = any_private;
 		brport_queue(ifp, cfg, &req);
 		cfg->isolated_set = any_private;
+	}
+}
+
+/*
+ * Push the settings of one scope.  Everything configured is sent (they are
+ * idempotent), plus the kernel default for settings that were removed.
+ */
+static void opts_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
+		       enum zebra_link_opt_scope scope, ifindex_t bridge_ifindex)
+{
+	const struct zebra_link_optset *set = cfg->opt[scope];
+	const struct zebra_link_opt_def *t;
+	struct zebra_link_opts_req *req;
+	unsigned int i, count;
+
+	cfg->opt_applied_gen[scope] = cfg->opt_gen[scope];
+	if (scope == ZLO_SCOPE_PORT)
+		cfg->opt_applied_bridge = bridge_ifindex;
+
+	t = zebra_link_opt_table(scope, &count);
+	req = XCALLOC(MTYPE_ZEBRA_LINK_CFG, sizeof(*req));
+	req->scope = scope;
+
+	for (i = 0; i < count; i++) {
+		if (set && (set->mask & (1ULL << i))) {
+			req->item[req->count].idx = i;
+			req->item[req->count++].val = set->val[i];
+		} else if ((cfg->opt_reset[scope] & (1ULL << i)) && t[i].def != ZLO_NODEFAULT) {
+			req->item[req->count].idx = i;
+			req->item[req->count++].val = t[i].def;
+		}
+	}
+
+	if (set)
+		cfg->opt_applied_mask[scope] |= set->mask;
+	cfg->opt_applied_mask[scope] &= ~cfg->opt_reset[scope];
+	cfg->opt_reset[scope] = 0;
+
+	if (req->count) {
+		cfg->opt_inflight[scope]++;
+		if (dplane_link_opts_set(ifp, req) != ZEBRA_DPLANE_REQUEST_QUEUED) {
+			cfg->opt_inflight[scope]--;
+			zlog_warn("%s: unable to queue settings for %s", __func__, ifp->name);
+		}
+	}
+	XFREE(MTYPE_ZEBRA_LINK_CFG, req);
+
+	if (set && !set->mask) {
+		XFREE(MTYPE_ZEBRA_LINK_CFG, cfg->opt[scope]);
 	}
 }
 
@@ -294,6 +360,24 @@ static void link_cfg_realize(struct interface *ifp)
 		if (bridge && (cfg->vl_applied_gen != cfg->vl_gen ||
 			       cfg->vl_applied_bridge != bridge))
 			brport_apply(ifp, cfg, bridge);
+	}
+
+	/* --- bridge settings (this interface is a bridge) --- */
+	if ((cfg->opt[ZLO_SCOPE_BRIDGE] || cfg->opt_reset[ZLO_SCOPE_BRIDGE]) && ifp_is_real(ifp) &&
+	    IS_ZEBRA_IF_BRIDGE(ifp) && !cfg->opt_inflight[ZLO_SCOPE_BRIDGE] &&
+	    cfg->opt_applied_gen[ZLO_SCOPE_BRIDGE] != cfg->opt_gen[ZLO_SCOPE_BRIDGE])
+		opts_apply(ifp, cfg, ZLO_SCOPE_BRIDGE, 0);
+
+	/* --- bridge port settings (this interface is enslaved to a bridge) --- */
+	if ((cfg->opt[ZLO_SCOPE_PORT] || cfg->opt_reset[ZLO_SCOPE_PORT]) && ifp_is_real(ifp) &&
+	    !cfg->master_inflight && !cfg->opt_inflight[ZLO_SCOPE_PORT]) {
+		ifindex_t bridge = zif->brslave_info.bridge_ifindex
+					   ? zif->brslave_info.bridge_ifindex
+					   : cfg->master_applied;
+
+		if (bridge && (cfg->opt_applied_gen[ZLO_SCOPE_PORT] != cfg->opt_gen[ZLO_SCOPE_PORT] ||
+			       cfg->opt_applied_bridge != bridge))
+			opts_apply(ifp, cfg, ZLO_SCOPE_PORT, bridge);
 	}
 }
 
@@ -504,6 +588,62 @@ void zebra_link_cfg_set_bridge_pvid(struct interface *ifp, uint16_t vid)
 	link_cfg_release_if_empty(ifp);
 }
 
+void zebra_link_cfg_set_opt(struct interface *ifp, enum zebra_link_opt_scope scope,
+			    unsigned int idx, uint64_t val)
+{
+	struct zebra_link_cfg *cfg;
+	struct zebra_link_optset *set;
+
+	if (scope >= ZLO_SCOPE_MAX || idx >= ZLO_MAX)
+		return;
+	cfg = link_cfg_get(ifp, true);
+	if (!cfg)
+		return;
+
+	if (!cfg->opt[scope])
+		cfg->opt[scope] = XCALLOC(MTYPE_ZEBRA_LINK_CFG, sizeof(*cfg->opt[scope]));
+	set = cfg->opt[scope];
+
+	if (!(set->mask & (1ULL << idx)) || set->val[idx] != val) {
+		set->mask |= 1ULL << idx;
+		set->val[idx] = val;
+		cfg->opt_reset[scope] &= ~(1ULL << idx);
+		cfg->opt_gen[scope]++;
+		if (scope == ZLO_SCOPE_PORT && idx == ZPO_ISOLATED)
+			cfg->vl_gen++;
+	}
+
+	link_cfg_realize(ifp);
+}
+
+void zebra_link_cfg_unset_opt(struct interface *ifp, enum zebra_link_opt_scope scope,
+			      unsigned int idx)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, false);
+	struct zebra_link_optset *set;
+
+	if (!cfg || scope >= ZLO_SCOPE_MAX || idx >= ZLO_MAX)
+		return;
+	set = cfg->opt[scope];
+	if (!set || !(set->mask & (1ULL << idx)))
+		return;
+
+	set->mask &= ~(1ULL << idx);
+	set->val[idx] = 0;
+	/* Put the kernel default back, if we had changed it */
+	if (cfg->opt_applied_mask[scope] & (1ULL << idx))
+		cfg->opt_reset[scope] |= 1ULL << idx;
+	cfg->opt_gen[scope]++;
+	if (scope == ZLO_SCOPE_PORT && idx == ZPO_ISOLATED)
+		cfg->vl_gen++;
+
+	if (!set->mask)
+		XFREE(MTYPE_ZEBRA_LINK_CFG, cfg->opt[scope]);
+
+	link_cfg_realize(ifp);
+	link_cfg_release_if_empty(ifp);
+}
+
 const struct zebra_link_params *zebra_link_cfg_get_link(const struct interface *ifp)
 {
 	const struct zebra_if *zif = ifp->info;
@@ -547,6 +687,13 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 		cfg->vl_applied_bridge = 0;
 		cfg->isolated_set = false;
 		cfg->brport_inflight = 0;
+		/* The settings went with the interface; apply them again on return */
+		cfg->opt_applied_gen[ZLO_SCOPE_BRIDGE] = 0;
+		cfg->opt_applied_gen[ZLO_SCOPE_PORT] = 0;
+		cfg->opt_applied_bridge = 0;
+		memset(cfg->opt_applied_mask, 0, sizeof(cfg->opt_applied_mask));
+		memset(cfg->opt_reset, 0, sizeof(cfg->opt_reset));
+		memset(cfg->opt_inflight, 0, sizeof(cfg->opt_inflight));
 	}
 
 	/*
@@ -563,6 +710,8 @@ void zebra_link_cfg_if_free(struct interface *ifp)
 
 	if (zif && zif->link_cfg) {
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->vl);
+		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->opt[ZLO_SCOPE_BRIDGE]);
+		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->opt[ZLO_SCOPE_PORT]);
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
 	}
 }
@@ -616,6 +765,20 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 		 */
 		if (!ok)
 			zlog_warn("Failed to apply bridge port setting on %s", name);
+	} else if (op == DPLANE_OP_LINK_OPTS_SET) {
+		const struct zebra_link_opts_req *r = dplane_ctx_link_get_opts(ctx);
+		enum zebra_link_opt_scope scope = r ? r->scope : ZLO_SCOPE_MAX;
+
+		if (cfg && scope < ZLO_SCOPE_MAX && cfg->opt_inflight[scope]) {
+			cfg->opt_inflight[scope]--;
+			/* Configuration may have changed while this was in flight */
+			if (!cfg->opt_inflight[scope])
+				link_cfg_kick();
+		}
+		/* Not retried by itself, like the vlans */
+		if (!ok)
+			zlog_warn("Failed to apply %s settings on %s",
+				  scope == ZLO_SCOPE_BRIDGE ? "bridge" : "bridge port", name);
 	} else if (op == DPLANE_OP_LINK_DELETE) {
 		if (!ok)
 			zlog_warn("Failed to delete link %s in the kernel", name);

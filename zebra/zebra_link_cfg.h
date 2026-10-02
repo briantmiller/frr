@@ -44,8 +44,8 @@ enum zebra_link_vlan_encap {
 };
 
 struct zebra_link_bridge {
-	/* VLAN filtering (IFLA_BR_VLAN_FILTERING); reserved for stp, ageing, ... */
-	bool vlan_filtering;
+	/* No creation parameters; the settings are in the bridge options */
+	uint8_t reserved;
 };
 
 struct zebra_link_veth {

@@ -1718,6 +1718,7 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 		case DPLANE_OP_LINK_DELETE:
 		case DPLANE_OP_LINK_MASTER_SET:
 		case DPLANE_OP_LINK_BRPORT_SET:
+		case DPLANE_OP_LINK_OPTS_SET:
 		case DPLANE_OP_FDB_READ:
 		case DPLANE_OP_NEIGH_READ:
 		case DPLANE_OP_TC_QDISC_READ:

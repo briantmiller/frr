@@ -10,6 +10,7 @@
 #include <sys/types.h>
 
 #include "zebra/zebra_link_cfg.h"
+#include "zebra/zebra_link_opts.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,9 @@ extern "C" {
 extern const char *zebra_link_params_validate(const char *ifname,
 					      const struct zebra_link_params *p);
 
+/* Validate a bridge/port settings request; NULL if OK, else a static string. */
+extern const char *zebra_link_opts_validate(const struct zebra_link_opts_req *r);
+
 /* Validate a bridge-port request; NULL if OK, else a static error string. */
 extern const char *zebra_link_brport_validate(const struct zebra_link_brport_req *r);
 
@@ -32,6 +36,7 @@ enum zebra_link_nl_op {
 	ZEBRA_LINK_NL_DELETE,	  /* RTM_DELLINK */
 	ZEBRA_LINK_NL_SET_MASTER, /* RTM_NEWLINK with IFLA_MASTER */
 	ZEBRA_LINK_NL_BRPORT,	  /* AF_BRIDGE vlan add/del, port isolation */
+	ZEBRA_LINK_NL_OPTS,	  /* bridge or bridge port settings, in place */
 };
 
 struct zebra_link_nl_req {
@@ -52,6 +57,9 @@ struct zebra_link_nl_req {
 
 	/* Bridge-port requests only */
 	const struct zebra_link_brport_req *brport;
+
+	/* Bridge / bridge port settings (ZEBRA_LINK_NL_OPTS) */
+	const struct zebra_link_opts_req *opts;
 };
 
 /*

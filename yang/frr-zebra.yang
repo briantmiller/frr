@@ -2279,6 +2279,410 @@ module frr-zebra {
            untagged or private).";
       }
 
+      container bridge-options {
+        description
+          "Settings of this interface when it is a Linux bridge. Applied in
+           place; an option that is not configured is left alone. Removing
+           an option sets the kernel default again.";
+
+        leaf stp {
+          type boolean;
+          description
+            "Spanning tree protocol (kernel STP).";
+        }
+
+        leaf ageing-time {
+          type uint32 {
+            range "0..10000";
+          }
+          description
+            "FDB ageing time in seconds (kernel default 300).";
+        }
+
+        leaf forward-delay {
+          type uint32 {
+            range "2..30";
+          }
+          description
+            "STP forward delay in seconds (kernel default 15).";
+        }
+
+        leaf hello-time {
+          type uint32 {
+            range "1..10";
+          }
+          description
+            "STP hello time in seconds (kernel default 2).";
+        }
+
+        leaf max-age {
+          type uint32 {
+            range "6..40";
+          }
+          description
+            "STP max age in seconds (kernel default 20).";
+        }
+
+        leaf priority {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "STP bridge priority (kernel default 32768).";
+        }
+
+        leaf vlan-filtering {
+          type boolean;
+          description
+            "VLAN filtering.";
+        }
+
+        leaf vlan-protocol {
+          type enumeration {
+            enum dot1q;
+            enum dot1ad;
+          }
+          description
+            "VLAN ethertype used by the bridge.";
+        }
+
+        leaf vlan-default-pvid {
+          type uint16 {
+            range "0..4094";
+          }
+          description
+            "Default PVID given to new ports, 0 for none (kernel default 1).";
+        }
+
+        leaf vlan-stats {
+          type boolean;
+          description
+            "Per-VLAN statistics.";
+        }
+
+        leaf vlan-stats-per-port {
+          type boolean;
+          description
+            "Per-VLAN per-port statistics.";
+        }
+
+        leaf group-fwd-mask {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "Bitmask of link-local group addresses (01-80-C2-00-00-0X) the bridge forwards.";
+        }
+
+        leaf group-address {
+          type yang:mac-address;
+          description
+            "Destination address of STP frames.";
+        }
+
+        leaf multicast-snooping {
+          type boolean;
+          description
+            "IGMP/MLD snooping.";
+        }
+
+        leaf multicast-router {
+          type enumeration {
+            enum disabled;
+            enum auto;
+            enum enabled;
+          }
+          description
+            "Whether the bridge itself is a multicast router.";
+        }
+
+        leaf multicast-querier {
+          type boolean;
+          description
+            "Act as IGMP/MLD querier.";
+        }
+
+        leaf multicast-query-use-ifaddr {
+          type boolean;
+          description
+            "Use the bridge address as source of IGMP queries.";
+        }
+
+        leaf multicast-stats {
+          type boolean;
+          description
+            "Multicast statistics.";
+        }
+
+        leaf multicast-igmp-version {
+          type uint8 {
+            range "2..3";
+          }
+          description
+            "IGMP version.";
+        }
+
+        leaf multicast-mld-version {
+          type uint8 {
+            range "1..2";
+          }
+          description
+            "MLD version.";
+        }
+
+        leaf multicast-hash-max {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Maximum multicast group hash table size.";
+        }
+
+        leaf multicast-last-member-count {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Last member query count (kernel default 2).";
+        }
+
+        leaf multicast-startup-query-count {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Startup query count (kernel default 2).";
+        }
+
+        leaf multicast-last-member-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Last member query interval, centiseconds (kernel default 100).";
+        }
+
+        leaf multicast-membership-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Group membership interval, centiseconds (kernel default 26000).";
+        }
+
+        leaf multicast-querier-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Other querier present interval, centiseconds (kernel default 25500).";
+        }
+
+        leaf multicast-query-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Query interval, centiseconds (kernel default 12500).";
+        }
+
+        leaf multicast-query-response-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Query response interval, centiseconds (kernel default 1000).";
+        }
+
+        leaf multicast-startup-query-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Startup query interval, centiseconds (kernel default 3125).";
+        }
+
+        leaf fdb-max-learned {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum number of learned FDB entries, 0 for no limit.";
+        }
+    }
+
+      container bridge-port-options {
+        description
+          "Settings of this interface when it is a bridge port. Applied once
+           the interface is enslaved to a bridge. Removing an option sets
+           the kernel default again.";
+
+        leaf state {
+          type enumeration {
+            enum disabled;
+            enum listening;
+            enum learning;
+            enum forwarding;
+            enum blocking;
+          }
+          description
+            "STP state of the port.";
+        }
+
+        leaf priority {
+          type uint16 {
+            range "0..255";
+          }
+          description
+            "STP port priority (kernel default 32).";
+        }
+
+        leaf cost {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "STP path cost, 0 for automatic.";
+        }
+
+        leaf hairpin {
+          type boolean;
+          description
+            "Hairpin mode: reflect frames back out of the port they came in on.";
+        }
+
+        leaf bpdu-guard {
+          type boolean;
+          description
+            "Disable the port if it receives a BPDU.";
+        }
+
+        leaf root-block {
+          type boolean;
+          description
+            "Do not let the port become a root port.";
+        }
+
+        leaf fast-leave {
+          type boolean;
+          description
+            "Multicast fast leave.";
+        }
+
+        leaf learning {
+          type boolean;
+          description
+            "Learn MAC addresses on the port (kernel default on).";
+        }
+
+        leaf unicast-flood {
+          type boolean;
+          description
+            "Flood unknown unicast to the port (kernel default on).";
+        }
+
+        leaf multicast-flood {
+          type boolean;
+          description
+            "Flood unknown multicast to the port (kernel default on).";
+        }
+
+        leaf broadcast-flood {
+          type boolean;
+          description
+            "Flood broadcast to the port (kernel default on).";
+        }
+
+        leaf multicast-to-unicast {
+          type boolean;
+          description
+            "Send multicast as unicast to the port.";
+        }
+
+        leaf proxy-arp {
+          type boolean;
+          description
+            "Proxy ARP.";
+        }
+
+        leaf proxy-arp-wifi {
+          type boolean;
+          description
+            "Proxy ARP for wireless clients.";
+        }
+
+        leaf neigh-suppress {
+          type boolean;
+          description
+            "ARP/ND suppression.";
+        }
+
+        leaf neigh-vlan-suppress {
+          type boolean;
+          description
+            "Per-VLAN ARP/ND suppression.";
+        }
+
+        leaf vlan-tunnel {
+          type boolean;
+          description
+            "VLAN to tunnel id mapping.";
+        }
+
+        leaf isolated {
+          type boolean;
+          description
+            "Isolate the port from other isolated ports (overrides private VLANs).";
+        }
+
+        leaf locked {
+          type boolean;
+          description
+            "Locked port: drop traffic from addresses not in the FDB.";
+        }
+
+        leaf mab {
+          type boolean;
+          description
+            "MAC authentication bypass on a locked port.";
+        }
+
+        leaf multicast-router {
+          type enumeration {
+            enum disabled;
+            enum learning;
+            enum permanent;
+            enum temp;
+          }
+          description
+            "Multicast router state of the port.";
+        }
+
+        leaf group-fwd-mask {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "Link-local group addresses forwarded through this port.";
+        }
+
+        leaf multicast-max-groups {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum multicast groups learned on the port, 0 for no limit.";
+        }
+
+        leaf multicast-eht-hosts-limit {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum explicit-host-tracking hosts per port.";
+        }
+    }
+
       container link-type {
         description
           "Type and parameters of a link that zebra creates in the kernel.
@@ -2293,15 +2697,7 @@ module frr-zebra {
             container bridge {
               presence "Create a bridge.";
               description
-                "A Linux bridge.";
-
-              leaf vlan-filtering {
-                type boolean;
-                default "false";
-                description
-                  "Enable VLAN filtering: ports only forward the VLANs they
-                   are members of (see bridge-vlan).";
-              }
+                "A Linux bridge. Its settings are in bridge-options.";
             }
           }
 

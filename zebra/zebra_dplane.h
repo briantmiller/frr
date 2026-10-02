@@ -239,6 +239,8 @@ enum dplane_op_e {
 	DPLANE_OP_LINK_MASTER_SET,
 	/* Bridge port settings (vlan membership, isolation) of an interface */
 	DPLANE_OP_LINK_BRPORT_SET,
+	/* Bridge or bridge port settings (stp, multicast, flooding, ...) */
+	DPLANE_OP_LINK_OPTS_SET,
 };
 
 /* Operational status of Bridge Ports */
@@ -1201,6 +1203,11 @@ struct zebra_link_brport_req;
 enum zebra_dplane_result
 dplane_link_brport_set(struct interface *ifp, const struct zebra_link_brport_req *req);
 
+/* Apply bridge or bridge port settings (a copy of 'req' is kept). */
+struct zebra_link_opts_req;
+enum zebra_dplane_result dplane_link_opts_set(struct interface *ifp,
+					      const struct zebra_link_opts_req *req);
+
 /* Accessors for the link ops */
 const struct zebra_link_params *
 dplane_ctx_link_get_params(const struct zebra_dplane_ctx *ctx);
@@ -1208,6 +1215,8 @@ ifindex_t dplane_ctx_link_get_link_ifindex(const struct zebra_dplane_ctx *ctx);
 ifindex_t dplane_ctx_link_get_master_ifindex(const struct zebra_dplane_ctx *ctx);
 const struct zebra_link_brport_req *
 dplane_ctx_link_get_brport(const struct zebra_dplane_ctx *ctx);
+const struct zebra_link_opts_req *
+dplane_ctx_link_get_opts(const struct zebra_dplane_ctx *ctx);
 
 /*
  * Enqueue an SRv6 encap source address set

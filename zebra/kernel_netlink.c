@@ -1544,6 +1544,7 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 	case DPLANE_OP_LINK_DELETE:
 	case DPLANE_OP_LINK_MASTER_SET:
 	case DPLANE_OP_LINK_BRPORT_SET:
+	case DPLANE_OP_LINK_OPTS_SET:
 		return netlink_put_link_msg(bth, ctx);
 
 	case DPLANE_OP_INTF_ADDR_ADD:
