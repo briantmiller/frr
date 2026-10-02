@@ -388,7 +388,7 @@ def test_bridge_options(tgen):
         "mcast_snooping": 0,
         "mcast_querier": 1,
         "mcast_router": 2,
-        "mcast_query_interval": 6000,
+        "mcast_query_intvl": 6000,
     }
     assert wait_data(r1, "br3", "info_data", expect) is None
 
@@ -451,7 +451,6 @@ def test_bridge_port_options(tgen):
         "bcast_flood": False,
         "fastleave": True,
         "isolated": True,
-        "mcast_router": 2,
     }
     assert wait_data(r1, "q1", "info_slave_data", expect) is None
 
