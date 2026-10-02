@@ -42,6 +42,20 @@ extern void zebra_link_cfg_set_master(struct interface *ifp, const char *master)
 /* Remove the configured master (the interface is released if we set it). */
 extern void zebra_link_cfg_unset_master(struct interface *ifp);
 
+/*
+ * Configure the bridge-port VLAN membership of 'ifp' for one VLAN.  Applied
+ * once the interface is enslaved to a bridge, and re-applied if it is
+ * enslaved again or re-created.  See enum zebra_link_vlan_mode.
+ */
+extern void zebra_link_cfg_set_bridge_vlan(struct interface *ifp, uint16_t vid,
+					   enum zebra_link_vlan_mode mode);
+
+/* Remove the configuration for one VLAN; a membership we added is removed. */
+extern void zebra_link_cfg_unset_bridge_vlan(struct interface *ifp, uint16_t vid);
+
+/* Native VLAN (PVID) of the port; 0 to unset */
+extern void zebra_link_cfg_set_bridge_pvid(struct interface *ifp, uint16_t vid);
+
 /* Lookups for show/config-write */
 extern const struct zebra_link_params *
 zebra_link_cfg_get_link(const struct interface *ifp);

@@ -918,7 +918,7 @@ static int netlink_parse_error(const struct nlsock *nl, struct nlmsghdr *h,
 	      * state.  A link that is already gone on delete is likewise fine.
 	      */
 	     (msg_type == RTM_NEWLINK && -errnum == EEXIST) ||
-	     (msg_type == RTM_DELLINK && -errnum == ENODEV))) {
+	     (msg_type == RTM_DELLINK && (-errnum == ENODEV || -errnum == ENOENT)))) {
 		if (IS_ZEBRA_DEBUG_KERNEL)
 			zlog_debug("%s: error: %s type=%s(%u), seq=%u, pid=%u", nl->name,
 				   safe_strerror(-errnum),
@@ -1543,6 +1543,7 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 	case DPLANE_OP_LINK_CREATE:
 	case DPLANE_OP_LINK_DELETE:
 	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
 		return netlink_put_link_msg(bth, ctx);
 
 	case DPLANE_OP_INTF_ADDR_ADD:

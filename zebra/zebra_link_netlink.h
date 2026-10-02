@@ -22,12 +22,16 @@ extern "C" {
 extern const char *zebra_link_params_validate(const char *ifname,
 					      const struct zebra_link_params *p);
 
+/* Validate a bridge-port request; NULL if OK, else a static error string. */
+extern const char *zebra_link_brport_validate(const struct zebra_link_brport_req *r);
+
 #ifdef HAVE_NETLINK
 
 enum zebra_link_nl_op {
 	ZEBRA_LINK_NL_CREATE,	  /* RTM_NEWLINK, NLM_F_CREATE | NLM_F_EXCL */
 	ZEBRA_LINK_NL_DELETE,	  /* RTM_DELLINK */
 	ZEBRA_LINK_NL_SET_MASTER, /* RTM_NEWLINK with IFLA_MASTER */
+	ZEBRA_LINK_NL_BRPORT,	  /* AF_BRIDGE vlan add/del, port isolation */
 };
 
 struct zebra_link_nl_req {
@@ -45,6 +49,9 @@ struct zebra_link_nl_req {
 
 	/* Set-master only: ifindex of master, 0 to release from any master */
 	int master_ifindex;
+
+	/* Bridge-port requests only */
+	const struct zebra_link_brport_req *brport;
 };
 
 /*

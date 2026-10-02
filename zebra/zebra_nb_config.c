@@ -1410,6 +1410,80 @@ int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-pvid
+ *
+ * The entry is applied from apply_finish, once per transaction, when it has
+ * been created or its mode changed.
+ */
+int lib_interface_zebra_bridge_vlan_create(struct nb_cb_create_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_vlan_mode_modify(struct nb_cb_modify_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_vlan_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_bridge_vlan(ifp, yang_dnode_get_uint16(args->dnode, "id"));
+
+	return NB_OK;
+}
+
+void lib_interface_zebra_bridge_vlan_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	struct interface *ifp = nb_running_get_entry(args->dnode, NULL, true);
+	const char *mode = yang_dnode_get_string(args->dnode, "mode");
+	enum zebra_link_vlan_mode m = ZEBRA_LINK_VLAN_UNSET;
+
+	if (strmatch(mode, "on"))
+		m = ZEBRA_LINK_VLAN_ON;
+	else if (strmatch(mode, "off"))
+		m = ZEBRA_LINK_VLAN_OFF;
+	else if (strmatch(mode, "untagged"))
+		m = ZEBRA_LINK_VLAN_UNTAGGED;
+	else if (strmatch(mode, "private"))
+		m = ZEBRA_LINK_VLAN_PRIVATE;
+
+	zebra_link_cfg_set_bridge_vlan(ifp, yang_dnode_get_uint16(args->dnode, "id"), m);
+}
+
+int lib_interface_zebra_bridge_pvid_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_bridge_pvid(ifp, yang_dnode_get_uint16(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_bridge_pvid(ifp, 0);
+
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
  *
  * Every kind (bridge, veth, vlan, gre, and future ones) shares these
@@ -1443,6 +1517,7 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 
 	if (strmatch(kind, "bridge")) {
 		p->kind = ZEBRA_LINK_BRIDGE;
+		p->u.bridge.vlan_filtering = yang_dnode_get_bool(dnode, "vlan-filtering");
 	} else if (strmatch(kind, "veth")) {
 		p->kind = ZEBRA_LINK_VETH;
 		strlcpy(p->u.veth.peer_name, yang_dnode_get_string(dnode, "peer-name"),

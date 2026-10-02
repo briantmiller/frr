@@ -85,6 +85,26 @@ const char *zebra_link_params_validate(const char *ifname,
 	return "unsupported link type";
 }
 
+const char *zebra_link_brport_validate(const struct zebra_link_brport_req *r)
+{
+	if (!r)
+		return "missing bridge port request";
+
+	switch (r->type) {
+	case ZEBRA_LINK_BRPORT_VLAN_ADD:
+	case ZEBRA_LINK_BRPORT_VLAN_DEL:
+		if (r->vid_begin < ZEBRA_LINK_VID_MIN || r->vid_end > ZEBRA_LINK_VID_MAX ||
+		    r->vid_begin > r->vid_end)
+			return "VLAN id range must be within 1-4094";
+		if (r->pvid && r->vid_begin != r->vid_end)
+			return "pvid applies to a single VLAN";
+		return NULL;
+	case ZEBRA_LINK_BRPORT_ISOLATED:
+		return NULL;
+	}
+	return "unknown bridge port request";
+}
+
 #ifdef HAVE_NETLINK
 
 /*
@@ -101,6 +121,7 @@ const char *zebra_link_params_validate(const char *ifname,
 #include <linux/if_ether.h>
 #include <linux/if_tunnel.h>
 #include <linux/veth.h>
+#include <linux/if_bridge.h>
 #include <arpa/inet.h>
 
 #include "lib/netlink_parser.h"
@@ -147,6 +168,97 @@ static bool veth_put_data(struct nlmsghdr *n, size_t buflen,
 
 	nl_attr_nest_end(n, peer);
 	return true;
+}
+
+/* ---- bridge ---- */
+
+static bool bridge_put_data(struct nlmsghdr *n, size_t buflen,
+			    const struct zebra_link_params *p, int link_ifindex)
+{
+	/* Only send what was asked for: the kernel default is "off" */
+	if (p->u.bridge.vlan_filtering)
+		return nl_attr_put8(n, buflen, IFLA_BR_VLAN_FILTERING, 1);
+	return true;
+}
+
+/* ---- bridge port (vlan membership, isolation) ---- */
+
+static ssize_t encode_brport(const struct zebra_link_nl_req *req, void *buf,
+			     size_t buflen, const char **err)
+{
+	struct {
+		struct nlmsghdr n;
+		struct ifinfomsg ifi;
+		char buf[];
+	} *msg = buf;
+	const struct zebra_link_brport_req *r = req->brport;
+	struct bridge_vlan_info vinfo;
+	struct rtattr *nest;
+	const char *verr;
+
+	if (req->ifindex <= 0) {
+		*err = "interface does not exist";
+		return 0;
+	}
+	verr = zebra_link_brport_validate(r);
+	if (verr) {
+		*err = verr;
+		return 0;
+	}
+
+	msg->n.nlmsg_flags = NLM_F_REQUEST;
+	msg->ifi.ifi_family = AF_BRIDGE;
+	msg->ifi.ifi_index = req->ifindex;
+
+	if (r->type == ZEBRA_LINK_BRPORT_ISOLATED) {
+		msg->n.nlmsg_type = RTM_SETLINK;
+		nest = nl_attr_nest(&msg->n, buflen, IFLA_PROTINFO);
+		if (!nest || !nl_attr_put8(&msg->n, buflen, IFLA_BRPORT_ISOLATED,
+					   r->isolated ? 1 : 0))
+			goto nospace;
+		nl_attr_nest_end(&msg->n, nest);
+		return NLMSG_ALIGN(msg->n.nlmsg_len);
+	}
+
+	msg->n.nlmsg_type = (r->type == ZEBRA_LINK_BRPORT_VLAN_ADD) ? RTM_SETLINK
+								    : RTM_DELLINK;
+	nest = nl_attr_nest(&msg->n, buflen, IFLA_AF_SPEC);
+	if (!nest)
+		goto nospace;
+
+	memset(&vinfo, 0, sizeof(vinfo));
+	if (r->type == ZEBRA_LINK_BRPORT_VLAN_ADD) {
+		if (r->untagged)
+			vinfo.flags |= BRIDGE_VLAN_INFO_UNTAGGED;
+		if (r->pvid)
+			vinfo.flags |= BRIDGE_VLAN_INFO_PVID;
+	}
+
+	if (r->vid_begin == r->vid_end) {
+		vinfo.vid = r->vid_begin;
+		if (!nl_attr_put(&msg->n, buflen, IFLA_BRIDGE_VLAN_INFO, &vinfo,
+				 sizeof(vinfo)))
+			goto nospace;
+	} else {
+		/* A range is a BEGIN entry followed by an END entry */
+		vinfo.vid = r->vid_begin;
+		vinfo.flags |= BRIDGE_VLAN_INFO_RANGE_BEGIN;
+		if (!nl_attr_put(&msg->n, buflen, IFLA_BRIDGE_VLAN_INFO, &vinfo,
+				 sizeof(vinfo)))
+			goto nospace;
+		vinfo.vid = r->vid_end;
+		vinfo.flags &= ~BRIDGE_VLAN_INFO_RANGE_BEGIN;
+		vinfo.flags |= BRIDGE_VLAN_INFO_RANGE_END;
+		if (!nl_attr_put(&msg->n, buflen, IFLA_BRIDGE_VLAN_INFO, &vinfo,
+				 sizeof(vinfo)))
+			goto nospace;
+	}
+	nl_attr_nest_end(&msg->n, nest);
+	return NLMSG_ALIGN(msg->n.nlmsg_len);
+
+nospace:
+	*err = "netlink message buffer too small";
+	return 0;
 }
 
 /* ---- vlan ---- */
@@ -217,7 +329,7 @@ static const struct link_kind_ops link_kinds[] = {
 	{
 		.kind = ZEBRA_LINK_BRIDGE,
 		.name = "bridge",
-		/* plain bridge: no INFO_DATA yet */
+		.put_data = bridge_put_data,
 	},
 	{
 		.kind = ZEBRA_LINK_VETH,
@@ -352,6 +464,9 @@ ssize_t zebra_link_nl_encode(const struct zebra_link_nl_req *req, void *buf,
 		msg->ifi.ifi_family = AF_UNSPEC;
 		msg->ifi.ifi_index = req->ifindex;
 		return NLMSG_ALIGN(msg->n.nlmsg_len);
+
+	case ZEBRA_LINK_NL_BRPORT:
+		return encode_brport(req, buf, buflen, err);
 
 	case ZEBRA_LINK_NL_SET_MASTER:
 		if (req->ifindex <= 0) {

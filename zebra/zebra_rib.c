@@ -5331,6 +5331,7 @@ static void rib_process_dplane_results(struct event *event)
 			case DPLANE_OP_LINK_CREATE:
 			case DPLANE_OP_LINK_DELETE:
 			case DPLANE_OP_LINK_MASTER_SET:
+			case DPLANE_OP_LINK_BRPORT_SET:
 				zebra_link_cfg_dplane_result(ctx);
 				break;
 

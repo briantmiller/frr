@@ -2225,6 +2225,60 @@ module frr-zebra {
            bond, VRF, ...). Applied as soon as both interfaces exist.";
       }
 
+      list bridge-vlan {
+        key "id";
+        description
+          "VLAN membership of this interface when it is a bridge port. Applied
+           once the interface is enslaved to a bridge, with the bridge's VLAN
+           filtering enabled for it to have any effect.";
+
+        leaf id {
+          type uint16 {
+            range "1..4094";
+          }
+          description
+            "VLAN identifier.";
+        }
+
+        leaf mode {
+          type enumeration {
+            enum on {
+              description
+                "Tagged member of the VLAN.";
+            }
+            enum off {
+              description
+                "Not a member of the VLAN; removes it if present (for example
+                 the default VLAN 1 the kernel adds to new ports).";
+            }
+            enum untagged {
+              description
+                "Member of the VLAN; frames leave the port untagged.";
+            }
+            enum private {
+              description
+                "Tagged member of the VLAN and the port is isolated: it can
+                 only communicate with non-isolated ports. The kernel has no
+                 per-VLAN isolation, so any private VLAN isolates the whole
+                 port.";
+            }
+          }
+          mandatory true;
+          description
+            "How this interface takes part in the VLAN.";
+        }
+      }
+
+      leaf bridge-pvid {
+        type uint16 {
+          range "1..4094";
+        }
+        description
+          "Native VLAN (PVID): untagged frames received on this port are
+           classified into this VLAN. It should also be a member (on,
+           untagged or private).";
+      }
+
       container link-type {
         description
           "Type and parameters of a link that zebra creates in the kernel.
@@ -2239,7 +2293,15 @@ module frr-zebra {
             container bridge {
               presence "Create a bridge.";
               description
-                "A Linux bridge with default parameters.";
+                "A Linux bridge.";
+
+              leaf vlan-filtering {
+                type boolean;
+                default "false";
+                description
+                  "Enable VLAN filtering: ports only forward the VLANs they
+                   are members of (see bridge-vlan).";
+              }
             }
           }
 

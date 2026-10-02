@@ -550,12 +550,16 @@ static void link_type_enqueue_container(struct vty *vty, const char *kind)
 
 DEFPY_YANG (link_type_bridge,
 	link_type_bridge_cmd,
-	"link-type bridge",
+	"link-type bridge [vlan-filtering$vlan_filtering]",
 	"Create this interface in the kernel\n"
-	"Linux bridge\n")
+	"Linux bridge\n"
+	"Enable VLAN filtering: ports only forward the VLANs they are members of\n")
 {
 	link_type_enqueue_destroy_others(vty, "bridge");
 	link_type_enqueue_container(vty, "bridge");
+	/* The command is the full definition: without the keyword it is off */
+	link_type_enqueue_leaf(vty, "bridge", "vlan-filtering",
+			       vlan_filtering ? "true" : "false");
 
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -657,10 +661,11 @@ DEFPY_YANG (link_type_gre,
 
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge [vlan-filtering]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
-	"Linux bridge\n"
+"Linux bridge\n"
+	"Enable VLAN filtering\n"
 	"Virtual ethernet pair\n"
 	"Other end of the pair\n"
 	"Name of the peer interface\n"
@@ -697,7 +702,8 @@ static void lib_interface_zebra_link_type_bridge_cli_write(struct vty *vty,
 							    const struct lyd_node *dnode,
 							    bool show_defaults)
 {
-	vty_out(vty, " link-type bridge\n");
+	vty_out(vty, " link-type bridge%s\n",
+		yang_dnode_get_bool(dnode, "vlan-filtering") ? " vlan-filtering" : "");
 }
 
 static void lib_interface_zebra_link_type_veth_cli_write(struct vty *vty,
@@ -771,6 +777,92 @@ static void lib_interface_zebra_master_cli_write(struct vty *vty,
 						 bool show_defaults)
 {
 	vty_out(vty, " master %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+/*
+ * Bridge port VLAN membership.  The configuration holds one list entry per
+ * VLAN; a range on the command line is expanded, a few entries per commit
+ * because a single command can carry only so many changes.
+ */
+DEFPY_YANG (interface_bridge_vlan,
+	interface_bridge_vlan_cmd,
+	"[no] bridge-vlan (1-4094)$vid [to (1-4094)$vid_end] ![<on|off|untagged|private>$mode]",
+	NO_STR
+	"VLAN membership of this interface when it is a bridge port\n"
+	"VLAN id\n"
+	"Through\n"
+	"Last VLAN id of the range\n"
+	"Tagged member of the VLAN\n"
+	"Not a member of the VLAN (remove it)\n"
+	"Member of the VLAN, frames leave the port untagged\n"
+	"Tagged member; the port is isolated (kernel isolation is per port, not per VLAN)\n")
+{
+	char xpath[VTY_MAXCFGCHANGES - 1][XPATH_MAXLEN];
+	int ret = CMD_SUCCESS;
+	long first = vid, last = vid_end_str ? vid_end : vid;
+	long v, n = 0;
+
+	if (last < first) {
+		vty_out(vty, "%% The end of the range must not be lower than its start\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	if (!no && !mode) {
+		vty_out(vty, "%% A mode (on, off, untagged or private) is required\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	for (v = first; v <= last; v++) {
+		if (no) {
+			snprintf(xpath[n], sizeof(xpath[n]),
+				 "./frr-zebra:zebra/bridge-vlan[id='%ld']", v);
+			nb_cli_enqueue_change(vty, xpath[n], NB_OP_DESTROY, NULL);
+		} else {
+			snprintf(xpath[n], sizeof(xpath[n]),
+				 "./frr-zebra:zebra/bridge-vlan[id='%ld']/mode", v);
+			nb_cli_enqueue_change(vty, xpath[n], NB_OP_MODIFY, mode);
+		}
+		n++;
+
+		if (n == (long)array_size(xpath) || v == last) {
+			ret = nb_cli_apply_changes(vty, NULL);
+			if (ret != CMD_SUCCESS)
+				return ret;
+			n = 0;
+		}
+	}
+
+	return ret;
+}
+
+static void lib_interface_zebra_bridge_vlan_cli_write(struct vty *vty,
+						      const struct lyd_node *dnode,
+						      bool show_defaults)
+{
+	vty_out(vty, " bridge-vlan %u %s\n", yang_dnode_get_uint16(dnode, "id"),
+		yang_dnode_get_string(dnode, "mode"));
+}
+
+DEFPY_YANG (interface_bridge_pvid,
+	interface_bridge_pvid_cmd,
+	"[no] bridge-pvid ![(1-4094)$pvid_val]",
+	NO_STR
+	"Native VLAN of this interface when it is a bridge port\n"
+	"VLAN id\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/bridge-pvid", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/bridge-pvid", NB_OP_MODIFY,
+				      pvid_val_str);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_bridge_pvid_cli_write(struct vty *vty,
+						      const struct lyd_node *dnode,
+						      bool show_defaults)
+{
+	vty_out(vty, " bridge-pvid %u\n", yang_dnode_get_uint16(dnode, NULL));
 }
 
 DEFPY_YANG (shutdown_if,
@@ -3445,6 +3537,14 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_master_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan",
+			.cbs.cli_show = lib_interface_zebra_bridge_vlan_cli_write,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-pvid",
+			.cbs.cli_show = lib_interface_zebra_bridge_pvid_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bridge",
 			.cbs.cli_show = lib_interface_zebra_link_type_bridge_cli_write,
 		},
@@ -3700,6 +3800,8 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);
 	install_element(INTERFACE_NODE, &no_link_type_cmd);
 	install_element(INTERFACE_NODE, &interface_master_cmd);
+	install_element(INTERFACE_NODE, &interface_bridge_vlan_cmd);
+	install_element(INTERFACE_NODE, &interface_bridge_pvid_cmd);
 	install_element(INTERFACE_NODE, &ip_address_cmd);
 	install_element(INTERFACE_NODE, &ip_address_peer_cmd);
 	install_element(INTERFACE_NODE, &ipv6_address_cmd);

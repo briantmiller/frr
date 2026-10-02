@@ -372,6 +372,7 @@ struct dplane_link_ctx {
 	struct zebra_link_params params;
 	ifindex_t link_ifindex;	  /* resolved vlan parent / gre dev */
 	ifindex_t master_ifindex; /* 0 == no master */
+	struct zebra_link_brport_req brport;
 };
 
 
@@ -965,6 +966,7 @@ static void dplane_ctx_free_internal(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_CREATE:
 	case DPLANE_OP_LINK_DELETE:
 	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:
 	case DPLANE_OP_NEIGH_DELETE:
@@ -1221,6 +1223,8 @@ const char *dplane_op2str(enum dplane_op_e op)
 		return "LINK_DELETE";
 	case DPLANE_OP_LINK_MASTER_SET:
 		return "LINK_MASTER_SET";
+	case DPLANE_OP_LINK_BRPORT_SET:
+		return "LINK_BRPORT_SET";
 
 	case DPLANE_OP_LSP_INSTALL:
 		return "LSP_INSTALL";
@@ -6704,13 +6708,21 @@ ifindex_t dplane_ctx_link_get_master_ifindex(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.link.master_ifindex;
 }
 
+const struct zebra_link_brport_req *
+dplane_ctx_link_get_brport(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.link.brport;
+}
+
 /*
- * Common helper for link create/delete/master-set.
+ * Common helper for link create/delete/master-set/brport-set.
  */
 static enum zebra_dplane_result
 dplane_link_enqueue(struct interface *ifp, enum dplane_op_e op,
 		    const struct zebra_link_params *params, ifindex_t link_ifindex,
-		    ifindex_t master_ifindex)
+		    ifindex_t master_ifindex, const struct zebra_link_brport_req *brport)
 {
 	enum zebra_dplane_result result = ZEBRA_DPLANE_REQUEST_FAILURE;
 	struct zebra_dplane_ctx *ctx;
@@ -6749,6 +6761,8 @@ dplane_link_enqueue(struct interface *ifp, enum dplane_op_e op,
 		memcpy(&ctx->u.link.params, params, sizeof(ctx->u.link.params));
 	ctx->u.link.link_ifindex = link_ifindex;
 	ctx->u.link.master_ifindex = master_ifindex;
+	if (brport)
+		memcpy(&ctx->u.link.brport, brport, sizeof(ctx->u.link.brport));
 
 	/* Enqueue context for processing */
 	ret = dplane_update_enqueue(ctx);
@@ -6774,19 +6788,29 @@ dplane_link_create(struct interface *ifp, const struct zebra_link_params *params
 	if (!params)
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 
-	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_CREATE, params, link_ifindex, 0);
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_CREATE, params, link_ifindex, 0,
+				  NULL);
 }
 
 enum zebra_dplane_result dplane_link_delete(struct interface *ifp)
 {
-	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_DELETE, NULL, 0, 0);
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_DELETE, NULL, 0, 0, NULL);
 }
 
 enum zebra_dplane_result dplane_link_master_set(struct interface *ifp,
 						ifindex_t master_ifindex)
 {
 	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_MASTER_SET, NULL, 0,
-				   master_ifindex);
+				   master_ifindex, NULL);
+}
+
+enum zebra_dplane_result
+dplane_link_brport_set(struct interface *ifp, const struct zebra_link_brport_req *req)
+{
+	if (!req)
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_BRPORT_SET, NULL, 0, 0, req);
 }
 
 /*
@@ -7604,6 +7628,7 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_CREATE:
 	case DPLANE_OP_LINK_DELETE:
 	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
 		zlog_debug("Dplane link op %s, ifp %s, idx %u, type %s, link %d, master %d",
 			   dplane_op2str(dplane_ctx_get_op(ctx)),
 			   dplane_ctx_get_ifname(ctx), dplane_ctx_get_ifindex(ctx),
@@ -7862,6 +7887,7 @@ static void kernel_dplane_handle_result(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_CREATE:
 	case DPLANE_OP_LINK_DELETE:
 	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
 		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
 			atomic_fetch_add_explicit(&zdplane_info.dg_link_errors, 1,
 						  memory_order_relaxed);

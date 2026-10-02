@@ -427,6 +427,33 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan",
+			.cbs = {
+				.create = lib_interface_zebra_bridge_vlan_create,
+				.destroy = lib_interface_zebra_bridge_vlan_destroy,
+				.apply_finish = lib_interface_zebra_bridge_vlan_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan/mode",
+			.cbs = {
+				.modify = lib_interface_zebra_bridge_vlan_mode_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-pvid",
+			.cbs = {
+				.modify = lib_interface_zebra_bridge_pvid_modify,
+				.destroy = lib_interface_zebra_bridge_pvid_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bridge/vlan-filtering",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bridge",
 			.cbs = {
 				.create = lib_interface_zebra_link_type_create,

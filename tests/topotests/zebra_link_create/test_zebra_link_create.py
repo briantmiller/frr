@@ -215,6 +215,139 @@ def test_running_config(tgen):
     assert " master br0" in out
 
 
+def port_vlans(r1, name):
+    "Return {vid: set(flags)} of the bridge vlans of port NAME."
+    out = r1.cmd("bridge -j vlan show dev {} 2>/dev/null".format(name))
+    try:
+        entries = json.loads(out)
+    except ValueError:
+        return {}
+    vlans = {}
+    for ent in entries:
+        for v in ent.get("vlans", []):
+            for vid in range(v["vlan"], v.get("vlanEnd", v["vlan"]) + 1):
+                vlans[vid] = set(v.get("flags", []))
+    return vlans
+
+
+def wait_port_vlans(r1, name, expect, timeout=15):
+    "Wait until the vlans of NAME are exactly EXPECT ({vid: set(flags)})."
+
+    def check():
+        got = port_vlans(r1, name)
+        return None if got == expect else got
+
+    _, result = topotest.run_and_expect(check, None, count=timeout * 2, wait=0.5)
+    return result
+
+
+def port_isolated(r1, name):
+    link_info = link(r1, name) or {}
+    data = link_info.get("linkinfo", {}).get("info_slave_data", {})
+    return bool(data.get("isolated"))
+
+
+def test_bridge_vlans(tgen):
+    "bridge-vlan on/off/untagged, ranges and pvid on a bridge port"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bridge", ""):
+        pytest.skip("kernel lacks bridge support")
+    r1.cmd("ip link add probe1 type bridge vlan_filtering 1")
+    probe = link(r1, "probe1")
+    r1.cmd("ip link del probe1")
+    if probe is None:
+        pytest.skip("kernel lacks bridge vlan filtering")
+
+    conf(r1, "interface br2", "link-type bridge vlan-filtering")
+    assert (
+        wait_link(r1, "br2", {"linkinfo": {"info_data": {"vlan_filtering": 1}}})
+        is None
+    )
+
+    # Configure the vlans first; they must be applied once enslaved.
+    conf(
+        r1,
+        "interface p1",
+        "link-type veth peer p2",
+        "bridge-vlan 1 off",
+        "bridge-vlan 10 on",
+        "bridge-vlan 20 untagged",
+        "bridge-pvid 20",
+        "bridge-vlan 30 to 32 on",
+    )
+    assert wait_link(r1, "p1", {"linkinfo": {"info_kind": "veth"}}) is None
+    assert port_vlans(r1, "p1") == {}
+
+    conf(r1, "interface p1", "master br2")
+    expect = {
+        10: set(),
+        20: {"PVID", "Egress Untagged"},
+        30: set(),
+        31: set(),
+        32: set(),
+    }
+    assert wait_port_vlans(r1, "p1", expect) is None
+
+    # change a mode, remove one vlan
+    conf(r1, "interface p1", "bridge-vlan 10 untagged", "no bridge-vlan 31")
+    expect[10] = {"Egress Untagged"}
+    del expect[31]
+    assert wait_port_vlans(r1, "p1", expect) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " bridge-vlan 10 untagged" in out
+    assert " bridge-pvid 20" in out
+    assert " link-type bridge vlan-filtering" in out
+
+
+def test_bridge_vlan_private(tgen):
+    "A private vlan isolates the port; dropping it clears the isolation"
+    r1 = tgen.gears["r1"]
+    if link(r1, "p1") is None or "master" not in link(r1, "p1"):
+        pytest.skip("bridge vlan setup not available")
+
+    conf(r1, "interface p1", "bridge-vlan 40 private")
+
+    def isolated():
+        return None if port_isolated(r1, "p1") else "not isolated"
+
+    _, res = topotest.run_and_expect(isolated, None, count=30, wait=0.5)
+    assert res is None
+    assert 40 in port_vlans(r1, "p1")
+
+    conf(r1, "interface p1", "no bridge-vlan 40")
+
+    def not_isolated():
+        return None if not port_isolated(r1, "p1") else "still isolated"
+
+    _, res = topotest.run_and_expect(not_isolated, None, count=30, wait=0.5)
+    assert res is None
+    assert 40 not in port_vlans(r1, "p1")
+
+
+def test_bridge_vlans_reapplied(tgen):
+    "VLANs are applied again when the port is re-created"
+    r1 = tgen.gears["r1"]
+    if link(r1, "p1") is None or "master" not in link(r1, "p1"):
+        pytest.skip("bridge vlan setup not available")
+
+    r1.cmd("ip link del p1")
+    assert wait_link(r1, "p1", {"master": "br2"}) is None
+    expect = {
+        10: {"Egress Untagged"},
+        20: {"PVID", "Egress Untagged"},
+        30: set(),
+        32: set(),
+    }
+    assert wait_port_vlans(r1, "p1", expect) is None
+
+    conf(r1, "interface p1", "no link-type", "no master")
+    assert wait_link(r1, "p1", None) is None
+    conf(r1, "interface br2", "no link-type")
+    assert wait_link(r1, "br2", None) is None
+    conf(r1, "no interface p1", "no interface br2")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

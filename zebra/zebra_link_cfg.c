@@ -27,6 +27,13 @@
 
 DEFINE_MTYPE_STATIC(ZEBRA, ZEBRA_LINK_CFG, "Zebra configured link");
 
+/* Desired bridge-port VLAN configuration, allocated only when needed */
+struct zebra_link_vlan_cfg {
+	uint8_t mode[ZEBRA_LINK_VID_MAX + 1]; /* enum zebra_link_vlan_mode */
+	unsigned int count;		      /* vids with a mode */
+	uint16_t pvid;			      /* 0 == none */
+};
+
 struct zebra_link_cfg {
 	/* Desired kernel link */
 	bool has_link;
@@ -39,6 +46,14 @@ struct zebra_link_cfg {
 	bool master_inflight;
 	/* ifindex of the master we last successfully enslaved to, or 0 */
 	ifindex_t master_applied;
+
+	/* Desired bridge-port vlan state and what has been pushed to the kernel */
+	struct zebra_link_vlan_cfg *vl;
+	uint32_t vl_gen;	   /* bumped on every vlan configuration change */
+	uint32_t vl_applied_gen;   /* generation last queued; 0 == nothing applied */
+	ifindex_t vl_applied_bridge; /* bridge it was applied for */
+	bool isolated_set;	   /* we set the port isolated flag */
+	unsigned int brport_inflight;
 };
 
 static struct event *t_link_cfg_kick;
@@ -69,7 +84,8 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	 * will look at it.
 	 */
 	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_inflight ||
-	    cfg->master_inflight)
+	    cfg->master_inflight || cfg->vl || cfg->brport_inflight ||
+	    cfg->isolated_set)
 		return;
 
 	XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
@@ -116,6 +132,85 @@ static bool link_matches_kind(struct interface *ifp, enum zebra_link_kind kind)
 		break;
 	}
 	return false;
+}
+
+static void brport_queue(struct interface *ifp, struct zebra_link_cfg *cfg,
+			 const struct zebra_link_brport_req *req)
+{
+	const char *err = zebra_link_brport_validate(req);
+
+	if (err) {
+		zlog_warn("%s: bridge port request for %s rejected: %s", __func__,
+			  ifp->name, err);
+		return;
+	}
+
+	cfg->brport_inflight++;
+	if (dplane_link_brport_set(ifp, req) != ZEBRA_DPLANE_REQUEST_QUEUED) {
+		cfg->brport_inflight--;
+		zlog_warn("%s: unable to queue bridge port request for %s", __func__,
+			  ifp->name);
+	}
+}
+
+/*
+ * Push the whole desired vlan state to the kernel.  Consecutive VLANs with
+ * the same mode are sent as one range.  Adds are idempotent and update the
+ * flags (tagged/untagged/pvid) of an existing entry.
+ */
+static void brport_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
+			 ifindex_t bridge_ifindex)
+{
+	const struct zebra_link_vlan_cfg *vl = cfg->vl;
+	struct zebra_link_brport_req req;
+	bool any_private = false;
+	unsigned int vid, start;
+	uint8_t mode;
+
+	cfg->vl_applied_gen = cfg->vl_gen;
+	cfg->vl_applied_bridge = bridge_ifindex;
+
+	if (vl) {
+		for (vid = ZEBRA_LINK_VID_MIN; vid <= ZEBRA_LINK_VID_MAX;) {
+			mode = vl->mode[vid];
+			if (mode == ZEBRA_LINK_VLAN_UNSET) {
+				vid++;
+				continue;
+			}
+
+			/* The pvid is always sent on its own (single vid) */
+			start = vid;
+			vid++;
+			if (start != vl->pvid) {
+				while (vid <= ZEBRA_LINK_VID_MAX && vl->mode[vid] == mode &&
+				       vid != vl->pvid)
+					vid++;
+			}
+
+			memset(&req, 0, sizeof(req));
+			req.vid_begin = start;
+			req.vid_end = vid - 1;
+			if (mode == ZEBRA_LINK_VLAN_OFF) {
+				req.type = ZEBRA_LINK_BRPORT_VLAN_DEL;
+			} else {
+				req.type = ZEBRA_LINK_BRPORT_VLAN_ADD;
+				req.untagged = (mode == ZEBRA_LINK_VLAN_UNTAGGED);
+				req.pvid = (start == vl->pvid);
+				if (mode == ZEBRA_LINK_VLAN_PRIVATE)
+					any_private = true;
+			}
+			brport_queue(ifp, cfg, &req);
+		}
+	}
+
+	/* The kernel only has a per-port isolation flag, see zebra_link_vlan_mode */
+	if (any_private || cfg->isolated_set) {
+		memset(&req, 0, sizeof(req));
+		req.type = ZEBRA_LINK_BRPORT_ISOLATED;
+		req.isolated = any_private;
+		brport_queue(ifp, cfg, &req);
+		cfg->isolated_set = any_private;
+	}
 }
 
 /*
@@ -187,6 +282,18 @@ static void link_cfg_realize(struct interface *ifp)
 					  cfg->master, ifp->name);
 			}
 		}
+	}
+
+	/* --- bridge port vlans --- */
+	if ((cfg->vl || cfg->isolated_set) && ifp_is_real(ifp) && !cfg->master_inflight &&
+	    !cfg->brport_inflight) {
+		ifindex_t bridge = zif->brslave_info.bridge_ifindex
+					   ? zif->brslave_info.bridge_ifindex
+					   : cfg->master_applied;
+
+		if (bridge && (cfg->vl_applied_gen != cfg->vl_gen ||
+			       cfg->vl_applied_bridge != bridge))
+			brport_apply(ifp, cfg, bridge);
 	}
 }
 
@@ -312,6 +419,91 @@ void zebra_link_cfg_unset_master(struct interface *ifp)
 	link_cfg_release_if_empty(ifp);
 }
 
+void zebra_link_cfg_set_bridge_vlan(struct interface *ifp, uint16_t vid,
+				    enum zebra_link_vlan_mode mode)
+{
+	struct zebra_link_cfg *cfg;
+
+	if (vid < ZEBRA_LINK_VID_MIN || vid > ZEBRA_LINK_VID_MAX ||
+	    mode == ZEBRA_LINK_VLAN_UNSET)
+		return;
+
+	cfg = link_cfg_get(ifp, true);
+	if (!cfg)
+		return;
+	if (!cfg->vl)
+		cfg->vl = XCALLOC(MTYPE_ZEBRA_LINK_CFG, sizeof(*cfg->vl));
+
+	if (cfg->vl->mode[vid] == ZEBRA_LINK_VLAN_UNSET)
+		cfg->vl->count++;
+	if (cfg->vl->mode[vid] != mode) {
+		cfg->vl->mode[vid] = mode;
+		cfg->vl_gen++;
+	}
+
+	link_cfg_realize(ifp);
+}
+
+static void link_cfg_vl_release_if_empty(struct zebra_link_cfg *cfg)
+{
+	if (cfg->vl && !cfg->vl->count && !cfg->vl->pvid)
+		XFREE(MTYPE_ZEBRA_LINK_CFG, cfg->vl);
+}
+
+void zebra_link_cfg_unset_bridge_vlan(struct interface *ifp, uint16_t vid)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, false);
+	struct zebra_if *zif = ifp->info;
+	struct zebra_link_brport_req req;
+	uint8_t old;
+
+	if (!cfg || !cfg->vl || vid < ZEBRA_LINK_VID_MIN || vid > ZEBRA_LINK_VID_MAX)
+		return;
+	old = cfg->vl->mode[vid];
+	if (old == ZEBRA_LINK_VLAN_UNSET)
+		return;
+
+	/* Take back a membership we added (an explicit "off" is just forgotten) */
+	if (old != ZEBRA_LINK_VLAN_OFF && ifp_is_real(ifp) && cfg->vl_applied_gen &&
+	    zif->brslave_info.bridge_ifindex) {
+		memset(&req, 0, sizeof(req));
+		req.type = ZEBRA_LINK_BRPORT_VLAN_DEL;
+		req.vid_begin = req.vid_end = vid;
+		brport_queue(ifp, cfg, &req);
+	}
+
+	cfg->vl->mode[vid] = ZEBRA_LINK_VLAN_UNSET;
+	cfg->vl->count--;
+	if (cfg->vl->pvid == vid)
+		cfg->vl->pvid = 0;
+	cfg->vl_gen++;
+	link_cfg_vl_release_if_empty(cfg);
+
+	link_cfg_realize(ifp);
+	link_cfg_release_if_empty(ifp);
+}
+
+void zebra_link_cfg_set_bridge_pvid(struct interface *ifp, uint16_t vid)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, vid != 0);
+
+	if (!cfg)
+		return;
+	if (vid == 0 && !cfg->vl)
+		return;
+	if (!cfg->vl)
+		cfg->vl = XCALLOC(MTYPE_ZEBRA_LINK_CFG, sizeof(*cfg->vl));
+
+	if (cfg->vl->pvid != vid) {
+		cfg->vl->pvid = vid;
+		cfg->vl_gen++;
+	}
+	link_cfg_vl_release_if_empty(cfg);
+
+	link_cfg_realize(ifp);
+	link_cfg_release_if_empty(ifp);
+}
+
 const struct zebra_link_params *zebra_link_cfg_get_link(const struct interface *ifp)
 {
 	const struct zebra_if *zif = ifp->info;
@@ -350,6 +542,11 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 		cfg->create_inflight = false;
 		cfg->master_inflight = false;
 		cfg->master_applied = 0;
+		/* The port state went with the interface; re-apply on return */
+		cfg->vl_applied_gen = 0;
+		cfg->vl_applied_bridge = 0;
+		cfg->isolated_set = false;
+		cfg->brport_inflight = 0;
 	}
 
 	/*
@@ -364,8 +561,10 @@ void zebra_link_cfg_if_free(struct interface *ifp)
 {
 	struct zebra_if *zif = ifp->info;
 
-	if (zif && zif->link_cfg)
+	if (zif && zif->link_cfg) {
+		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->vl);
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
+	}
 }
 
 /* ---- dataplane results ---- */
@@ -397,9 +596,26 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 			if (ok)
 				cfg->master_applied = dplane_ctx_link_get_master_ifindex(ctx);
 		}
+		/* VLAN settings wait for the enslavement */
+		if (ok)
+			link_cfg_kick();
 		if (!ok)
 			zlog_warn("Failed to set master of %s (master ifindex %d)", name,
 				  dplane_ctx_link_get_master_ifindex(ctx));
+	} else if (op == DPLANE_OP_LINK_BRPORT_SET) {
+		if (cfg && cfg->brport_inflight)
+			cfg->brport_inflight--;
+		/* Configuration may have changed while this was in flight */
+		if (cfg && !cfg->brport_inflight)
+			link_cfg_kick();
+		/*
+		 * A failure is not retried by itself (that would loop on a
+		 * permanent error, e.g. a kernel without bridge VLAN support):
+		 * the settings are tried again when the configuration changes
+		 * or the interface or its master is re-created.
+		 */
+		if (!ok)
+			zlog_warn("Failed to apply bridge port setting on %s", name);
 	} else if (op == DPLANE_OP_LINK_DELETE) {
 		if (!ok)
 			zlog_warn("Failed to delete link %s in the kernel", name);

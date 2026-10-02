@@ -227,9 +227,12 @@ Standard Commands
 
    In FRR, link-detect is on by default.
 
-.. clicmd:: link-type bridge
+.. clicmd:: link-type bridge [vlan-filtering]
 
    Have zebra create this interface as a Linux bridge using netlink.
+   ``vlan-filtering`` enables VLAN filtering on the bridge, which is required
+   for the ``bridge-vlan`` settings of its ports to have any effect. Changing
+   it re-creates the bridge.
 
 .. clicmd:: link-type veth peer IFNAME
 
@@ -263,6 +266,37 @@ Standard Commands
 
    Enslave this interface to ``IFNAME`` (for example a bridge). Works for any
    interface, whether or not zebra created it. ``no master`` releases it.
+
+.. clicmd:: bridge-vlan (1-4094) [to (1-4094)] <on|off|untagged|private>
+
+   Configure the VLAN membership of this interface when it is a bridge port
+   (see ``master``). Applied once the interface is enslaved to a bridge and
+   applied again if the interface or the bridge is re-created. May be given
+   for several VLANs; a range expands to one setting per VLAN.
+
+   ``on``
+      Tagged member of the VLAN.
+
+   ``untagged``
+      Member of the VLAN; frames leave the port untagged.
+
+   ``private``
+      Tagged member of the VLAN and the port is isolated: it can only
+      communicate with non-isolated ports. The kernel only has a per-port
+      isolation flag, so any ``private`` VLAN isolates the whole port; the
+      flag is cleared again when the last ``private`` VLAN is removed.
+
+   ``off``
+      Not a member. Removes the VLAN if present, for example the default
+      VLAN 1 that the kernel adds to every new bridge port.
+
+   ``no bridge-vlan`` removes the setting, and a membership zebra added.
+
+.. clicmd:: bridge-pvid (1-4094)
+
+   Native VLAN of this interface as a bridge port: untagged frames it
+   receives are classified into this VLAN. The VLAN should also be a member
+   (``on``, ``untagged`` or ``private``).
 
 .. _link-parameters-commands:
 

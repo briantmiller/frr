@@ -44,8 +44,8 @@ enum zebra_link_vlan_encap {
 };
 
 struct zebra_link_bridge {
-	/* No parameters yet; reserved for vlan-filtering, stp, ageing, ... */
-	uint8_t reserved;
+	/* VLAN filtering (IFLA_BR_VLAN_FILTERING); reserved for stp, ageing, ... */
+	bool vlan_filtering;
 };
 
 struct zebra_link_veth {
@@ -77,6 +77,61 @@ struct zebra_link_gre {
 
 	bool has_tos;
 	uint8_t tos;
+};
+
+/*
+ * Per-VLAN configuration of an interface that is a bridge port.
+ *
+ *  ON       tagged member of the VLAN
+ *  UNTAGGED member of the VLAN, frames leave the port untagged
+ *  PRIVATE  tagged member; additionally the port is isolated (the kernel's
+ *           per-port IFLA_BRPORT_ISOLATED), so it only talks to
+ *           non-isolated ports.  The kernel has no per-VLAN isolation: any
+ *           PRIVATE VLAN isolates the whole port.
+ *  OFF      not a member (an explicit removal, e.g. of the default VLAN 1)
+ */
+enum zebra_link_vlan_mode {
+	ZEBRA_LINK_VLAN_UNSET = 0,
+	ZEBRA_LINK_VLAN_OFF,
+	ZEBRA_LINK_VLAN_ON,
+	ZEBRA_LINK_VLAN_UNTAGGED,
+	ZEBRA_LINK_VLAN_PRIVATE,
+};
+
+#define ZEBRA_LINK_VID_MIN 1
+#define ZEBRA_LINK_VID_MAX 4094
+
+static inline const char *zebra_link_vlan_mode2str(enum zebra_link_vlan_mode m)
+{
+	switch (m) {
+	case ZEBRA_LINK_VLAN_OFF:
+		return "off";
+	case ZEBRA_LINK_VLAN_ON:
+		return "on";
+	case ZEBRA_LINK_VLAN_UNTAGGED:
+		return "untagged";
+	case ZEBRA_LINK_VLAN_PRIVATE:
+		return "private";
+	case ZEBRA_LINK_VLAN_UNSET:
+		break;
+	}
+	return "unset";
+}
+
+/* One bridge-port request handed to the dataplane */
+enum zebra_link_brport_type {
+	ZEBRA_LINK_BRPORT_VLAN_ADD, /* [vid_begin, vid_end] with 'untagged'/'pvid' */
+	ZEBRA_LINK_BRPORT_VLAN_DEL, /* [vid_begin, vid_end] */
+	ZEBRA_LINK_BRPORT_ISOLATED, /* set the port isolated flag to 'isolated' */
+};
+
+struct zebra_link_brport_req {
+	enum zebra_link_brport_type type;
+	uint16_t vid_begin;
+	uint16_t vid_end;
+	bool untagged;
+	bool pvid; /* single vid only */
+	bool isolated;
 };
 
 /*

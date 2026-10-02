@@ -120,6 +120,12 @@ int lib_interface_zebra_bandwidth_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_bandwidth_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_master_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args);
+int lib_interface_zebra_bridge_vlan_create(struct nb_cb_create_args *args);
+int lib_interface_zebra_bridge_vlan_destroy(struct nb_cb_destroy_args *args);
+void lib_interface_zebra_bridge_vlan_apply_finish(struct nb_cb_apply_finish_args *args);
+int lib_interface_zebra_bridge_vlan_mode_modify(struct nb_cb_modify_args *args);
+int lib_interface_zebra_bridge_pvid_modify(struct nb_cb_modify_args *args);
+int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args);
 /*
  * link-type/<kind>: all kinds share these callbacks.  The real work is done
  * in apply_finish, which looks at the complete container once per transaction.
