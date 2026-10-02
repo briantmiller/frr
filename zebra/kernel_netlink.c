@@ -911,7 +911,14 @@ static int netlink_parse_error(const struct nlsock *nl, struct nlmsghdr *h,
 	      (-errnum == ENOENT || -errnum == ESRCH)) ||
 	     ((msg_type == RTM_NEWTUNNEL || msg_type == RTM_DELTUNNEL ||
 	       msg_type == RTM_GETTUNNEL) &&
-	      (-errnum == EOPNOTSUPP)))) {
+	      (-errnum == EOPNOTSUPP)) ||
+	     /*
+	      * Link create is requested with NLM_F_EXCL so an existing link is
+	      * never modified; the link already being there is the desired
+	      * state.  A link that is already gone on delete is likewise fine.
+	      */
+	     (msg_type == RTM_NEWLINK && -errnum == EEXIST) ||
+	     (msg_type == RTM_DELLINK && -errnum == ENODEV))) {
 		if (IS_ZEBRA_DEBUG_KERNEL)
 			zlog_debug("%s: error: %s type=%s(%u), seq=%u, pid=%u", nl->name,
 				   safe_strerror(-errnum),
@@ -1532,6 +1539,11 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 
 	case DPLANE_OP_GRE_SET:
 		return netlink_put_gre_set_msg(bth, ctx);
+
+	case DPLANE_OP_LINK_CREATE:
+	case DPLANE_OP_LINK_DELETE:
+	case DPLANE_OP_LINK_MASTER_SET:
+		return netlink_put_link_msg(bth, ctx);
 
 	case DPLANE_OP_INTF_ADDR_ADD:
 	case DPLANE_OP_INTF_ADDR_DEL:
