@@ -260,7 +260,8 @@ static bool acl_cisco_is_dup(const struct lyd_node *dnode)
 		yang_dnode_get_parent(dnode, "entry");
 	struct acl_dup_args ada = {};
 	int idx = 0, arg_idx = 0;
-	static const char *cisco_entries[] = {
+	const char *const *cisco_entries;
+	static const char *const cisco_entries_ipv4[] = {
 		"./host",
 		"./network/address",
 		"./network/mask",
@@ -271,15 +272,35 @@ static bool acl_cisco_is_dup(const struct lyd_node *dnode)
 		"./destination-any",
 		NULL
 	};
+	static const char *const cisco_entries_ipv6[] = {
+		"./ipv6-host",
+		"./ipv6-network/address",
+		"./ipv6-network/mask",
+		"./ipv6-source-any",
+		"./ipv6-destination-host",
+		"./ipv6-destination-network/address",
+		"./ipv6-destination-network/mask",
+		"./ipv6-destination-any",
+		NULL
+	};
 
-	/* Initialize. */
-	ada.ada_type = "ipv4";
+	/*
+	 * Cisco style entries exist in IPv4 and IPv6 access-lists: compare
+	 * against the list this entry belongs to, using that family's leafs.
+	 * Checking an IPv6 entry against the IPv4 list of the same name
+	 * reported bogus duplicates.
+	 */
+	ada.ada_type = yang_dnode_get_string(entry_dnode, "../type");
+	if (strcmp(ada.ada_type, "ipv6") == 0)
+		cisco_entries = cisco_entries_ipv6;
+	else
+		cisco_entries = cisco_entries_ipv4;
 	ada.ada_name = yang_dnode_get_string(entry_dnode, "../name");
 	ada.ada_action = yang_dnode_get_string(entry_dnode, "action");
 	ada.ada_entry_dnode = entry_dnode;
 
 	/* Load all values/XPaths. */
-	while (cisco_entries[idx] != NULL) {
+	while (cisco_entries[idx] != NULL && arg_idx < ADA_MAX_VALUES) {
 		if (!yang_dnode_exists(entry_dnode, cisco_entries[idx])) {
 			idx++;
 			continue;
