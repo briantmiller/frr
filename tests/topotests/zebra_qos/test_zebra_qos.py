@@ -263,6 +263,40 @@ def send_udp(router, src, dst, tos, count):
     router.cmd("python3 -c '{}' {} {} {} {}".format(SENDER, src, dst, hex(tos), count))
 
 
+# Sends as fast as the qdisc lets it for a number of seconds.
+TIMED_SENDER = """
+import socket, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, int(sys.argv[3], 0))
+s.bind((sys.argv[1], 0))
+end = time.time() + float(sys.argv[4])
+while time.time() < end:
+    try:
+        s.sendto(b"x" * 1400, (sys.argv[2], 9))
+    except OSError:
+        time.sleep(0.001)
+"""
+
+
+def start_udp_stream(router, src, dst, tos, seconds):
+    "Start a background UDP stream (see TIMED_SENDER), return its pid"
+    out = router.cmd(
+        "python3 -c '{}' {} {} {} {} >/dev/null 2>&1 & echo $!".format(
+            TIMED_SENDER, src, dst, hex(tos), seconds
+        )
+    )
+    return out.strip().splitlines()[-1]
+
+
+def stop_udp_stream(router, pid):
+    router.cmd("kill {} 2>/dev/null".format(pid))
+
+
+def show_qos_json(router, intf=INTF):
+    out = router.vtysh_cmd("show qos interface {} json".format(intf), isjson=True)
+    return out.get(intf, {})
+
+
 def wait_for(func, what, count=30, wait=1):
     result, out = topotest.run_and_expect(func, None, count=count, wait=wait)
     assert result, "{}: {}".format(what, out)
@@ -328,6 +362,74 @@ def test_qos_show_commands(tgen):
     pmap = running[running.index("policy-map PARENT") :]
     order = [pmap.index(" class " + c + "\n") for c in ("VOICE", "MGMT", "WEB")]
     assert order == sorted(order), "class order changed:\n{}".format(pmap)
+
+
+def test_qos_show_statistics(tgen):
+    "show qos interface reports per class statistics and utilization"
+
+    r1 = tgen.gears["r1"]
+
+    # Unclassified traffic goes to PARENT/class-default (beef:7: rate 2mbps,
+    # ceiling 15mbps) through the HTB default class, so this works without
+    # flower support.  Offer more than the ceiling for a while.
+    pid = start_udp_stream(r1, "192.0.2.1", "192.0.2.2", TOS["default"], 12)
+
+    def _utilization():
+        data = show_qos_json(r1)
+        if not data.get("installed") or not data.get("statistics"):
+            return "no statistics: {}".format(data)
+        classes = {c["classId"]: c for c in data["classes"]}
+        default = classes["beef:7"].get("stats", {})
+        voice = classes["beef:2"].get("stats", {})
+        root = classes["beef:1"].get("stats", {})
+        if not default.get("rateValid") or not root.get("rateValid"):
+            return "no rate estimate: {}".format(classes)
+        # the estimator averages over a few seconds: wait until it shows
+        # the class running close to its ceiling
+        if not 70 <= default.get("ceilUtilization", 0) <= 110:
+            return "class-default ceiling utilization {}%: {}".format(
+                default.get("ceilUtilization"), default
+            )
+        # 15mbps is far above the 2mbps guaranteed rate: borrowing
+        if default.get("rateUtilization", 0) < 300:
+            return "class-default rate utilization {}%".format(
+                default.get("rateUtilization")
+            )
+        if default.get("packets", 0) == 0 or default.get("bytes", 0) == 0:
+            return "no packets counted: {}".format(default)
+        if voice.get("currentRate", 0) > 100000:
+            return "unexpected VOICE traffic: {}".format(voice)
+        if root.get("currentRate", 0) < default["currentRate"] * 0.9:
+            return "root rate {} below class-default {}".format(
+                root.get("currentRate"), default["currentRate"]
+            )
+        return None
+
+    try:
+        wait_for(_utilization, "class statistics/utilization", count=15)
+
+        out = r1.vtysh_cmd("show qos interface " + INTF)
+        for needle in ("Current", "%Rate", "%Ceil", "Drops", "Backlog"):
+            assert needle in out, "missing {!r} in:\n{}".format(needle, out)
+        line = [
+            l
+            for l in out.splitlines()
+            if l.strip().startswith("beef:7 ") and "Mbps" in l and "%" in l
+        ]
+        assert line, "no statistics line for beef:7:\n{}".format(out)
+        logger.info("show qos interface:\n%s", out)
+    finally:
+        stop_udp_stream(r1, pid)
+
+    # once the stream stops the estimate decays again
+    def _idle():
+        default = {c["classId"]: c for c in show_qos_json(r1)["classes"]}["beef:7"]
+        rate = default.get("stats", {}).get("currentRate", 0)
+        if rate > 7500000:
+            return "class-default still at {} bps".format(rate)
+        return None
+
+    wait_for(_idle, "rate estimate did not decay", count=20)
 
 
 def test_qos_filters_installed(tgen):

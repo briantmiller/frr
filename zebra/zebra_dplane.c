@@ -408,6 +408,7 @@ struct dplane_tc_class_info {
 	uint32_t prio;
 	uint32_t quantum;
 	uint32_t mtu;
+	bool rate_est;
 };
 
 struct dplane_tc_filter_info {
@@ -2532,6 +2533,13 @@ uint32_t dplane_ctx_tc_class_get_mtu(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.tc_class.mtu;
 }
 
+bool dplane_ctx_tc_class_get_rate_est(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_class.rate_est;
+}
+
 /*
  * Set the nexthops associated with a context: note that processing code
  * may well expect that nexthops are in canonical (sorted) order, so we
@@ -4436,6 +4444,7 @@ static int dplane_ctx_tc_class_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_class.prio = class->class.u.htb.prio;
 	ctx->u.tc_class.quantum = class->class.u.htb.quantum;
 	ctx->u.tc_class.mtu = class->class.u.htb.mtu;
+	ctx->u.tc_class.rate_est = class->class.u.htb.rate_est;
 
 	zns = zebra_ns_lookup(NS_DEFAULT);
 

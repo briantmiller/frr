@@ -45,6 +45,7 @@
 #include "command.h"
 #include "filter.h"
 #include "if.h"
+#include "json.h"
 #include "linklist.h"
 #include "memory.h"
 #include "prefix.h"
@@ -934,6 +935,8 @@ static void qos_tc_class_fill(struct zebra_tc_class *zc, const struct qos_hw *hw
 	zc->class.u.htb.ceil = hc->ceil / 8;
 	zc->class.u.htb.prio = hc->prio;
 	zc->class.u.htb.mtu = hw->mtu;
+	/* lets "show qos interface" report the current rate per class */
+	zc->class.u.htb.rate_est = true;
 }
 
 static void qos_hw_install(const struct qos_hw *hw)
@@ -1156,40 +1159,114 @@ static const char *qos_bps2str(uint64_t bps, char *buf, size_t len)
 	return buf;
 }
 
-static void qos_show_interface(struct vty *vty, struct interface *ifp)
+/* Measured rates are rarely round numbers: always scale and keep 2 digits */
+static const char *qos_measured2str(uint64_t bps, char *buf, size_t len)
+{
+	if (bps >= 1000000000ULL)
+		snprintf(buf, len, "%.2fGbps", bps / 1e9);
+	else if (bps >= 1000000ULL)
+		snprintf(buf, len, "%.2fMbps", bps / 1e6);
+	else if (bps >= 1000ULL)
+		snprintf(buf, len, "%.2fkbps", bps / 1e3);
+	else
+		snprintf(buf, len, "%" PRIu64 "bps", bps);
+
+	return buf;
+}
+
+/* Kernel statistics of the classes of one interface, indexed like hw->classes */
+struct qos_show_stats {
+	const struct qos_hw *hw;
+	struct zebra_tc_class_stats *stats;
+	bool *valid;
+};
+
+static void qos_show_stats_cb(const struct zebra_tc_class_stats *st, void *arg)
+{
+	struct qos_show_stats *ss = arg;
+
+	if ((st->handle & 0xffff0000u) != TC_QDISC_MAJOR_ZEBRA)
+		return;
+
+	for (unsigned int i = 0; i < ss->hw->nclasses; i++) {
+		if (ss->hw->classes[i].minor == (st->handle & 0x0000ffffu)) {
+			ss->stats[i] = *st;
+			ss->valid[i] = true;
+			return;
+		}
+	}
+}
+
+static unsigned int qos_percent(uint64_t part, uint64_t whole)
+{
+	return whole ? (unsigned int)((part * 100 + whole / 2) / whole) : 0;
+}
+
+static void qos_show_interface(struct vty *vty, struct interface *ifp, json_object *json)
 {
 	struct zebra_if *zif = ifp->info;
 	struct zebra_if_qos *qos = zif ? zif->qos : NULL;
 	const struct qos_hw *hw;
-	char buf1[32], buf2[32], parent[16];
+	struct qos_show_stats ss = {};
+	json_object *json_if = NULL, *json_classes = NULL;
+	char buf1[32], buf2[32], buf3[32], parent[16], defcls[16];
+	bool have_stats = false;
+	uint64_t bw;
 	unsigned int i;
 
 	if (!qos || (!qos->service_policy[0] && !qos->bandwidth))
 		return;
 
-	vty_out(vty, "Interface %s\n", ifp->name);
-	if (qos->bandwidth)
-		vty_out(vty, "  QoS bandwidth: %s\n",
-			qos_bps2str(qos->bandwidth, buf1, sizeof(buf1)));
-	else
-		vty_out(vty, "  QoS bandwidth: %s (derived)\n",
-			qos_bps2str(qos_if_bandwidth(ifp, qos), buf1, sizeof(buf1)));
-	vty_out(vty, "  Service policy (output): %s\n",
-		qos->service_policy[0] ? qos->service_policy : "none");
-
+	bw = qos->bandwidth ? qos->bandwidth : qos_if_bandwidth(ifp, qos);
 	hw = qos->installed;
-	if (!hw) {
-		if (qos->service_policy[0])
-			vty_out(vty, "  State: not installed%s%s%s\n", qos->reason ? " (" : "",
-				qos->reason ? qos->reason : "", qos->reason ? ")" : "");
-		vty_out(vty, "\n");
-		return;
+
+	if (hw) {
+		ss.hw = hw;
+		ss.stats = XCALLOC(MTYPE_TMP, hw->nclasses * sizeof(*ss.stats));
+		ss.valid = XCALLOC(MTYPE_TMP, hw->nclasses * sizeof(*ss.valid));
+		have_stats = kernel_tc_class_stats(hw->ifindex, qos_show_stats_cb, &ss) == 0;
+		snprintf(defcls, sizeof(defcls), "%x:%x", TC_QDISC_MAJOR_ZEBRA >> 16, hw->defcls);
 	}
 
-	vty_out(vty, "  State: installed, %u classes, %u filters, default class %x:%x\n",
-		hw->nclasses, hw->nfilters, TC_QDISC_MAJOR_ZEBRA >> 16, hw->defcls);
-	vty_out(vty, "  %-10s %-10s %-12s %-12s %-4s %-7s %s\n", "Class", "Parent", "Rate", "Ceil",
-		"Prio", "Queue", "Name");
+	if (json) {
+		json_if = json_object_new_object();
+		json_object_object_add(json, ifp->name, json_if);
+		json_object_int_add(json_if, "qosBandwidth", bw);
+		json_object_boolean_add(json_if, "qosBandwidthDerived", !qos->bandwidth);
+		if (qos->service_policy[0])
+			json_object_string_add(json_if, "servicePolicyOutput", qos->service_policy);
+		json_object_boolean_add(json_if, "installed", !!hw);
+		if (!hw) {
+			if (qos->reason)
+				json_object_string_add(json_if, "reason", qos->reason);
+			return;
+		}
+		json_object_int_add(json_if, "filters", hw->nfilters);
+		json_object_string_add(json_if, "defaultClass", defcls);
+		json_object_boolean_add(json_if, "statistics", have_stats);
+		json_classes = json_object_new_array();
+		json_object_object_add(json_if, "classes", json_classes);
+	} else {
+		vty_out(vty, "Interface %s\n", ifp->name);
+		vty_out(vty, "  QoS bandwidth: %s%s\n", qos_bps2str(bw, buf1, sizeof(buf1)),
+			qos->bandwidth ? "" : " (derived)");
+		vty_out(vty, "  Service policy (output): %s\n",
+			qos->service_policy[0] ? qos->service_policy : "none");
+
+		if (!hw) {
+			if (qos->service_policy[0])
+				vty_out(vty, "  State: not installed%s%s%s\n",
+					qos->reason ? " (" : "", qos->reason ? qos->reason : "",
+					qos->reason ? ")" : "");
+			vty_out(vty, "\n");
+			return;
+		}
+
+		vty_out(vty, "  State: installed, %u classes, %u filters, default class %s\n",
+			hw->nclasses, hw->nfilters, defcls);
+		vty_out(vty, "  %-10s %-10s %-12s %-12s %-4s %-7s %s\n", "Class", "Parent", "Rate",
+			"Ceil", "Prio", "Queue", "Name");
+	}
 
 	for (i = 0; i < hw->nclasses; i++) {
 		const struct qos_hw_class *hc = &hw->classes[i];
@@ -1201,6 +1278,45 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp)
 				 hc->parent);
 		else
 			snprintf(parent, sizeof(parent), "root");
+
+		if (json) {
+			json_object *jc = json_object_new_object();
+
+			json_object_array_add(json_classes, jc);
+			json_object_string_add(jc, "classId", classid);
+			json_object_string_add(jc, "parent", parent);
+			json_object_string_add(jc, "name", hc->name);
+			json_object_boolean_add(jc, "leaf", hc->leaf);
+			json_object_int_add(jc, "rate", hc->rate);
+			json_object_int_add(jc, "ceil", hc->ceil);
+			json_object_int_add(jc, "priority", hc->prio);
+			if (hc->queue_limit)
+				json_object_int_add(jc, "queueLimit", hc->queue_limit);
+
+			if (ss.valid && ss.valid[i]) {
+				const struct zebra_tc_class_stats *st = &ss.stats[i];
+				json_object *js = json_object_new_object();
+
+				json_object_object_add(jc, "stats", js);
+				json_object_int_add(js, "bytes", st->bytes);
+				json_object_int_add(js, "packets", st->packets);
+				json_object_int_add(js, "drops", st->drops);
+				json_object_int_add(js, "overlimits", st->overlimits);
+				json_object_int_add(js, "backlogBytes", st->backlog);
+				json_object_int_add(js, "backlogPackets", st->qlen);
+				json_object_boolean_add(js, "rateValid", st->rate_valid);
+				if (st->rate_valid) {
+					json_object_int_add(js, "currentRate", st->bps);
+					json_object_int_add(js, "currentPps", st->pps);
+					json_object_int_add(js, "rateUtilization",
+							    qos_percent(st->bps, hc->rate));
+					json_object_int_add(js, "ceilUtilization",
+							    qos_percent(st->bps, hc->ceil));
+				}
+			}
+			continue;
+		}
+
 		if (hc->queue_limit)
 			snprintf(queue, sizeof(queue), "%u", hc->queue_limit);
 		else
@@ -1211,27 +1327,88 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp)
 			qos_bps2str(hc->ceil, buf2, sizeof(buf2)), hc->prio, queue, hc->name,
 			hc->leaf ? "" : " (parent)");
 	}
-	vty_out(vty, "\n");
+
+	if (!json) {
+		vty_out(vty, "\n");
+		if (!have_stats) {
+			vty_out(vty, "  Statistics: not available\n\n");
+		} else {
+			/*
+			 * Current rate is the kernel's rate estimator (1s
+			 * interval, ~4s average).  %Rate is the share of the
+			 * guaranteed rate in use (above 100%% the class is
+			 * borrowing), %Ceil the share of its maximum.
+			 */
+			vty_out(vty, "  %-10s %-12s %-9s %-6s %-6s %-12s %-14s %-9s %-11s %s\n",
+				"Class", "Current", "Pps", "%Rate", "%Ceil", "Packets", "Bytes",
+				"Drops", "Backlog", "Name");
+
+			for (i = 0; i < hw->nclasses; i++) {
+				const struct qos_hw_class *hc = &hw->classes[i];
+				const struct zebra_tc_class_stats *st = &ss.stats[i];
+				char classid[16], pct_rate[8], pct_ceil[8], pps[16], backlog[24];
+
+				snprintf(classid, sizeof(classid), "%x:%x",
+					 TC_QDISC_MAJOR_ZEBRA >> 16, hc->minor);
+
+				if (!ss.valid[i]) {
+					vty_out(vty, "  %-10s %s\n", classid, "(no statistics)");
+					continue;
+				}
+
+				if (st->rate_valid) {
+					qos_measured2str(st->bps, buf3, sizeof(buf3));
+					snprintf(pps, sizeof(pps), "%" PRIu64, st->pps);
+					snprintf(pct_rate, sizeof(pct_rate), "%u%%",
+						 qos_percent(st->bps, hc->rate));
+					snprintf(pct_ceil, sizeof(pct_ceil), "%u%%",
+						 qos_percent(st->bps, hc->ceil));
+				} else {
+					snprintf(buf3, sizeof(buf3), "-");
+					snprintf(pps, sizeof(pps), "-");
+					snprintf(pct_rate, sizeof(pct_rate), "-");
+					snprintf(pct_ceil, sizeof(pct_ceil), "-");
+				}
+				snprintf(backlog, sizeof(backlog), "%ub/%up", st->backlog,
+					 st->qlen);
+
+				vty_out(vty,
+					"  %-10s %-12s %-9s %-6s %-6s %-12" PRIu64 " %-14" PRIu64
+					" %-9u %-11s %s\n",
+					classid, buf3, pps, pct_rate, pct_ceil, st->packets,
+					st->bytes, st->drops, backlog, hc->name);
+			}
+			vty_out(vty, "\n");
+		}
+	}
+
+	XFREE(MTYPE_TMP, ss.stats);
+	XFREE(MTYPE_TMP, ss.valid);
 }
 
 DEFPY (show_qos_interface,
        show_qos_interface_cmd,
-       "show qos interface [IFNAME$ifname]",
+       "show qos interface [IFNAME$ifname] [json$json]",
        SHOW_STR
        "Quality of Service\n"
        INTERFACE_STR
-       "Interface name\n")
+       "Interface name\n"
+       JSON_STR)
 {
 	struct vrf *vrf;
 	struct interface *ifp;
+	json_object *json_out = json ? json_object_new_object() : NULL;
 
 	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
 		FOR_ALL_INTERFACES (vrf, ifp) {
 			if (ifname && strcmp(ifname, ifp->name))
 				continue;
-			qos_show_interface(vty, ifp);
+			qos_show_interface(vty, ifp, json_out);
 		}
 	}
+
+	if (json_out)
+		vty_json(vty, json_out);
 
 	return CMD_SUCCESS;
 }

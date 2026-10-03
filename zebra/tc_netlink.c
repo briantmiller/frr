@@ -13,6 +13,7 @@
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
 #include <linux/tc_act/tc_gact.h>
+#include <linux/gen_stats.h>
 #include <netinet/if_ether.h>
 #include <sys/socket.h>
 
@@ -44,6 +45,14 @@
 #define TC_HTB_QUANTUM_MAX (200000)
 /* default rate2quantum of the zebra HTB qdisc */
 #define TC_HTB_R2Q (10)
+
+/*
+ * Rate estimator parameters, as iproute2 computes them for "est 1sec 4sec":
+ * interval is log2(interval / 250ms) - 2, ewma_log gives a time constant
+ * of about 4 seconds.
+ */
+#define TC_EST_INTERVAL_1SEC (0)
+#define TC_EST_EWMA_LOG_4SEC (2)
 
 static uint32_t tc_get_freq(void)
 {
@@ -352,6 +361,20 @@ static ssize_t netlink_tclass_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 		if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
 			return 0;
+
+		if (dplane_ctx_tc_class_get_rate_est(ctx)) {
+			/*
+			 * Rate estimator ("est 1sec 4sec"): HTB classes only
+			 * report a current rate when one is attached.
+			 */
+			struct tc_estimator est = {
+				.interval = TC_EST_INTERVAL_1SEC,
+				.ewma_log = TC_EST_EWMA_LOG_4SEC,
+			};
+
+			if (!nl_attr_put(&req->n, datalen, TCA_RATE, &est, sizeof(est)))
+				return 0;
+		}
 
 		nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
 		if (!nest)
@@ -943,6 +966,141 @@ int netlink_tfilter_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void 
 	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
 
 	return 0;
+}
+
+/*
+ * Synchronously dump the TC classes of one interface and hand their
+ * statistics to @cb.  Used by show commands, which need an answer right
+ * away, so this does not go through the dataplane thread; it uses a
+ * private, short lived socket in zebra's own (default) namespace.
+ */
+static void tc_class_stats_parse(struct nlmsghdr *h, ifindex_t ifindex,
+				 void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+				 void *arg)
+{
+	struct rtattr *tb[TCA_MAX + 1];
+	struct rtattr *st[TCA_STATS_MAX + 1];
+	struct zebra_tc_class_stats stats = {};
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWTCLASS || len < 0 || tcm->tcm_ifindex != ifindex)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+	if (!tb[TCA_STATS2])
+		return;
+
+	netlink_parse_rtattr_nested(st, TCA_STATS_MAX, tb[TCA_STATS2]);
+
+	stats.handle = tcm->tcm_handle;
+	stats.parent = tcm->tcm_parent;
+
+	if (st[TCA_STATS_BASIC] &&
+	    RTA_PAYLOAD(st[TCA_STATS_BASIC]) >= sizeof(struct gnet_stats_basic)) {
+		struct gnet_stats_basic basic;
+
+		memcpy(&basic, RTA_DATA(st[TCA_STATS_BASIC]), sizeof(basic));
+		stats.bytes = basic.bytes;
+		stats.packets = basic.packets;
+	}
+	if (st[TCA_STATS_PKT64] && RTA_PAYLOAD(st[TCA_STATS_PKT64]) >= sizeof(uint64_t))
+		memcpy(&stats.packets, RTA_DATA(st[TCA_STATS_PKT64]), sizeof(uint64_t));
+
+	if (st[TCA_STATS_RATE_EST64] &&
+	    RTA_PAYLOAD(st[TCA_STATS_RATE_EST64]) >= sizeof(struct gnet_stats_rate_est64)) {
+		struct gnet_stats_rate_est64 est;
+
+		memcpy(&est, RTA_DATA(st[TCA_STATS_RATE_EST64]), sizeof(est));
+		stats.rate_valid = true;
+		stats.bps = est.bps * 8;
+		stats.pps = est.pps;
+	} else if (st[TCA_STATS_RATE_EST] &&
+		   RTA_PAYLOAD(st[TCA_STATS_RATE_EST]) >= sizeof(struct gnet_stats_rate_est)) {
+		struct gnet_stats_rate_est est;
+
+		memcpy(&est, RTA_DATA(st[TCA_STATS_RATE_EST]), sizeof(est));
+		stats.rate_valid = true;
+		stats.bps = (uint64_t)est.bps * 8;
+		stats.pps = est.pps;
+	}
+
+	if (st[TCA_STATS_QUEUE] &&
+	    RTA_PAYLOAD(st[TCA_STATS_QUEUE]) >= sizeof(struct gnet_stats_queue)) {
+		struct gnet_stats_queue q;
+
+		memcpy(&q, RTA_DATA(st[TCA_STATS_QUEUE]), sizeof(q));
+		stats.qlen = q.qlen;
+		stats.backlog = q.backlog;
+		stats.drops = q.drops;
+		stats.overlimits = q.overlimits;
+	}
+
+	cb(&stats, arg);
+}
+
+int kernel_tc_class_stats(ifindex_t ifindex,
+			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+			  void *arg)
+{
+	struct {
+		struct nlmsghdr n;
+		struct tcmsg t;
+	} req = {};
+	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
+	struct timeval tv = { .tv_sec = 2 };
+	uint32_t seq = (uint32_t)time(NULL);
+	char *buf;
+	bool done = false;
+	int sock, ret = -1;
+
+	sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (sock < 0)
+		return -1;
+
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+	req.n.nlmsg_type = RTM_GETTCLASS;
+	req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	req.n.nlmsg_seq = seq;
+	req.t.tcm_family = AF_UNSPEC;
+	req.t.tcm_ifindex = ifindex;
+
+	if (sendto(sock, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&snl, sizeof(snl)) < 0)
+		goto out;
+
+	buf = XMALLOC(MTYPE_TMP, NL_RCV_PKT_BUF_SIZE);
+
+	while (!done) {
+		ssize_t n = recv(sock, buf, NL_RCV_PKT_BUF_SIZE, 0);
+		struct nlmsghdr *h;
+		unsigned int len;
+
+		if (n <= 0)
+			break;
+
+		len = (unsigned int)n;
+		for (h = (struct nlmsghdr *)buf; NLMSG_OK(h, len); h = NLMSG_NEXT(h, len)) {
+			if (h->nlmsg_seq != seq)
+				continue;
+			if (h->nlmsg_type == NLMSG_DONE) {
+				done = true;
+				ret = 0;
+				break;
+			}
+			if (h->nlmsg_type == NLMSG_ERROR) {
+				done = true;
+				break;
+			}
+			tc_class_stats_parse(h, ifindex, cb, arg);
+		}
+	}
+
+	XFREE(MTYPE_TMP, buf);
+out:
+	close(sock);
+	return ret;
 }
 
 void kernel_read_tc_qdisc(struct zebra_dplane_ctx *ctx)
