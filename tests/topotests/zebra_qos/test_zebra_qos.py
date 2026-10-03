@@ -735,6 +735,137 @@ def test_qos_undefined_policy(tgen):
     )
 
 
+# Extended access-list: source and/or destination, IPv4 and IPv6 entries in
+# lists of the same name.
+EXT_ACL_CONFIG = """
+configure terminal
+ access-list EXT seq 5 deny ip host 172.16.0.1 host 192.0.2.86
+ access-list EXT seq 10 permit ip 172.16.0.0 0.0.0.255 192.0.2.84 0.0.0.3
+ access-list EXT seq 15 permit ip any host 192.0.2.90
+ access-list EXT seq 20 permit ip 172.16.0.1 0.0.255.0 host 192.0.2.91
+ ipv6 access-list EXT seq 5 permit ipv6 host 2001:db8:1::1 2001:db8:2:: ::ffff:ffff:ffff:ffff
+ ipv6 access-list EXT seq 10 deny ipv6 any host 2001:db8:3::1
+ class-map match-any EXT
+  match access-group name EXT
+ exit
+ policy-map PARENT
+  class EXT
+   bandwidth percent 10
+  exit
+"""
+
+EXT_ACL_LINES = [
+    "access-list EXT seq 5 deny ip host 172.16.0.1 host 192.0.2.86",
+    "access-list EXT seq 10 permit ip 172.16.0.0 0.0.0.255 192.0.2.84 0.0.0.3",
+    "access-list EXT seq 15 permit ip any host 192.0.2.90",
+    "access-list EXT seq 20 permit ip 172.16.0.1 0.0.255.0 host 192.0.2.91",
+    "ipv6 access-list EXT seq 5 permit ipv6 host 2001:db8:1::1 2001:db8:2:: "
+    "::ffff:ffff:ffff:ffff",
+    "ipv6 access-list EXT seq 10 deny ipv6 any host 2001:db8:3::1",
+]
+
+# EXT is appended to PARENT after WEB: it becomes beef:7, class-default beef:8
+EXT_CASES = [
+    ("v4 src net + dst net", "172.16.0.7", "192.0.2.85", "beef:7"),
+    ("v4 deny host/host", "172.16.0.1", "192.0.2.86", "beef:8"),
+    ("v4 same dst, other src", "172.16.0.7", "192.0.2.86", "beef:7"),
+    ("v4 src outside wildcard", "172.16.1.7", "192.0.2.85", "beef:8"),
+    ("v4 dst only (any src)", "192.0.2.1", "192.0.2.90", "beef:7"),
+    ("v4 non-contiguous wildcard", "172.16.1.1", "192.0.2.91", "beef:7"),
+    ("v4 non-contiguous wildcard miss", "172.16.1.7", "192.0.2.91", "beef:8"),
+    ("v6 src host + dst /64", "2001:db8:1::1", "2001:db8:2::5", "beef:7"),
+    ("v6 other src", "2001:db8:5::1", "2001:db8:2::5", "beef:8"),
+    ("v6 dst outside /64", "2001:db8:1::1", "2001:db8:2:1::5", "beef:8"),
+    ("v6 deny dst host", "2001:db8:1::1", "2001:db8:3::1", "beef:8"),
+]
+
+
+def test_qos_extended_acl(tgen):
+    "class-maps using extended (source/destination) IPv4 and IPv6 access-lists"
+
+    r1 = tgen.gears["r1"]
+    r2_mac = tgen.gears["r2"].cmd("cat /sys/class/net/r2-eth0/address").strip()
+
+    # extra sources, and make the test destinations reachable through r2
+    for addr in ("172.16.0.7/32", "172.16.1.1/32", "172.16.1.7/32"):
+        r1.cmd("ip addr add {} dev lo".format(addr))
+    r1.cmd("ip -6 addr add 2001:db8:5::1/128 dev lo nodad")
+    for dst in ("192.0.2.84", "192.0.2.85", "192.0.2.86", "192.0.2.90", "192.0.2.91"):
+        r1.cmd_raises(
+            "ip neigh replace {} lladdr {} dev {} nud permanent".format(
+                dst, r2_mac, INTF
+            )
+        )
+    r1.cmd("ip -6 route replace 2001:db8:2::/47 via 2001:db8:1::2 dev " + INTF)
+
+    filters_before = show_qos_json(r1)["filters"]
+
+    out = r1.vtysh_cmd(EXT_ACL_CONFIG)
+    assert "duplicated" not in out and "failed" not in out, out
+
+    # Both families with the same name are accepted (used to be rejected
+    # as "duplicated access list value").
+    running = r1.vtysh_cmd("show running-config")
+    for line in EXT_ACL_LINES:
+        assert line in running, "missing {!r} in running-config:\n{}".format(
+            line, running
+        )
+
+    expected = dict(EXPECTED_CLASSES_20M)
+    expected["beef:7"] = dict(
+        parent="beef:1", rate=2000000, ceil=20000000, prio=7, leaf=True
+    )
+    expected["beef:8"] = dict(EXPECTED_CLASSES_20M["beef:7"])
+
+    def _installed():
+        error = check_classes(r1, expected, EXPECTED_FIFOS)
+        if error:
+            return error
+        # one flower filter per access-list entry (4 IPv4 + 2 IPv6) plus the
+        # catch-all closing the EXT segment
+        filters = show_qos_json(r1)["filters"]
+        if filters != filters_before + 7:
+            return "{} filters, expected {}".format(filters, filters_before + 7)
+        return None
+
+    try:
+        wait_for(_installed, "EXT class not installed")
+
+        if kernel_supports_flower(tgen):
+            failures = []
+            for desc, src, dst, want in EXT_CASES:
+                send_udp(r1, src, dst, TOS["default"], 1)
+                before = tc_classes(r1)
+                send_udp(r1, src, dst, TOS["default"], 30)
+                after = tc_classes(r1)
+                delta = {
+                    cid: after[cid]["packets"] - before.get(cid, {}).get("packets", 0)
+                    for cid in after
+                }
+                if delta.get(want, 0) < 30:
+                    failures.append(
+                        "{}: expected {}, deltas {}".format(desc, want, delta)
+                    )
+            assert not failures, "\n".join(failures)
+        else:
+            logger.info("kernel lacks cls_flower/act_gact: classification not checked")
+    finally:
+        r1.vtysh_cmd("""
+            configure terminal
+             policy-map PARENT
+              no class EXT
+             exit
+             no class-map EXT
+             no access-list EXT
+             no ipv6 access-list EXT
+            """)
+
+    wait_for(
+        functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
+        "hierarchy not restored after removing EXT",
+    )
+
+
 def test_memory_leak():
     "Run the memory leak test and report results."
     tgen = get_topogen()

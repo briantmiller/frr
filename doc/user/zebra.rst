@@ -489,14 +489,44 @@ Class-maps
 .. clicmd:: match access-group name ACCESSLIST
 
    Match packets permitted by the IPv4 and/or IPv6 access-list of that name.
-   Access-lists are evaluated with first-match semantics, so ``deny`` entries
-   exclude packets. Zebra style entries (``access-list A permit 10.0.0.0/8``)
-   and Cisco standard entries match the *source* address, Cisco extended
-   entries (``permit ip SRC WILDCARD DST WILDCARD``) match source and
-   destination, wildcard masks may be non-contiguous. A ``match-all``
-   class-map can reference at most one access-list. A class referencing an
-   access-list that does not exist matches nothing. Changing the access-list
-   updates every interface using it.
+   An IPv4 and an IPv6 access-list may share the name, the class then
+   matches both families. Access-lists are evaluated with first-match
+   semantics, so ``deny`` entries exclude packets. A ``match-all`` class-map
+   can reference at most one access-list. A class referencing an access-list
+   that does not exist matches nothing. Changing the access-list updates
+   every interface using it.
+
+   Standard entries match the *source* address of the packet, like a Cisco
+   standard access-list:
+
+   .. code-block:: frr
+
+      access-list STD permit 10.0.0.0/8
+      access-list STD permit 172.16.0.0 0.0.255.255
+      ipv6 access-list STD permit 2001:db8::/32
+
+   Extended entries match the source and/or the destination address. Each
+   side is ``any``, ``host ADDRESS`` or ``ADDRESS WILDCARD``; wildcard bits
+   that are set are ignored and may be non-contiguous:
+
+   .. code-block:: frr
+
+      ! from 172.16.0.0/24 to 192.0.2.84 - 192.0.2.87
+      access-list EXT seq 10 permit ip 172.16.0.0 0.0.0.255 192.0.2.84 0.0.0.3
+      ! anything towards one server, but not from one client
+      access-list EXT seq 5 deny ip host 172.16.0.1 host 192.0.2.90
+      access-list EXT seq 15 permit ip any host 192.0.2.90
+      ! host .1 of any 172.16.X.0/24
+      access-list EXT seq 20 permit ip 172.16.0.1 0.0.255.0 any
+      ! IPv6: from one host to 2001:db8:2::/64
+      ipv6 access-list EXT seq 5 permit ipv6 host 2001:db8:1::1 2001:db8:2:: ::ffff:ffff:ffff:ffff
+      !
+      class-map match-any EXT
+       match access-group name EXT
+      exit
+
+   Only addresses are matched, access-lists have no protocol or port
+   fields.
 
 .. clicmd:: match ip dscp DSCP...
 
