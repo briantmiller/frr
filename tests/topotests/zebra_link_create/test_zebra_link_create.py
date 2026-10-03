@@ -554,8 +554,7 @@ def test_vxlan(tgen):
     assert link(r1, "vx5") is None
     conf(r1, "interface ul0", "link-type bridge")
     exp = {
-        "link": "ul0",
-        "linkinfo": {"info_kind": "vxlan", "info_data": {"id": 7, "group": "239.1.1.1"}},
+        "linkinfo": {"info_kind": "vxlan", "info_data": {"link": "ul0", "id": 7, "group": "239.1.1.1"}},
     }
     assert wait_link(r1, "vx5", exp) is None
 
