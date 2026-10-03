@@ -600,6 +600,8 @@ ctx_keywords = {
     "nexthop-group ": {},
     "route-map ": {},
     "pbr-map ": {},
+    "class-map ": {},
+    "policy-map ": {"class ": {}},
     "rpki": {},
     "bfd": {"peer ": {}, "profile ": {}},
     "line vty": {},

@@ -617,6 +617,19 @@ uint8_t dplane_ctx_tc_filter_get_dsfield(const struct zebra_dplane_ctx *ctx);
 uint8_t
 dplane_ctx_tc_filter_get_dsfield_mask(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_classid(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_filter_get_parent(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_filter_get_chain(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_filter_get_goto_chain(const struct zebra_dplane_ctx *ctx);
+const uint8_t *dplane_ctx_tc_filter_get_src_mask(const struct zebra_dplane_ctx *ctx);
+const uint8_t *dplane_ctx_tc_filter_get_dst_mask(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_qdisc_get_handle(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_qdisc_get_parent(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_qdisc_get_defcls(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_qdisc_get_limit(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_class_get_parent(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_class_get_prio(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_class_get_quantum(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_tc_class_get_mtu(const struct zebra_dplane_ctx *ctx);
 
 int dplane_ctx_tc_qdisc_notify_get_kind(const struct zebra_dplane_ctx *ctx);
 ifindex_t dplane_ctx_tc_qdisc_notify_get_ifindex(const struct zebra_dplane_ctx *ctx);

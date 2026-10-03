@@ -215,6 +215,9 @@ struct zebra_if {
 
 	/* The description of the interface */
 	char *desc;
+
+	/* QoS (service-policy) configuration and state */
+	struct zebra_if_qos *qos;
 };
 
 DECLARE_HOOK(zebra_if_extra_info, (struct vty * vty, json_object *json_if, struct interface *ifp),

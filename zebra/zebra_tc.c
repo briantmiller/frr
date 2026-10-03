@@ -24,6 +24,7 @@ DEFINE_MTYPE_STATIC(ZEBRA, TC_FILTER, "TC filter");
 const struct message tc_qdisc_kinds[] = {
 	{TC_QDISC_HTB, "htb"},
 	{TC_QDISC_NOQUEUE, "noqueue"},
+	{TC_QDISC_PFIFO, "pfifo"},
 	{0},
 };
 

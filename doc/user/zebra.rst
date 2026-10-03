@@ -404,6 +404,185 @@ outgoing interface
 
    Resolve PBR nexthop via ip neigh tracking
 
+.. _zebra-qos:
+
+Class Based QoS
+===============
+
+*Zebra* can shape traffic leaving an interface with a class based queueing
+configuration modelled after Cisco class-based weighted fair queueing (CBWFQ).
+On Linux the configuration is programmed as an ``htb`` queueing discipline,
+one HTB class per policy-map class and ``flower`` filters for classification.
+The kernel needs ``sch_htb``, ``cls_flower`` and ``act_gact`` (filter chains
+with ``goto chain`` actions are used).
+
+Traffic is classified with *class-maps*, the classes are given bandwidth
+guarantees, ceilings, priorities and queue limits in a *policy-map*, and the
+policy-map is attached to the output side of an interface:
+
+.. code-block:: frr
+
+   access-list VOICE seq 5 deny 10.1.1.0/24
+   access-list VOICE seq 10 permit 10.0.0.0/8
+   access-list WEB seq 5 permit ip any host 192.0.2.80
+   !
+   class-map match-any VOICE
+    match access-group name VOICE
+    match ip dscp ef cs5
+   exit
+   !
+   class-map match-all WEB-AF
+    match access-group name WEB
+    match ip dscp af11 af12
+   exit
+   !
+   class-map match-all BULK
+    match ip dscp cs1
+   exit
+   !
+   policy-map CHILD
+    class BULK
+     bandwidth percent 30
+     queue-limit 200 packets
+    exit
+    class class-default
+     bandwidth percent 70
+    exit
+   exit
+   !
+   policy-map PARENT
+    class VOICE
+     bandwidth 5mbps
+     max-bandwidth percent 50
+     priority 0
+     queue-limit 64 packets
+    exit
+    class WEB-AF
+     bandwidth percent 20
+     priority 2
+     service-policy CHILD
+    exit
+    class class-default
+     bandwidth percent 10
+     max-bandwidth 15mbps
+    exit
+   exit
+   !
+   interface eth0
+    qos bandwidth 20mbps
+    service-policy output PARENT
+   exit
+
+Rates are given in bits per second and accept the ``k``, ``m`` and ``g`` SI
+suffixes, optionally followed by ``bps`` or ``bit`` (``512k``, ``20mbps``,
+``1.5g``).
+
+Class-maps
+----------
+
+.. clicmd:: class-map [match-any|match-all] NAME
+
+   Create a class-map and enter its configuration node. With ``match-all``
+   (the default) a packet must satisfy every match statement, with
+   ``match-any`` at least one of them. ``class-default`` is reserved.
+
+.. clicmd:: match access-group name ACCESSLIST
+
+   Match packets permitted by the IPv4 and/or IPv6 access-list of that name.
+   Access-lists are evaluated with first-match semantics, so ``deny`` entries
+   exclude packets. Zebra style entries (``access-list A permit 10.0.0.0/8``)
+   and Cisco standard entries match the *source* address, Cisco extended
+   entries (``permit ip SRC WILDCARD DST WILDCARD``) match source and
+   destination, wildcard masks may be non-contiguous. A ``match-all``
+   class-map can reference at most one access-list. A class referencing an
+   access-list that does not exist matches nothing. Changing the access-list
+   updates every interface using it.
+
+.. clicmd:: match ip dscp DSCP...
+
+   Match packets (IPv4 and IPv6) carrying any of the given DSCP values. Values
+   are numbers (0-63) or names (``default``, ``cs0``-``cs7``, ``af11``-``af43``,
+   ``ef``). All DSCP values of a class-map form a single match statement: in a
+   ``match-all`` class-map a packet must be permitted by the access-list *and*
+   carry one of the DSCP values.
+
+.. clicmd:: match any
+
+   Match every packet.
+
+Policy-maps
+-----------
+
+.. clicmd:: policy-map NAME
+
+   Create a policy-map and enter its configuration node.
+
+.. clicmd:: class NAME
+
+   Add the class-map ``NAME`` (or ``class-default``) to the policy-map and
+   enter the class configuration node. Classes are evaluated in the order
+   they are added. ``class-default`` always comes last and receives all
+   traffic not matched by another class; it is created implicitly (sharing
+   the unallocated bandwidth) when not configured.
+
+.. clicmd:: bandwidth <percent (1-100)|RATE>
+
+   Guaranteed rate of the class (HTB ``rate``). A percentage refers to the
+   rate of the parent, i.e. the interface QoS bandwidth for a top level
+   policy or the guaranteed rate of the parent class for a child policy.
+   Classes without a bandwidth equally share whatever the other classes of
+   the same policy-map leave unallocated.
+
+.. clicmd:: max-bandwidth <percent (1-100)|RATE>
+
+   Ceiling of the class (HTB ``ceil``), the most it may use when borrowing
+   unused bandwidth. A percentage refers to the interface QoS bandwidth.
+   Defaults to the interface QoS bandwidth.
+
+.. clicmd:: priority (0-7)
+
+   HTB priority of the class, 0 is the highest. Classes with a higher
+   priority are offered excess bandwidth first and see lower latency.
+   Classes without a priority use 7.
+
+.. clicmd:: queue-limit (1-4294967295) [packets]
+
+   Queue length of the class, implemented as a ``pfifo`` below the HTB leaf
+   class. Without it the kernel default queue (``txqueuelen``) is used.
+   Ignored for classes with a child service-policy.
+
+.. clicmd:: service-policy NAME
+
+   Apply the policy-map ``NAME`` as a child policy to the traffic of this
+   class (hierarchical QoS). The class becomes an HTB inner class and the
+   classes of the child policy its children. Up to 7 levels are supported,
+   loops are ignored.
+
+Interface commands
+------------------
+
+.. clicmd:: qos bandwidth RATE
+
+   Bandwidth available to the output service-policy, used as the rate and
+   ceiling of the HTB root class and as the reference for percentages. When
+   not configured, the interface ``bandwidth`` or the link speed is used.
+
+.. clicmd:: service-policy [output] NAME
+
+   Apply the policy-map ``NAME`` to traffic leaving the interface.
+
+When a policy-map, class-map or access-list used by an interface changes, the
+HTB qdisc of the interface is deleted and installed again. When only rates,
+ceilings or priorities change, e.g. after ``qos bandwidth`` was modified, the
+existing HTB classes are updated in place without disturbing traffic.
+
+.. clicmd:: show qos interface [IFNAME]
+
+   Show the QoS bandwidth, service-policy and the HTB classes installed on
+   the interface. Zebra owned qdiscs use the handle ``beef:``, so the kernel
+   state can be inspected with ``tc -s class show dev IFNAME`` and
+   ``tc filter show dev IFNAME``.
+
 .. _administrative-distance:
 
 Administrative Distance

@@ -275,7 +275,17 @@ void vtysh_config_parse_line(void *arg, const char *line)
 	case ' ':
 		/* Store line to current configuration. */
 		if (config) {
-			if (config->index == KEYCHAIN_NODE
+			if (config->index == POLICY_MAP_NODE &&
+			    strncmp(line, " class ", strlen(" class ")) == 0) {
+				config = config_get_nested(config, POLICY_MAP_CLASS_NODE, line);
+			} else if (config->index == POLICY_MAP_CLASS_NODE) {
+				if (strncmp(line, " exit", strlen(" exit")) == 0) {
+					config_add_line_uniq_end(config->line, line);
+					config = config->parent;
+				} else {
+					config_add_line_uniq(config->line, line);
+				}
+			} else if (config->index == KEYCHAIN_NODE
 			    && strncmp(line, " key", strlen(" key")) == 0) {
 				config = config_get_nested(
 					config, KEYCHAIN_KEY_NODE, line);
@@ -400,6 +410,10 @@ void vtysh_config_parse_line(void *arg, const char *line)
 			config = config_get(RMAP_NODE, line);
 		else if (strncmp(line, "pbr-map", strlen("pbr-map")) == 0)
 			config = config_get(PBRMAP_NODE, line);
+		else if (strncmp(line, "class-map ", strlen("class-map ")) == 0)
+			config = config_get(CLASS_MAP_NODE, line);
+		else if (strncmp(line, "policy-map ", strlen("policy-map ")) == 0)
+			config = config_get(POLICY_MAP_NODE, line);
 		else if (strncmp(line, "access-list", strlen("access-list"))
 			 == 0)
 			config = config_get(ACCESS_NODE, line);
@@ -518,7 +532,8 @@ void vtysh_config_parse_line(void *arg, const char *line)
 	 (I) == AS_LIST_NODE || (I) == COMMUNITY_LIST_NODE || (I) == COMMUNITY_ALIAS_NODE ||        \
 	 (I) == ACCESS_IPV6_NODE || (I) == ACCESS_MAC_NODE || (I) == PREFIX_IPV6_NODE ||            \
 	 (I) == DEBUG_NODE || (I) == AAA_NODE || (I) == VRF_DEBUG_NODE || (I) == RMAP_DEBUG_NODE || \
-	 (I) == RESOLVER_DEBUG_NODE || (I) == MPLS_NODE || (I) == KEYCHAIN_KEY_NODE)
+	 (I) == RESOLVER_DEBUG_NODE || (I) == MPLS_NODE || (I) == KEYCHAIN_KEY_NODE || \
+	 (I) == POLICY_MAP_CLASS_NODE)
 
 static void configvec_dump(vector vec, bool nested)
 {

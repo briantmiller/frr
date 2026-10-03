@@ -28,6 +28,7 @@
 #include "mgmt_be_client.h"
 #include "libagentx.h"
 
+#include "zebra/zebra_qos.h"
 #include "zebra/zebra_router.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/rib.h"
@@ -246,6 +247,7 @@ void zebra_finalize(struct event *dummy)
 	zebra_mpls_terminate();
 
 	zebra_pw_terminate();
+	zebra_qos_terminate();
 
 	zebra_srv6_terminate();
 
@@ -300,6 +302,7 @@ static const struct frr_yang_module_info *const zebra_yang_modules[] = {
 	&frr_routing_info,
 	&frr_affinity_map_info,
 	&frr_zebra_route_map_info,
+	&frr_qos_info,
 };
 
 FRR_DAEMON_INFO(zebra, ZEBRA,
@@ -327,6 +330,7 @@ static const char *const zebra_config_xpaths[] = {
 	"/frr-zebra:zebra",
 	"/frr-interface:lib",
 	"/frr-vrf:lib",
+	"/frr-qos:qos",
 };
 
 static const char *const zebra_oper_xpaths[] = {
@@ -507,6 +511,7 @@ int main(int argc, char **argv)
 	zserv_init();
 	zebra_rib_init();
 	zebra_if_init();
+	zebra_qos_init();
 	zebra_debug_init();
 
 	/* Open Zebra API server socket */

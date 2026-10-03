@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: BSD-2-Clause
+module frr-qos {
+  yang-version 1.1;
+  namespace "http://frrouting.org/yang/qos";
+  prefix frr-qos;
+
+  import frr-interface {
+    prefix frr-interface;
+  }
+
+  organization
+    "FRRouting";
+  contact
+    "FRR Users List:       <mailto:frog@lists.frrouting.org>
+     FRR Development List: <mailto:dev@lists.frrouting.org>";
+  description
+    "This module defines class-based queueing (QoS) configuration,
+     modelled after Cisco class-based weighted fair queueing (CBWFQ).
+
+     Traffic is classified with class-maps, class-maps are given
+     bandwidth guarantees, ceilings, priorities and queue limits inside
+     a policy-map, and a policy-map is attached to the output side of
+     an interface.  On Linux the configuration is realised with the
+     HTB queueing discipline, HTB classes and flower filters.
+
+     Copyright 2026 FRRouting
+
+     Redistribution and use in source and binary forms, with or without
+     modification, are permitted provided that the following conditions
+     are met:
+
+     1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+     \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+     LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+     A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+     HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+     LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+     DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+     THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
+
+  revision 2026-10-03 {
+    description
+      "Initial revision";
+    reference "FRRouting";
+  }
+
+  typedef qos-map-name {
+    type string {
+      length "1..63";
+      pattern "[^\\s]+";
+    }
+    description
+      "Name of a class-map or policy-map.";
+  }
+
+  typedef bits-per-second {
+    type uint64 {
+      range "1..max";
+    }
+    units "bits/second";
+    description
+      "A data rate in bits per second.";
+  }
+
+  typedef dscp {
+    type uint8 {
+      range "0..63";
+    }
+    description
+      "Differentiated Services Code Point.";
+  }
+
+  grouping rate-spec {
+    description
+      "A rate expressed either as a percentage of a reference rate or
+       as an absolute value.";
+    choice rate {
+      description
+        "How the rate is expressed.";
+      case percent {
+        leaf percent {
+          type uint8 {
+            range "1..100";
+          }
+          units "percent";
+          description
+            "Rate as a percentage of the reference rate.";
+        }
+      }
+      case bps {
+        leaf bps {
+          type bits-per-second;
+          description
+            "Absolute rate.";
+        }
+      }
+    }
+  }
+
+  container qos {
+    description
+      "Class-based QoS configuration.";
+
+    list class-map {
+      key "name";
+      description
+        "Traffic classifier.";
+
+      must "match-type = 'match-any' or count(access-group) <= 1" {
+        error-message
+          "A match-all class-map may reference at most one access-group";
+      }
+
+      leaf name {
+        type qos-map-name;
+        must ". != 'class-default'" {
+          error-message "class-default is a reserved class name";
+        }
+        description
+          "Class-map name.";
+      }
+
+      leaf match-type {
+        type enumeration {
+          enum match-all {
+            value 0;
+            description
+              "A packet must match every match statement.";
+          }
+          enum match-any {
+            value 1;
+            description
+              "A packet must match at least one match statement.";
+          }
+        }
+        default "match-all";
+        description
+          "How the match statements of this class are combined.";
+      }
+
+      leaf-list access-group {
+        type string {
+          length "1..128";
+        }
+        description
+          "Match packets permitted by the named IPv4 and/or IPv6
+           access-list.  Standard (zebra style) access-list entries are
+           applied to the source address, Cisco style extended entries
+           are applied to source and destination address.";
+      }
+
+      leaf-list dscp {
+        type dscp;
+        description
+          "Match packets carrying any of these DSCP values.  The list
+           of values forms a single match statement.";
+      }
+
+      leaf any {
+        type empty;
+        description
+          "Match every packet.";
+      }
+    }
+
+    list policy-map {
+      key "name";
+      description
+        "Traffic policy.";
+
+      leaf name {
+        type qos-map-name;
+        description
+          "Policy-map name.";
+      }
+
+      list class {
+        key "name";
+        ordered-by user;
+        description
+          "Traffic class within the policy.  Classes are evaluated in
+           the order they are configured; class-default always matches
+           whatever is left.";
+
+        leaf name {
+          type qos-map-name;
+          description
+            "Name of the class-map, or class-default.";
+        }
+
+        container bandwidth {
+          description
+            "Guaranteed rate (HTB rate).  A percentage refers to the
+             rate of the parent: the interface QoS bandwidth for a top
+             level policy, or the guaranteed rate of the parent class
+             for a child policy.  When unset, the class receives an
+             equal share of the bandwidth left unallocated.";
+          uses rate-spec;
+        }
+
+        container max-bandwidth {
+          description
+            "Ceiling rate (HTB ceil).  A percentage refers to the
+             interface QoS bandwidth.  Defaults to the interface QoS
+             bandwidth.";
+          uses rate-spec;
+        }
+
+        leaf priority {
+          type uint8 {
+            range "0..7";
+          }
+          description
+            "HTB priority, 0 is the highest.  Classes with a higher
+             priority are offered excess bandwidth first.";
+        }
+
+        leaf queue-limit {
+          type uint32 {
+            range "1..max";
+          }
+          units "packets";
+          description
+            "Queue length of the class.";
+        }
+
+        leaf service-policy {
+          type qos-map-name;
+          description
+            "Child policy-map applied to traffic in this class.";
+        }
+      }
+    }
+  }
+
+  augment "/frr-interface:lib/frr-interface:interface" {
+    description
+      "Interface QoS configuration.";
+    container qos {
+      description
+        "Interface QoS configuration.";
+
+      leaf bandwidth {
+        type bits-per-second;
+        description
+          "Bandwidth available to the output service policy.";
+      }
+
+      leaf service-policy-output {
+        type qos-map-name;
+        description
+          "Policy-map applied to traffic leaving the interface.";
+      }
+    }
+  }
+}

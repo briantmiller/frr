@@ -80,6 +80,7 @@ endif
 
 if ZEBRA
 dist_yangmodels_DATA += yang/frr-zebra.yang
+dist_yangmodels_DATA += yang/frr-qos.yang
 endif
 
 if PIMD

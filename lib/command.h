@@ -139,6 +139,9 @@ enum node_type {
 	COMMUNITY_LIST_NODE,     /* Community list node. */
 	COMMUNITY_ALIAS_NODE, /* Community alias node. */
 	PBRMAP_NODE,		 /* PBR map node. */
+	CLASS_MAP_NODE,		 /* QoS class-map node. */
+	POLICY_MAP_NODE,	 /* QoS policy-map node. */
+	POLICY_MAP_CLASS_NODE,	 /* QoS policy-map class node. */
 	SMUX_NODE,		 /* SNMP configuration node. */
 	DUMP_NODE,		 /* Packet dump node. */
 	PROTOCOL_NODE,		 /* protocol filtering node */

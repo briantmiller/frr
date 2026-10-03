@@ -1624,6 +1624,27 @@ static struct cmd_node ldp_pseudowire_node = {
 	.prompt = "%s(config-l2vpn-pw)# ",
 };
 
+static struct cmd_node class_map_node = {
+	.name = "class-map",
+	.node = CLASS_MAP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-cmap)# ",
+};
+
+static struct cmd_node policy_map_node = {
+	.name = "policy-map",
+	.node = POLICY_MAP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-pmap)# ",
+};
+
+static struct cmd_node policy_map_class_node = {
+	.name = "policy-map class",
+	.node = POLICY_MAP_CLASS_NODE,
+	.parent_node = POLICY_MAP_NODE,
+	.prompt = "%s(config-pmap-c)# ",
+};
+
 static struct cmd_node keychain_node = {
 	.name = "keychain",
 	.node = KEYCHAIN_NODE,
@@ -2098,6 +2119,35 @@ DEFUNSH(VTYSH_BGPD, exit_vrf_policy, exit_vrf_policy_cmd, "exit-vrf-policy",
 }
 #endif
 #endif /* HAVE_BGPD */
+
+DEFUNSH(VTYSH_MGMTD, vtysh_class_map, vtysh_class_map_cmd,
+	"class-map [<match-any|match-all>] QOS_CMAP_NAME",
+	"Configure a QoS class-map\n"
+	"Packets must match at least one match statement\n"
+	"Packets must match all match statements (default)\n"
+	"Class-map name\n")
+{
+	vty->node = CLASS_MAP_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_MGMTD, vtysh_policy_map, vtysh_policy_map_cmd,
+	"policy-map QOS_PMAP_NAME",
+	"Configure a QoS policy-map\n"
+	"Policy-map name\n")
+{
+	vty->node = POLICY_MAP_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_MGMTD, vtysh_policy_map_class, vtysh_policy_map_class_cmd,
+	"class QOS_CMAP_NAME",
+	"Configure a class of the policy-map\n"
+	"Class-map name, or class-default\n")
+{
+	vty->node = POLICY_MAP_CLASS_NODE;
+	return CMD_SUCCESS;
+}
 
 DEFUNSH(VTYSH_KEYS, key_chain, key_chain_cmd, "key chain WORD",
 	"Authentication key management\n"
@@ -2975,6 +3025,18 @@ DEFUNSH(VTYSH_KEYS, vtysh_quit_keys, vtysh_quit_keys_cmd, "quit",
 	"Exit current mode and down to previous mode\n")
 {
 	return vtysh_exit_keys(self, vty, argc, argv);
+}
+
+DEFUNSH(VTYSH_MGMTD, vtysh_exit_qos, vtysh_exit_qos_cmd, "exit",
+	"Exit current mode and down to previous mode\n")
+{
+	return vtysh_exit(vty);
+}
+
+DEFUNSH(VTYSH_MGMTD, vtysh_quit_qos, vtysh_quit_qos_cmd, "quit",
+	"Exit current mode and down to previous mode\n")
+{
+	return vtysh_exit_qos(self, vty, argc, argv);
 }
 
 DEFUNSH(VTYSH_SR | VTYSH_MGMTD, vtysh_exit_sr, vtysh_exit_sr_cmd, "exit",
@@ -5385,6 +5447,9 @@ void vtysh_init_vty(void)
 	install_node(&pcep_pcc_node);
 	install_node(&pcep_pce_node);
 	install_node(&pcep_pce_config_node);
+	install_node(&class_map_node);
+	install_node(&policy_map_node);
+	install_node(&policy_map_class_node);
 	install_node(&keychain_node);
 	install_node(&keychain_key_node);
 	install_node(&nh_group_node);
@@ -5756,6 +5821,19 @@ void vtysh_init_vty(void)
 
 	/* keychain */
 	install_element(CONFIG_NODE, &key_chain_cmd);
+	install_element(CONFIG_NODE, &vtysh_class_map_cmd);
+	install_element(CLASS_MAP_NODE, &vtysh_exit_qos_cmd);
+	install_element(CLASS_MAP_NODE, &vtysh_quit_qos_cmd);
+	install_element(CLASS_MAP_NODE, &vtysh_end_all_cmd);
+	install_element(CONFIG_NODE, &vtysh_policy_map_cmd);
+	install_element(POLICY_MAP_NODE, &vtysh_policy_map_class_cmd);
+	install_element(POLICY_MAP_NODE, &vtysh_exit_qos_cmd);
+	install_element(POLICY_MAP_NODE, &vtysh_quit_qos_cmd);
+	install_element(POLICY_MAP_NODE, &vtysh_end_all_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &vtysh_exit_qos_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &vtysh_quit_qos_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &vtysh_end_all_cmd);
+
 	install_element(KEYCHAIN_NODE, &key_chain_cmd);
 	install_element(KEYCHAIN_NODE, &vtysh_exit_keys_cmd);
 	install_element(KEYCHAIN_NODE, &vtysh_quit_keys_cmd);

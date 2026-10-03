@@ -18,6 +18,7 @@ lib_LTLIBRARIES += mgmtd/libmgmt_be_nb.la
 mgmtd_libmgmt_be_nb_la_SOURCES = \
 	mgmtd/mgmt_be_nb.c \
 	zebra/zebra_cli.c \
+	zebra/zebra_qos_cli.c \
 	# end
 nodist_mgmtd_libmgmt_be_nb_la_SOURCES = \
 	# end
@@ -49,6 +50,7 @@ noinst_HEADERS += \
 	mgmtd/mgmt_txn.h \
 	mgmtd/mgmt_txn_priv.h \
 	zebra/zebra_cli.h \
+	zebra/zebra_qos_cli.h \
 	# end
 
 sbin_PROGRAMS += mgmtd/mgmtd
@@ -65,6 +67,7 @@ mgmtd_mgmtd_SOURCES = \
 nodist_mgmtd_mgmtd_SOURCES = \
 	yang/frr-zebra.yang.c \
 	yang/frr-zebra-route-map.yang.c \
+	yang/frr-qos.yang.c \
 	yang/ietf/ietf-netconf.yang.c \
 	yang/ietf/ietf-netconf-with-defaults.yang.c \
 	# nothing

@@ -19,6 +19,7 @@
 #include "zclient.h"
 #include "vrf.h"
 
+#include "zebra/zebra_qos.h"
 #include "zebra/rtadv.h"
 #include "zebra_ns.h"
 #include "zebra_vrf.h"
@@ -215,6 +216,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 
 	if (ifp->info) {
 		zebra_if = ifp->info;
+
+		zebra_qos_if_fini(ifp);
 
 		/* If we set protodown, clear our reason now from the kernel */
 		if (ZEBRA_IF_IS_PROTODOWN(zebra_if) && zebra_if->protodown_rc &&
@@ -588,6 +591,8 @@ void if_add_update(struct interface *ifp)
 	if_data = ifp->info;
 	assert(if_data);
 
+	zebra_qos_if_added(ifp);
+
 	if (if_data->multicast == IF_ZEBRA_DATA_ON)
 		if_set_flags(ifp, IFF_MULTICAST);
 	else if (if_data->multicast == IF_ZEBRA_DATA_OFF)
@@ -799,6 +804,8 @@ void if_delete_update(struct interface **pifp)
 	zebra_interface_delete_update(ifp);
 
 	zebra_ns_unlink_ifp(ifp);
+
+	zebra_qos_if_removed(ifp);
 
 	/* Update ifindex after distributing the delete message.  This is in
 	   case any client needs to have the old value of ifindex available

@@ -377,14 +377,22 @@ struct dplane_netconf_info {
 struct dplane_tc_qdisc_info {
 	enum tc_qdisc_kind kind;
 	const char *kind_str;
+	uint32_t handle;
+	uint32_t parent;
+	uint32_t defcls;
+	uint32_t limit;
 };
 
 struct dplane_tc_class_info {
 	uint32_t handle;
+	uint32_t parent;
 	enum tc_qdisc_kind kind;
 	const char *kind_str;
 	uint64_t rate;
 	uint64_t ceil;
+	uint32_t prio;
+	uint32_t quantum;
+	uint32_t mtu;
 };
 
 struct dplane_tc_filter_info {
@@ -404,6 +412,11 @@ struct dplane_tc_filter_info {
 	uint8_t dsfield;
 	uint8_t dsfield_mask;
 	uint32_t classid;
+	uint32_t parent;
+	uint32_t chain;
+	uint32_t goto_chain;
+	uint8_t src_mask[16];
+	uint8_t dst_mask[16];
 };
 
 /*
@@ -2387,6 +2400,97 @@ uint32_t dplane_ctx_tc_filter_get_classid(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.tc_filter.classid;
 }
 
+uint32_t dplane_ctx_tc_filter_get_parent(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.parent;
+}
+
+uint32_t dplane_ctx_tc_filter_get_chain(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.chain;
+}
+
+uint32_t dplane_ctx_tc_filter_get_goto_chain(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.goto_chain;
+}
+
+const uint8_t *dplane_ctx_tc_filter_get_src_mask(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.src_mask;
+}
+
+const uint8_t *dplane_ctx_tc_filter_get_dst_mask(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_filter.dst_mask;
+}
+
+uint32_t dplane_ctx_tc_qdisc_get_handle(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_qdisc.handle;
+}
+
+uint32_t dplane_ctx_tc_qdisc_get_parent(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_qdisc.parent;
+}
+
+uint32_t dplane_ctx_tc_qdisc_get_defcls(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_qdisc.defcls;
+}
+
+uint32_t dplane_ctx_tc_qdisc_get_limit(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_qdisc.limit;
+}
+
+uint32_t dplane_ctx_tc_class_get_parent(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_class.parent;
+}
+
+uint32_t dplane_ctx_tc_class_get_prio(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_class.prio;
+}
+
+uint32_t dplane_ctx_tc_class_get_quantum(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_class.quantum;
+}
+
+uint32_t dplane_ctx_tc_class_get_mtu(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tc_class.mtu;
+}
+
 /*
  * Set the nexthops associated with a context: note that processing code
  * may well expect that nexthops are in canonical (sorted) order, so we
@@ -4253,6 +4357,12 @@ static int dplane_ctx_tc_qdisc_init(struct zebra_dplane_ctx *ctx,
 	ctx->zd_ifindex = qdisc->qdisc.ifindex;
 	ctx->u.tc_qdisc.kind = qdisc->qdisc.kind;
 	ctx->u.tc_qdisc.kind_str = tc_qdisc_kind2str(qdisc->qdisc.kind);
+	ctx->u.tc_qdisc.handle = qdisc->qdisc.handle;
+	ctx->u.tc_qdisc.parent = qdisc->qdisc.parent;
+	if (qdisc->qdisc.kind == TC_QDISC_HTB)
+		ctx->u.tc_qdisc.defcls = qdisc->qdisc.u.htb.defcls;
+	else if (qdisc->qdisc.kind == TC_QDISC_PFIFO)
+		ctx->u.tc_qdisc.limit = qdisc->qdisc.u.fifo.limit;
 
 	/* TODO: init traffic control qdisc */
 	zns = zebra_ns_lookup(NS_DEFAULT);
@@ -4281,6 +4391,10 @@ static int dplane_ctx_tc_class_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_class.kind_str = tc_qdisc_kind2str(class->class.kind);
 	ctx->u.tc_class.rate = class->class.u.htb.rate;
 	ctx->u.tc_class.ceil = class->class.u.htb.ceil;
+	ctx->u.tc_class.parent = class->class.parent;
+	ctx->u.tc_class.prio = class->class.u.htb.prio;
+	ctx->u.tc_class.quantum = class->class.u.htb.quantum;
+	ctx->u.tc_class.mtu = class->class.u.htb.mtu;
 
 	zns = zebra_ns_lookup(NS_DEFAULT);
 
@@ -4319,6 +4433,13 @@ static int dplane_ctx_tc_filter_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_filter.dsfield = filter->filter.u.flower.dsfield;
 	ctx->u.tc_filter.dsfield_mask = filter->filter.u.flower.dsfield_mask;
 	ctx->u.tc_filter.classid = filter->filter.u.flower.classid;
+	ctx->u.tc_filter.parent = filter->filter.parent;
+	ctx->u.tc_filter.chain = filter->filter.chain;
+	ctx->u.tc_filter.goto_chain = filter->filter.u.flower.goto_chain;
+	memcpy(ctx->u.tc_filter.src_mask, filter->filter.u.flower.src_mask,
+	       sizeof(ctx->u.tc_filter.src_mask));
+	memcpy(ctx->u.tc_filter.dst_mask, filter->filter.u.flower.dst_mask,
+	       sizeof(ctx->u.tc_filter.dst_mask));
 
 	ctx->u.tc_filter.priority = filter->filter.priority;
 	ctx->u.tc_filter.handle = filter->filter.handle;

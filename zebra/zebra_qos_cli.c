@@ -1,0 +1,775 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * QoS (class-map / policy-map / service-policy) CLI, runs in mgmtd.
+ *
+ * Copyright (C) 2026 FRRouting
+ */
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "command.h"
+#include "northbound_cli.h"
+#include "yang.h"
+
+#include "zebra/zebra_qos_cli.h"
+#include "zebra/zebra_qos_cli_clippy.c"
+
+#define QOS_STR		   "Quality of Service\n"
+#define CLASS_MAP_STR	   "Configure a QoS class-map\n"
+#define POLICY_MAP_STR	   "Configure a QoS policy-map\n"
+#define SERVICE_POLICY_STR "Apply a QoS policy-map\n"
+#define RATE_STR                                                                                  \
+	"Rate in bits/sec, optionally with a k, m or g SI suffix and bps, e.g. 512k, 20mbps, 1.5g\n"
+
+#define QOS_XPATH	     "/frr-qos:qos"
+#define QOS_CLASS_MAP_XPATH  QOS_XPATH "/class-map[name='%s']"
+#define QOS_POLICY_MAP_XPATH QOS_XPATH "/policy-map[name='%s']"
+
+/*
+ * ----------------------------------------------------------------------
+ * Helpers
+ * ----------------------------------------------------------------------
+ */
+
+/*
+ * Parse a rate such as "20000000", "512k", "20m", "20mbps", "1.5g" or
+ * "100kbit" into bits per second.  SI (power of 10) prefixes are used.
+ */
+static int qos_parse_rate(const char *str, uint64_t *bps)
+{
+	char *end;
+	double value;
+	double mult = 1;
+
+	errno = 0;
+	value = strtod(str, &end);
+	if (end == str || errno || value <= 0)
+		return -1;
+
+	switch (*end) {
+	case 'k':
+	case 'K':
+		mult = 1e3;
+		end++;
+		break;
+	case 'm':
+	case 'M':
+		mult = 1e6;
+		end++;
+		break;
+	case 'g':
+	case 'G':
+		mult = 1e9;
+		end++;
+		break;
+	default:
+		break;
+	}
+
+	if (*end && strcasecmp(end, "bps") && strcasecmp(end, "bit") && strcasecmp(end, "b"))
+		return -1;
+
+	value *= mult;
+	if (value < 1 || value > 1e15)
+		return -1;
+
+	*bps = (uint64_t)(value + 0.5);
+	return 0;
+}
+
+static const char *qos_rate2str(uint64_t bps, char *buf, size_t len)
+{
+	if (bps % 1000000000ULL == 0)
+		snprintf(buf, len, "%" PRIu64 "gbps", bps / 1000000000ULL);
+	else if (bps % 1000000ULL == 0)
+		snprintf(buf, len, "%" PRIu64 "mbps", bps / 1000000ULL);
+	else if (bps % 1000ULL == 0)
+		snprintf(buf, len, "%" PRIu64 "kbps", bps / 1000ULL);
+	else
+		snprintf(buf, len, "%" PRIu64 "bps", bps);
+
+	return buf;
+}
+
+static const struct {
+	const char *name;
+	uint8_t value;
+} qos_dscp_names[] = {
+	{ "default", 0 }, { "cs1", 8 },	  { "af11", 10 }, { "af12", 12 }, { "af13", 14 },
+	{ "cs2", 16 },	  { "af21", 18 }, { "af22", 20 }, { "af23", 22 }, { "cs3", 24 },
+	{ "af31", 26 },	  { "af32", 28 }, { "af33", 30 }, { "cs4", 32 },  { "af41", 34 },
+	{ "af42", 36 },	  { "af43", 38 }, { "cs5", 40 },  { "ef", 46 },	  { "cs6", 48 },
+	{ "cs7", 56 },
+};
+
+static int qos_parse_dscp(const char *str, uint8_t *dscp)
+{
+	char *end;
+	unsigned long val;
+
+	for (size_t i = 0; i < array_size(qos_dscp_names); i++) {
+		if (strcasecmp(str, qos_dscp_names[i].name) == 0) {
+			*dscp = qos_dscp_names[i].value;
+			return 0;
+		}
+	}
+
+	if (strcasecmp(str, "cs0") == 0) {
+		*dscp = 0;
+		return 0;
+	}
+
+	errno = 0;
+	val = strtoul(str, &end, 10);
+	if (end == str || *end || errno || val > 63)
+		return -1;
+
+	*dscp = val;
+	return 0;
+}
+
+static const char *qos_dscp2str(uint8_t dscp, char *buf, size_t len)
+{
+	for (size_t i = 0; i < array_size(qos_dscp_names); i++) {
+		if (qos_dscp_names[i].value == dscp) {
+			snprintf(buf, len, "%s", qos_dscp_names[i].name);
+			return buf;
+		}
+	}
+
+	snprintf(buf, len, "%u", dscp);
+	return buf;
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * class-map
+ * ----------------------------------------------------------------------
+ */
+
+DEFPY_YANG_NOSH (class_map,
+		 class_map_cmd,
+		 "class-map [<match-any|match-all>$mtype] QOS_CMAP_NAME$name",
+		 CLASS_MAP_STR
+		 "Packets must match at least one match statement\n"
+		 "Packets must match all match statements (default)\n"
+		 "Class-map name\n")
+{
+	char xpath[XPATH_MAXLEN];
+	int ret;
+
+	if (strcmp(name, "class-default") == 0) {
+		vty_out(vty, "%% class-default is reserved\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	snprintf(xpath, sizeof(xpath), QOS_CLASS_MAP_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+	if (mtype) {
+		char mxpath[XPATH_MAXLEN + 16];
+
+		snprintf(mxpath, sizeof(mxpath), "%s/match-type", xpath);
+		nb_cli_enqueue_change(vty, mxpath, NB_OP_MODIFY, mtype);
+	}
+
+	ret = nb_cli_apply_changes(vty, NULL);
+	if (ret == CMD_SUCCESS)
+		VTY_PUSH_XPATH(CLASS_MAP_NODE, xpath);
+
+	return ret;
+}
+
+DEFPY_YANG (no_class_map,
+	    no_class_map_cmd,
+	    "no class-map [<match-any|match-all>] QOS_CMAP_NAME$name",
+	    NO_STR
+	    CLASS_MAP_STR
+	    "Packets must match at least one match statement\n"
+	    "Packets must match all match statements\n"
+	    "Class-map name\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), QOS_CLASS_MAP_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes_clear_pending(vty, NULL);
+}
+
+DEFPY_YANG (class_map_match_acl,
+	    class_map_match_acl_cmd,
+	    "[no] match access-group name ACCESSLIST_NAME$acl",
+	    NO_STR
+	    "Classification criteria\n"
+	    "Access group\n"
+	    "Named access list\n"
+	    "Access list name\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "./access-group[.='%s']", acl);
+	nb_cli_enqueue_change(vty, xpath, no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFUN_YANG (class_map_match_dscp,
+	    class_map_match_dscp_cmd,
+	    "[no] match ip dscp DSCP...",
+	    NO_STR
+	    "Classification criteria\n"
+	    "IP specific values\n"
+	    "Match IP DSCP (DiffServ CodePoints)\n"
+	    "DSCP value (0-63) or name: default, cs0-cs7, af11-af43, ef\n")
+{
+	bool no = strcmp(argv[0]->text, "no") == 0;
+	int idx = no ? 4 : 3;
+	char xpath[XPATH_MAXLEN];
+
+	for (int i = idx; i < argc; i++) {
+		uint8_t dscp;
+
+		if (qos_parse_dscp(argv[i]->arg, &dscp)) {
+			vty_out(vty, "%% Invalid DSCP value: %s\n", argv[i]->arg);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+
+		snprintf(xpath, sizeof(xpath), "./dscp[.='%u']", dscp);
+		nb_cli_enqueue_change(vty, xpath, no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+	}
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (class_map_match_any,
+	    class_map_match_any_cmd,
+	    "[no] match any",
+	    NO_STR
+	    "Classification criteria\n"
+	    "Match any packet\n")
+{
+	nb_cli_enqueue_change(vty, "./any", no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_class_map(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	vty_out(vty, "class-map %s %s\n", yang_dnode_get_string(dnode, "match-type"),
+		yang_dnode_get_string(dnode, "name"));
+}
+
+static void cli_show_class_map_end(struct vty *vty, const struct lyd_node *dnode)
+{
+	const struct lyd_node *child;
+	bool first = true;
+	char buf[16];
+
+	/* all DSCP values are shown as a single match statement */
+	LY_LIST_FOR (lyd_child(dnode), child) {
+		if (strcmp(child->schema->name, "dscp"))
+			continue;
+
+		if (first)
+			vty_out(vty, " match ip dscp");
+		vty_out(vty, " %s",
+			qos_dscp2str(yang_dnode_get_uint8(child, NULL), buf, sizeof(buf)));
+		first = false;
+	}
+	if (!first)
+		vty_out(vty, "\n");
+
+	vty_out(vty, "exit\n");
+	vty_out(vty, "!\n");
+}
+
+static void cli_show_class_map_access_group(struct vty *vty, const struct lyd_node *dnode,
+					    bool show_defaults)
+{
+	vty_out(vty, " match access-group name %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+static void cli_show_class_map_any(struct vty *vty, const struct lyd_node *dnode,
+				   bool show_defaults)
+{
+	vty_out(vty, " match any\n");
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * policy-map
+ * ----------------------------------------------------------------------
+ */
+
+DEFPY_YANG_NOSH (policy_map,
+		 policy_map_cmd,
+		 "policy-map QOS_PMAP_NAME$name",
+		 POLICY_MAP_STR
+		 "Policy-map name\n")
+{
+	char xpath[XPATH_MAXLEN];
+	int ret;
+
+	snprintf(xpath, sizeof(xpath), QOS_POLICY_MAP_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+
+	ret = nb_cli_apply_changes(vty, NULL);
+	if (ret == CMD_SUCCESS)
+		VTY_PUSH_XPATH(POLICY_MAP_NODE, xpath);
+
+	return ret;
+}
+
+DEFPY_YANG (no_policy_map,
+	    no_policy_map_cmd,
+	    "no policy-map QOS_PMAP_NAME$name",
+	    NO_STR
+	    POLICY_MAP_STR
+	    "Policy-map name\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), QOS_POLICY_MAP_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes_clear_pending(vty, NULL);
+}
+
+DEFPY_YANG_NOSH (policy_map_class,
+		 policy_map_class_cmd,
+		 "class QOS_CMAP_NAME$name",
+		 "Configure a class of the policy-map\n"
+		 "Class-map name, or class-default\n")
+{
+	char xpath[XPATH_MAXLEN];
+	int ret;
+
+	snprintf(xpath, sizeof(xpath), "%s/class[name='%s']", VTY_CURR_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+
+	ret = nb_cli_apply_changes(vty, NULL);
+	if (ret == CMD_SUCCESS)
+		VTY_PUSH_XPATH(POLICY_MAP_CLASS_NODE, xpath);
+
+	return ret;
+}
+
+DEFPY_YANG (no_policy_map_class,
+	    no_policy_map_class_cmd,
+	    "no class QOS_CMAP_NAME$name",
+	    NO_STR
+	    "Remove a class from the policy-map\n"
+	    "Class-map name, or class-default\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "%s/class[name='%s']", VTY_CURR_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static int qos_class_rate_set(struct vty *vty, const char *container, const char *percent,
+			      const char *rate)
+{
+	char xpath[XPATH_MAXLEN];
+	char value[32];
+	uint64_t bps;
+
+	if (percent) {
+		snprintf(xpath, sizeof(xpath), "./%s/percent", container);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, percent);
+	} else {
+		if (qos_parse_rate(rate, &bps)) {
+			vty_out(vty, "%% Invalid rate: %s\n", rate);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		snprintf(value, sizeof(value), "%" PRIu64, bps);
+		snprintf(xpath, sizeof(xpath), "./%s/bps", container);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, value);
+	}
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static int qos_class_rate_unset(struct vty *vty, const char *container)
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "./%s/percent", container);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+	snprintf(xpath, sizeof(xpath), "./%s/bps", container);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (policy_class_bandwidth,
+	    policy_class_bandwidth_cmd,
+	    "bandwidth <percent (1-100)$percent|RATE$rate>",
+	    "Guaranteed bandwidth (HTB rate) of the class\n"
+	    "Percentage of the parent bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	return qos_class_rate_set(vty, "bandwidth", percent_str, rate);
+}
+
+DEFPY_YANG (no_policy_class_bandwidth,
+	    no_policy_class_bandwidth_cmd,
+	    "no bandwidth [<percent (1-100)|RATE>]",
+	    NO_STR
+	    "Guaranteed bandwidth (HTB rate) of the class\n"
+	    "Percentage of the parent bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	return qos_class_rate_unset(vty, "bandwidth");
+}
+
+DEFPY_YANG (policy_class_max_bandwidth,
+	    policy_class_max_bandwidth_cmd,
+	    "max-bandwidth <percent (1-100)$percent|RATE$rate>",
+	    "Maximum bandwidth (HTB ceil) of the class\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	return qos_class_rate_set(vty, "max-bandwidth", percent_str, rate);
+}
+
+DEFPY_YANG (no_policy_class_max_bandwidth,
+	    no_policy_class_max_bandwidth_cmd,
+	    "no max-bandwidth [<percent (1-100)|RATE>]",
+	    NO_STR
+	    "Maximum bandwidth (HTB ceil) of the class\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	return qos_class_rate_unset(vty, "max-bandwidth");
+}
+
+DEFPY_YANG (policy_class_priority,
+	    policy_class_priority_cmd,
+	    "[no] priority ![(0-7)$prio]",
+	    NO_STR
+	    "Class priority, used to share excess bandwidth\n"
+	    "Priority, 0 is the highest\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./priority", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./priority", NB_OP_MODIFY, prio_str);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (policy_class_queue_limit,
+	    policy_class_queue_limit_cmd,
+	    "[no] queue-limit ![(1-4294967295)$limit [packets]]",
+	    NO_STR
+	    "Queue length of the class\n"
+	    "Queue length\n"
+	    "Queue length is in packets\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./queue-limit", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./queue-limit", NB_OP_MODIFY, limit_str);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (policy_class_service_policy,
+	    policy_class_service_policy_cmd,
+	    "[no] service-policy ![QOS_PMAP_NAME$name]",
+	    NO_STR
+	    "Apply a child policy-map to the traffic of this class\n"
+	    "Child policy-map name\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./service-policy", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./service-policy", NB_OP_MODIFY, name);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_policy_map(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	vty_out(vty, "policy-map %s\n", yang_dnode_get_string(dnode, "name"));
+}
+
+static void cli_show_policy_map_end(struct vty *vty, const struct lyd_node *dnode)
+{
+	vty_out(vty, "exit\n");
+	vty_out(vty, "!\n");
+}
+
+static void cli_show_policy_class(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	vty_out(vty, " class %s\n", yang_dnode_get_string(dnode, "name"));
+}
+
+static void cli_show_policy_class_end(struct vty *vty, const struct lyd_node *dnode)
+{
+	vty_out(vty, " exit\n");
+}
+
+static void cli_show_policy_class_rate(struct vty *vty, const struct lyd_node *dnode,
+				       bool show_defaults)
+{
+	/* dnode is .../<bandwidth|max-bandwidth>/<percent|bps> */
+	const char *container = lyd_parent(dnode)->schema->name;
+	char buf[32];
+
+	if (strcmp(dnode->schema->name, "percent") == 0)
+		vty_out(vty, "  %s percent %u\n", container, yang_dnode_get_uint8(dnode, NULL));
+	else
+		vty_out(vty, "  %s %s\n", container,
+			qos_rate2str(yang_dnode_get_uint64(dnode, NULL), buf, sizeof(buf)));
+}
+
+static void cli_show_policy_class_priority(struct vty *vty, const struct lyd_node *dnode,
+					   bool show_defaults)
+{
+	vty_out(vty, "  priority %u\n", yang_dnode_get_uint8(dnode, NULL));
+}
+
+static void cli_show_policy_class_queue_limit(struct vty *vty, const struct lyd_node *dnode,
+					      bool show_defaults)
+{
+	vty_out(vty, "  queue-limit %u packets\n", yang_dnode_get_uint32(dnode, NULL));
+}
+
+static void cli_show_policy_class_service_policy(struct vty *vty, const struct lyd_node *dnode,
+						 bool show_defaults)
+{
+	vty_out(vty, "  service-policy %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * interface
+ * ----------------------------------------------------------------------
+ */
+
+DEFPY_YANG (interface_qos_bandwidth,
+	    interface_qos_bandwidth_cmd,
+	    "qos bandwidth RATE$rate",
+	    QOS_STR
+	    "Bandwidth available to the output service-policy\n"
+	    RATE_STR)
+{
+	char value[32];
+	uint64_t bps;
+
+	if (qos_parse_rate(rate, &bps)) {
+		vty_out(vty, "%% Invalid rate: %s\n", rate);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	snprintf(value, sizeof(value), "%" PRIu64, bps);
+	nb_cli_enqueue_change(vty, "./frr-qos:qos/bandwidth", NB_OP_MODIFY, value);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (no_interface_qos_bandwidth,
+	    no_interface_qos_bandwidth_cmd,
+	    "no qos bandwidth [RATE]",
+	    NO_STR
+	    QOS_STR
+	    "Bandwidth available to the output service-policy\n"
+	    RATE_STR)
+{
+	nb_cli_enqueue_change(vty, "./frr-qos:qos/bandwidth", NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (interface_service_policy,
+	    interface_service_policy_cmd,
+	    "[no] service-policy [output] ![QOS_PMAP_NAME$name]",
+	    NO_STR
+	    SERVICE_POLICY_STR
+	    "Apply to traffic leaving the interface (default)\n"
+	    "Policy-map name\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./frr-qos:qos/service-policy-output", NB_OP_DESTROY,
+				      NULL);
+	else
+		nb_cli_enqueue_change(vty, "./frr-qos:qos/service-policy-output", NB_OP_MODIFY,
+				      name);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_interface_qos_bandwidth(struct vty *vty, const struct lyd_node *dnode,
+					     bool show_defaults)
+{
+	char buf[32];
+
+	vty_out(vty, " qos bandwidth %s\n",
+		qos_rate2str(yang_dnode_get_uint64(dnode, NULL), buf, sizeof(buf)));
+}
+
+static void cli_show_interface_service_policy(struct vty *vty, const struct lyd_node *dnode,
+					      bool show_defaults)
+{
+	vty_out(vty, " service-policy output %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * Nodes and init
+ * ----------------------------------------------------------------------
+ */
+
+/*
+ * Note: mgmtd writes the running configuration of all YANG modules itself
+ * (mgmtd_config_write()), so these nodes have no config_write callback.
+ */
+static struct cmd_node class_map_node = {
+	.name = "class-map",
+	.node = CLASS_MAP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-cmap)# ",
+};
+
+static struct cmd_node policy_map_node = {
+	.name = "policy-map",
+	.node = POLICY_MAP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-pmap)# ",
+};
+
+static struct cmd_node policy_map_class_node = {
+	.name = "policy-map class",
+	.node = POLICY_MAP_CLASS_NODE,
+	.parent_node = POLICY_MAP_NODE,
+	.prompt = "%s(config-pmap-c)# ",
+};
+
+static const struct cmd_variable_handler qos_var_handlers[] = {
+	{ .tokenname = "QOS_CMAP_NAME", .xpath = QOS_XPATH "/class-map/name" },
+	{ .tokenname = "QOS_PMAP_NAME", .xpath = QOS_XPATH "/policy-map/name" },
+	{ .completions = NULL },
+};
+
+/* clang-format off */
+const struct frr_yang_module_info frr_qos_cli_info = {
+	.name = "frr-qos",
+	.ignore_cfg_cbs = true,
+	.nodes = {
+		{
+			.xpath = "/frr-qos:qos/class-map",
+			.cbs = {
+				.cli_show = cli_show_class_map,
+				.cli_show_end = cli_show_class_map_end,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/class-map/access-group",
+			.cbs.cli_show = cli_show_class_map_access_group,
+		},
+		{
+			.xpath = "/frr-qos:qos/class-map/any",
+			.cbs.cli_show = cli_show_class_map_any,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map",
+			.cbs = {
+				.cli_show = cli_show_policy_map,
+				.cli_show_end = cli_show_policy_map_end,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class",
+			.cbs = {
+				.cli_show = cli_show_policy_class,
+				.cli_show_end = cli_show_policy_class_end,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/bandwidth/percent",
+			.cbs.cli_show = cli_show_policy_class_rate,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/bandwidth/bps",
+			.cbs.cli_show = cli_show_policy_class_rate,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/max-bandwidth/percent",
+			.cbs.cli_show = cli_show_policy_class_rate,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/max-bandwidth/bps",
+			.cbs.cli_show = cli_show_policy_class_rate,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/priority",
+			.cbs.cli_show = cli_show_policy_class_priority,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/queue-limit",
+			.cbs.cli_show = cli_show_policy_class_queue_limit,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/service-policy",
+			.cbs.cli_show = cli_show_policy_class_service_policy,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/bandwidth",
+			.cbs.cli_show = cli_show_interface_qos_bandwidth,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/service-policy-output",
+			.cbs.cli_show = cli_show_interface_service_policy,
+		},
+		{
+			.xpath = NULL,
+		},
+	}
+};
+/* clang-format on */
+
+void zebra_qos_cli_init(void)
+{
+	cmd_variable_handler_register(qos_var_handlers);
+
+	install_node(&class_map_node);
+	install_node(&policy_map_node);
+	install_node(&policy_map_class_node);
+
+	install_default(CLASS_MAP_NODE);
+	install_default(POLICY_MAP_NODE);
+	install_default(POLICY_MAP_CLASS_NODE);
+
+	install_element(CONFIG_NODE, &class_map_cmd);
+	install_element(CONFIG_NODE, &no_class_map_cmd);
+	install_element(CLASS_MAP_NODE, &class_map_match_acl_cmd);
+	install_element(CLASS_MAP_NODE, &class_map_match_dscp_cmd);
+	install_element(CLASS_MAP_NODE, &class_map_match_any_cmd);
+
+	install_element(CONFIG_NODE, &policy_map_cmd);
+	install_element(CONFIG_NODE, &no_policy_map_cmd);
+	install_element(POLICY_MAP_NODE, &policy_map_class_cmd);
+	install_element(POLICY_MAP_NODE, &no_policy_map_class_cmd);
+
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_bandwidth_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &no_policy_class_bandwidth_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_max_bandwidth_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &no_policy_class_max_bandwidth_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_priority_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_queue_limit_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_service_policy_cmd);
+
+	install_element(INTERFACE_NODE, &interface_qos_bandwidth_cmd);
+	install_element(INTERFACE_NODE, &no_interface_qos_bandwidth_cmd);
+	install_element(INTERFACE_NODE, &interface_service_policy_cmd);
+}
