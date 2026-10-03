@@ -3,7 +3,7 @@
  * Zebra - configured (zebra-created) Linux link types.
  *
  * Describes links that zebra is asked to create in the kernel through
- * configuration: bridge, veth, vlan and (standard) gre.  The parameter
+ * configuration: bridge, veth, vlan, (standard) gre and dummy.  The parameter
  * structures in this file are intentionally free of zebra/lib types so that
  * they can be carried inside a dataplane context and consumed by the netlink
  * encoder (zebra_link_netlink.c) without any additional dependencies.
@@ -34,6 +34,7 @@ enum zebra_link_kind {
 	ZEBRA_LINK_VETH,
 	ZEBRA_LINK_VLAN,
 	ZEBRA_LINK_GRE,
+	ZEBRA_LINK_DUMMY,
 	/* Future: GRETAP, IP6GRE, IP6GRETAP, VXLAN, ... */
 	ZEBRA_LINK_KIND_MAX,
 };
@@ -159,6 +160,8 @@ static inline const char *zebra_link_kind2str(enum zebra_link_kind kind)
 		return "vlan";
 	case ZEBRA_LINK_GRE:
 		return "gre";
+	case ZEBRA_LINK_DUMMY:
+		return "dummy";
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;

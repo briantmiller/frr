@@ -497,7 +497,7 @@ static void lib_interface_zebra_link_detect_cli_write(
  */
 static void link_type_enqueue_destroy_others(struct vty *vty, const char *keep)
 {
-	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre" };
+	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy" };
 	char xpath[XPATH_MAXLEN];
 	size_t i;
 
@@ -557,6 +557,18 @@ DEFPY_YANG (link_type_bridge,
 {
 	link_type_enqueue_destroy_others(vty, "bridge");
 	link_type_enqueue_container(vty, "bridge");
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (link_type_dummy,
+	link_type_dummy_cmd,
+	"link-type dummy",
+	"Create this interface in the kernel\n"
+	"Dummy interface\n")
+{
+	link_type_enqueue_destroy_others(vty, "dummy");
+	link_type_enqueue_container(vty, "dummy");
 
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -658,10 +670,11 @@ DEFPY_YANG (link_type_gre,
 
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|dummy|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
 	"Linux bridge\n"
+	"Dummy interface\n"
 	"Virtual ethernet pair\n"
 	"Other end of the pair\n"
 	"Name of the peer interface\n"
@@ -699,6 +712,13 @@ static void lib_interface_zebra_link_type_bridge_cli_write(struct vty *vty,
 							    bool show_defaults)
 {
 	vty_out(vty, " link-type bridge\n");
+}
+
+static void lib_interface_zebra_link_type_dummy_cli_write(struct vty *vty,
+							   const struct lyd_node *dnode,
+							   bool show_defaults)
+{
+	vty_out(vty, " link-type dummy\n");
 }
 
 static void lib_interface_zebra_link_type_veth_cli_write(struct vty *vty,
@@ -3647,6 +3667,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_link_type_bridge_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/dummy",
+			.cbs.cli_show = lib_interface_zebra_link_type_dummy_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/veth",
 			.cbs.cli_show = lib_interface_zebra_link_type_veth_cli_write,
 		},
@@ -3893,6 +3917,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &shutdown_if_cmd);
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
 	install_element(INTERFACE_NODE, &link_type_bridge_cmd);
+	install_element(INTERFACE_NODE, &link_type_dummy_cmd);
 	install_element(INTERFACE_NODE, &link_type_veth_cmd);
 	install_element(INTERFACE_NODE, &link_type_vlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);

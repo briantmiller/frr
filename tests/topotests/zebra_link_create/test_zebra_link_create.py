@@ -481,6 +481,43 @@ def test_bridge_port_options(tgen):
     conf(r1, "no interface q1", "no interface br3")
 
 
+def test_dummy(tgen):
+    "link-type dummy: create, recreate when removed behind our back, remove"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "dummy"):
+        pytest.skip("kernel lacks dummy support")
+
+    conf(r1, "interface dm0", "link-type dummy", "exit", "interface dm1", "link-type dummy")
+    assert wait_link(r1, "dm0", {"linkinfo": {"info_kind": "dummy"}}) is None
+    assert wait_link(r1, "dm1", {"linkinfo": {"info_kind": "dummy"}}) is None
+
+    # a dummy can be a bridge port like any interface
+    conf(r1, "interface br4", "link-type bridge", "exit", "interface dm0", "master br4")
+    assert wait_link(r1, "dm0", {"master": "br4"}) is None
+
+    # removed behind our back: created again, and enslaved again
+    r1.cmd("ip link del dm0")
+    assert (
+        wait_link(r1, "dm0", {"linkinfo": {"info_kind": "dummy"}, "master": "br4"})
+        is None
+    )
+
+    # replacing the kind removes the dummy and creates the new link
+    conf(r1, "interface dm1", "link-type bridge")
+    assert wait_link(r1, "dm1", {"linkinfo": {"info_kind": "bridge"}}) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " link-type dummy" in out
+
+    conf(r1, "interface dm0", "no link-type", "no master")
+    assert wait_link(r1, "dm0", None) is None
+    conf(r1, "interface dm1", "no link-type")
+    conf(r1, "interface br4", "no link-type")
+    assert wait_link(r1, "dm1", None) is None
+    assert wait_link(r1, "br4", None) is None
+    conf(r1, "no interface dm0", "no interface dm1", "no interface br4")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

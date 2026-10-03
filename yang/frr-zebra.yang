@@ -2701,6 +2701,15 @@ module frr-zebra {
             }
           }
 
+          case dummy {
+            container dummy {
+              presence "Create a dummy interface.";
+              description
+                "A dummy interface: a virtual interface that is not attached
+                 to anything, typically used to carry addresses.";
+            }
+          }
+
           case veth {
             container veth {
               presence "Create a veth pair.";

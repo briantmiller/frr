@@ -232,6 +232,13 @@ Standard Commands
    Have zebra create this interface as a Linux bridge using netlink. The
    bridge settings are configured with ``bridge <setting>`` (see below).
 
+.. clicmd:: link-type dummy
+
+   Have zebra create this interface as a Linux dummy interface using netlink.
+   A dummy interface is not attached to anything and is typically used to
+   carry addresses (for example a stable loopback-style address for a
+   routing protocol).
+
 .. clicmd:: link-type veth peer IFNAME
 
    Create this interface as one end of a veth pair; ``IFNAME`` is the name of

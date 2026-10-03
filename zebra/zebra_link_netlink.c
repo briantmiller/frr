@@ -78,6 +78,8 @@ const char *zebra_link_params_validate(const char *ifname,
 		return vlan_validate(ifname, p);
 	case ZEBRA_LINK_GRE:
 		return gre_validate(ifname, p);
+	case ZEBRA_LINK_DUMMY:
+		return NULL;
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;
@@ -436,6 +438,11 @@ static bool gre_put_data(struct nlmsghdr *n, size_t buflen,
 }
 
 static const struct link_kind_ops link_kinds[] = {
+	{
+		.kind = ZEBRA_LINK_DUMMY,
+		.name = "dummy",
+		/* no parameters */
+	},
 	{
 		.kind = ZEBRA_LINK_BRIDGE,
 		.name = "bridge",

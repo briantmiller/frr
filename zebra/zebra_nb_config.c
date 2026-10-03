@@ -1553,7 +1553,7 @@ int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
 /*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
  *
- * Every kind (bridge, veth, vlan, gre, and future ones) shares these
+ * Every kind (bridge, veth, vlan, gre, dummy, and future ones) shares these
  * callbacks.  Create/modify of the individual leaves are no-ops: the whole
  * container is evaluated once per transaction in apply_finish, so leaves that
  * depend on one another (gre local/dev/remote) are always seen consistently.
@@ -1584,6 +1584,8 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 
 	if (strmatch(kind, "bridge")) {
 		p->kind = ZEBRA_LINK_BRIDGE;
+	} else if (strmatch(kind, "dummy")) {
+		p->kind = ZEBRA_LINK_DUMMY;
 	} else if (strmatch(kind, "veth")) {
 		p->kind = ZEBRA_LINK_VETH;
 		strlcpy(p->u.veth.peer_name, yang_dnode_get_string(dnode, "peer-name"),

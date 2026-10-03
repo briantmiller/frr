@@ -478,6 +478,14 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/dummy",
+			.cbs = {
+				.create = lib_interface_zebra_link_type_create,
+				.destroy = lib_interface_zebra_link_type_destroy,
+				.apply_finish = lib_interface_zebra_link_type_apply_finish,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/veth",
 			.cbs = {
 				.create = lib_interface_zebra_link_type_create,
