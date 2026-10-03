@@ -478,6 +478,32 @@ static int netlink_tfilter_flower_port_type(uint8_t ip_proto, bool src)
 		return -1;
 }
 
+/* Attach a single gact action (TCA_FLOWER_ACT) with the given verdict */
+static bool netlink_tfilter_put_gact(struct nlmsghdr *n, size_t datalen, int action)
+{
+	struct rtattr *act_nest, *prio_nest, *opt_nest;
+	struct tc_gact gact = { .action = action };
+
+	act_nest = nl_attr_nest(n, datalen, TCA_FLOWER_ACT);
+	if (!act_nest)
+		return false;
+	prio_nest = nl_attr_nest(n, datalen, 1);
+	if (!prio_nest)
+		return false;
+	if (!nl_attr_put(n, datalen, TCA_ACT_KIND, "gact", strlen("gact") + 1))
+		return false;
+	opt_nest = nl_attr_nest(n, datalen, TCA_ACT_OPTIONS);
+	if (!opt_nest)
+		return false;
+	if (!nl_attr_put(n, datalen, TCA_GACT_PARMS, &gact, sizeof(gact)))
+		return false;
+	nl_attr_nest_end(n, opt_nest);
+	nl_attr_nest_end(n, prio_nest);
+	nl_attr_nest_end(n, act_nest);
+
+	return true;
+}
+
 static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen,
 					      struct zebra_dplane_ctx *ctx)
 {
@@ -603,32 +629,20 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 		 * gact "goto chain N": carry on classifying in another chain
 		 * instead of selecting a class.
 		 */
-		struct rtattr *act_nest, *prio_nest, *opt_nest;
-		struct tc_gact gact = {
-			.action = TC_ACT_GOTO_CHAIN |
-				  (dplane_ctx_tc_filter_get_goto_chain(ctx) & TC_ACT_EXT_VAL_MASK),
-		};
-
-		act_nest = nl_attr_nest(n, datalen, TCA_FLOWER_ACT);
-		if (!act_nest)
+		if (!netlink_tfilter_put_gact(n, datalen,
+					      TC_ACT_GOTO_CHAIN |
+						      (dplane_ctx_tc_filter_get_goto_chain(ctx) &
+						       TC_ACT_EXT_VAL_MASK)))
 			return 0;
-		prio_nest = nl_attr_nest(n, datalen, 1);
-		if (!prio_nest)
-			return 0;
-		if (!nl_attr_put(n, datalen, TCA_ACT_KIND, "gact", strlen("gact") + 1))
-			return 0;
-		opt_nest = nl_attr_nest(n, datalen, TCA_ACT_OPTIONS);
-		if (!opt_nest)
-			return 0;
-		if (!nl_attr_put(n, datalen, TCA_GACT_PARMS, &gact, sizeof(gact)))
-			return 0;
-		nl_attr_nest_end(n, opt_nest);
-		nl_attr_nest_end(n, prio_nest);
-		nl_attr_nest_end(n, act_nest);
 	} else {
 		classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
 				    dplane_ctx_tc_filter_get_classid(ctx));
 		if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
+			return 0;
+
+		/* gact "pass" keeps the class and counts the matches */
+		if ((filter_bm & TC_FLOWER_ACT_COUNT) &&
+		    !netlink_tfilter_put_gact(n, datalen, TC_ACT_OK))
 			return 0;
 	}
 
@@ -1039,9 +1053,12 @@ static void tc_class_stats_parse(struct nlmsghdr *h, ifindex_t ifindex,
 	cb(&stats, arg);
 }
 
-int kernel_tc_class_stats(ifindex_t ifindex,
-			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
-			  void *arg)
+/*
+ * Dump RTM_GETTCLASS/RTM_GETTFILTER objects of @ifindex (and @parent, a full
+ * handle, for filters) on a private socket and hand each message to @msg_cb.
+ */
+static int tc_dump(uint16_t type, ifindex_t ifindex, uint32_t parent,
+		   void (*msg_cb)(struct nlmsghdr *h, void *arg), void *arg)
 {
 	struct {
 		struct nlmsghdr n;
@@ -1061,11 +1078,12 @@ int kernel_tc_class_stats(ifindex_t ifindex,
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
 	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
-	req.n.nlmsg_type = RTM_GETTCLASS;
+	req.n.nlmsg_type = type;
 	req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
 	req.n.nlmsg_seq = seq;
 	req.t.tcm_family = AF_UNSPEC;
 	req.t.tcm_ifindex = ifindex;
+	req.t.tcm_parent = parent;
 
 	if (sendto(sock, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&snl, sizeof(snl)) < 0)
 		goto out;
@@ -1093,7 +1111,7 @@ int kernel_tc_class_stats(ifindex_t ifindex,
 				done = true;
 				break;
 			}
-			tc_class_stats_parse(h, ifindex, cb, arg);
+			msg_cb(h, arg);
 		}
 	}
 
@@ -1101,6 +1119,113 @@ int kernel_tc_class_stats(ifindex_t ifindex,
 out:
 	close(sock);
 	return ret;
+}
+
+struct tc_class_stats_args {
+	ifindex_t ifindex;
+	void (*cb)(const struct zebra_tc_class_stats *stats, void *arg);
+	void *arg;
+};
+
+static void tc_class_stats_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_class_stats_args *a = arg;
+
+	tc_class_stats_parse(h, a->ifindex, a->cb, a->arg);
+}
+
+int kernel_tc_class_stats(ifindex_t ifindex,
+			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+			  void *arg)
+{
+	struct tc_class_stats_args a = { .ifindex = ifindex, .cb = cb, .arg = arg };
+
+	return tc_dump(RTM_GETTCLASS, ifindex, 0, tc_class_stats_msg, &a);
+}
+
+/*
+ * Counters of the first action of a filter: TCA_*_ACT { 1 { TCA_ACT_STATS
+ * { TCA_STATS_BASIC [TCA_STATS_PKT64] } } }.
+ */
+static bool tc_action_stats_parse(struct rtattr *acts, uint64_t *bytes, uint64_t *packets)
+{
+	struct rtattr *prio[TCA_ACT_MAX_PRIO + 1];
+	struct rtattr *act[TCA_ACT_MAX + 1];
+	struct rtattr *st[TCA_STATS_MAX + 1];
+	struct gnet_stats_basic basic;
+
+	netlink_parse_rtattr_nested(prio, TCA_ACT_MAX_PRIO, acts);
+	if (!prio[1])
+		return false;
+
+	netlink_parse_rtattr_nested(act, TCA_ACT_MAX, prio[1]);
+	if (!act[TCA_ACT_STATS])
+		return false;
+
+	netlink_parse_rtattr_nested(st, TCA_STATS_MAX, act[TCA_ACT_STATS]);
+	if (!st[TCA_STATS_BASIC] || RTA_PAYLOAD(st[TCA_STATS_BASIC]) < sizeof(basic))
+		return false;
+
+	memcpy(&basic, RTA_DATA(st[TCA_STATS_BASIC]), sizeof(basic));
+	*bytes = basic.bytes;
+	*packets = basic.packets;
+	if (st[TCA_STATS_PKT64] && RTA_PAYLOAD(st[TCA_STATS_PKT64]) >= sizeof(uint64_t))
+		memcpy(packets, RTA_DATA(st[TCA_STATS_PKT64]), sizeof(uint64_t));
+
+	return true;
+}
+
+struct tc_filter_stats_args {
+	ifindex_t ifindex;
+	void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg);
+	void *arg;
+};
+
+static void tc_filter_stats_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_filter_stats_args *a = arg;
+	struct rtattr *tb[TCA_MAX + 1];
+	struct zebra_tc_filter_stats stats = {};
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWTFILTER || len < 0 || tcm->tcm_ifindex != a->ifindex)
+		return;
+
+	/* the per priority "header" entries have no handle */
+	if (!tcm->tcm_handle)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+
+	stats.parent = tcm->tcm_parent;
+	stats.handle = tcm->tcm_handle;
+	stats.priority = TC_H_MAJ(tcm->tcm_info) >> 16;
+	stats.protocol = ntohs(TC_H_MIN(tcm->tcm_info));
+	if (tb[TCA_CHAIN])
+		stats.chain = *(uint32_t *)RTA_DATA(tb[TCA_CHAIN]);
+	if (tb[TCA_KIND])
+		strlcpy(stats.kind, RTA_DATA(tb[TCA_KIND]), sizeof(stats.kind));
+
+	if (tb[TCA_OPTIONS] && strcmp(stats.kind, "flower") == 0) {
+		struct rtattr *opt[TCA_FLOWER_MAX + 1];
+
+		netlink_parse_rtattr_nested(opt, TCA_FLOWER_MAX, tb[TCA_OPTIONS]);
+		if (opt[TCA_FLOWER_ACT])
+			stats.stats_valid = tc_action_stats_parse(opt[TCA_FLOWER_ACT],
+								  &stats.bytes, &stats.packets);
+	}
+
+	a->cb(&stats, a->arg);
+}
+
+int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
+			   void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg),
+			   void *arg)
+{
+	struct tc_filter_stats_args a = { .ifindex = ifindex, .cb = cb, .arg = arg };
+
+	return tc_dump(RTM_GETTFILTER, ifindex, parent, tc_filter_stats_msg, &a);
 }
 
 void kernel_read_tc_qdisc(struct zebra_dplane_ctx *ctx)

@@ -110,6 +110,19 @@ struct qos_hw_class {
 	uint32_t queue_limit;
 	bool leaf;
 	char name[2 * QOS_NAME_LEN + 1];
+	/* policy-map and class (class-map name or class-default) */
+	char pmap[QOS_NAME_LEN];
+	char cmap[QOS_NAME_LEN];
+};
+
+#define QOS_ORIGIN_LEN 96
+
+/* Bookkeeping kept next to each tc filter, for "show class-map interface" */
+struct qos_hw_filter_info {
+	/* minor of the class whose match statements produced the filter */
+	uint32_t owner;
+	/* what produced it, e.g. "access-list VOICE seq 5 deny" */
+	char origin[QOS_ORIGIN_LEN];
 };
 
 /* Complete kernel state of one interface */
@@ -124,6 +137,8 @@ struct qos_hw {
 	unsigned int classes_size;
 
 	struct tc_filter *filters;
+	/* parallel to filters */
+	struct qos_hw_filter_info *finfo;
 	unsigned int nfilters;
 	unsigned int filters_size;
 };
@@ -317,6 +332,7 @@ static void qos_hw_free(struct qos_hw **hw)
 
 	XFREE(MTYPE_QOS_HW, (*hw)->classes);
 	XFREE(MTYPE_QOS_HW, (*hw)->filters);
+	XFREE(MTYPE_QOS_HW, (*hw)->finfo);
 	XFREE(MTYPE_QOS_HW, *hw);
 }
 
@@ -344,6 +360,9 @@ struct qos_build {
 	unsigned int depth;
 	/* resource limits exceeded, refuse to install */
 	bool overflow;
+	/* class and description recorded for the next filters */
+	uint32_t owner;
+	char origin[QOS_ORIGIN_LEN];
 };
 
 /* Filter placement state for one policy level */
@@ -369,7 +388,12 @@ static struct tc_filter *qos_filter_new(struct qos_build *b, struct qos_level *l
 		hw->filters_size = hw->filters_size ? hw->filters_size * 2 : 32;
 		hw->filters = XREALLOC(MTYPE_QOS_HW, hw->filters,
 				       hw->filters_size * sizeof(*hw->filters));
+		hw->finfo = XREALLOC(MTYPE_QOS_HW, hw->finfo,
+				     hw->filters_size * sizeof(*hw->finfo));
 	}
+
+	hw->finfo[hw->nfilters].owner = b->owner;
+	strlcpy(hw->finfo[hw->nfilters].origin, b->origin, sizeof(hw->finfo[0].origin));
 
 	f = &hw->filters[hw->nfilters++];
 	/* zeroed so that whole structures can be compared with memcmp */
@@ -388,8 +412,12 @@ static struct tc_filter *qos_filter_new(struct qos_build *b, struct qos_level *l
 
 static void qos_filter_classify(struct tc_filter *f, uint32_t minor)
 {
-	if (f)
-		f->u.flower.classid = minor;
+	if (!f)
+		return;
+
+	f->u.flower.classid = minor;
+	/* gives the filter hit counters, see "show class-map interface" */
+	f->u.flower.filter_bm |= TC_FLOWER_ACT_COUNT;
 }
 
 static void qos_filter_goto(struct tc_filter *f, uint32_t chain)
@@ -399,6 +427,27 @@ static void qos_filter_goto(struct tc_filter *f, uint32_t chain)
 
 	f->u.flower.filter_bm |= TC_FLOWER_ACT_GOTO_CHAIN;
 	f->u.flower.goto_chain = chain;
+}
+
+static const char *qos_dscp_name(uint8_t dscp)
+{
+	static const char *const names[64] = {
+		[0] = "default", [8] = "cs1",	[10] = "af11", [12] = "af12", [14] = "af13",
+		[16] = "cs2",	 [18] = "af21", [20] = "af22", [22] = "af23", [24] = "cs3",
+		[26] = "af31",	 [28] = "af32", [30] = "af33", [32] = "cs4",  [34] = "af41",
+		[36] = "af42",	 [38] = "af43", [40] = "cs5",  [46] = "ef",   [48] = "cs6",
+		[56] = "cs7",
+	};
+	static const char *const numbers[64] = {
+		"0",  "1",  "2",  "3",	"4",  "5",  "6",  "7",	"8",  "9",  "10", "11", "12",
+		"13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25",
+		"26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37", "38",
+		"39", "40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "50", "51",
+		"52", "53", "54", "55", "56", "57", "58", "59", "60", "61", "62", "63",
+	};
+
+	dscp &= 63;
+	return names[dscp] ? names[dscp] : numbers[dscp];
 }
 
 static void qos_filter_dscp(struct tc_filter *f, uint8_t dscp)
@@ -416,6 +465,7 @@ static void qos_segment_end(struct qos_build *b, struct qos_level *lvl)
 {
 	struct tc_filter *f;
 
+	snprintf(b->origin, sizeof(b->origin), "no match: next statement");
 	f = qos_filter_new(b, lvl, ETH_P_ALL);
 	qos_filter_goto(f, lvl->chain + 1);
 
@@ -601,6 +651,11 @@ static bool qos_segment_acl(struct qos_build *b, struct qos_level *lvl, const ch
 			if (!qos_rule_from_filter(flt, &rule))
 				continue;
 
+			snprintf(b->origin, sizeof(b->origin),
+				 "%saccess-list %s seq %" PRId64 " %s",
+				 afis[i] == AFI_IP6 ? "ipv6 " : "", name, flt->seq,
+				 rule.permit ? "permit" : "deny");
+
 			if (!rule.permit) {
 				f = qos_filter_from_rule(b, lvl, &rule);
 				qos_filter_goto(f, lvl->chain + 1);
@@ -636,8 +691,11 @@ static void qos_segment_dscp(struct qos_build *b, struct qos_level *lvl, uint64_
 			continue;
 
 		for (size_t i = 0; i < array_size(protos); i++) {
-			struct tc_filter *f = qos_filter_new(b, lvl, protos[i]);
+			struct tc_filter *f;
 
+			snprintf(b->origin, sizeof(b->origin), "match ip dscp %s",
+				 qos_dscp_name(d));
+			f = qos_filter_new(b, lvl, protos[i]);
 			qos_filter_dscp(f, d);
 			qos_filter_classify(f, classid);
 		}
@@ -656,7 +714,10 @@ static void qos_build_class_filters(struct qos_build *b, struct qos_level *lvl,
 		return;
 
 	if (cmap->match_all_packets) {
-		struct tc_filter *f = qos_filter_new(b, lvl, ETH_P_ALL);
+		struct tc_filter *f;
+
+		snprintf(b->origin, sizeof(b->origin), "match any");
+		f = qos_filter_new(b, lvl, ETH_P_ALL);
 
 		qos_filter_classify(f, classid);
 		lvl->chain++;
@@ -805,13 +866,21 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 		hc->leaf = !child;
 		hc->queue_limit = child ? 0 : pclass->queue_limit;
 		snprintf(hc->name, sizeof(hc->name), "%s/%s", pmap->name, pclass->name);
+		strlcpy(hc->pmap, pmap->name, sizeof(hc->pmap));
+		strlcpy(hc->cmap, pclass->name, sizeof(hc->cmap));
 
 		/* hc may move when the child level adds classes */
 		if (child)
 			qos_build_level(b, child, minor, rates[i]);
 
+		/* the filters below belong to this class */
+		b->owner = minor;
+
 		if (pclass == def) {
-			struct tc_filter *f = qos_filter_new(b, &lvl, ETH_P_ALL);
+			struct tc_filter *f;
+
+			snprintf(b->origin, sizeof(b->origin), "class-default: everything else");
+			f = qos_filter_new(b, &lvl, ETH_P_ALL);
 
 			qos_filter_classify(f, minor);
 			if (lvl.parent == 0)
@@ -892,6 +961,7 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 	root->prio = 0;
 	root->leaf = false;
 	snprintf(root->name, sizeof(root->name), "%s", pmap->name);
+	strlcpy(root->pmap, pmap->name, sizeof(root->pmap));
 
 	qos_build_level(&b, pmap, QOS_ROOT_MINOR, bw);
 
@@ -1414,6 +1484,387 @@ DEFPY (show_qos_interface,
 }
 
 /*
+ * show class-map interface
+ */
+
+static void qos_addr2str(const struct prefix *p, const uint8_t *mask, char *buf, size_t len)
+{
+	size_t bytes = p->family == AF_INET ? IPV4_MAX_BYTELEN : IPV6_MAX_BYTELEN;
+	unsigned int plen = 0;
+	bool contiguous = true, ended = false;
+	char addr[INET6_ADDRSTRLEN], maskstr[INET6_ADDRSTRLEN];
+
+	for (size_t i = 0; i < bytes; i++) {
+		for (int bit = 7; bit >= 0; bit--) {
+			if (mask[i] & (1 << bit)) {
+				if (ended)
+					contiguous = false;
+				plen++;
+			} else {
+				ended = true;
+			}
+		}
+	}
+
+	inet_ntop(p->family, &p->u.prefix, addr, sizeof(addr));
+	if (!contiguous) {
+		inet_ntop(p->family, mask, maskstr, sizeof(maskstr));
+		snprintf(buf, len, "%s/%s", addr, maskstr);
+	} else if (plen == bytes * 8) {
+		snprintf(buf, len, "%s", addr);
+	} else {
+		snprintf(buf, len, "%s/%u", addr, plen);
+	}
+}
+
+static const char *qos_filter_proto2str(uint16_t proto)
+{
+	switch (proto) {
+	case ETH_P_IP:
+		return "ipv4";
+	case ETH_P_IPV6:
+		return "ipv6";
+	case ETH_P_ALL:
+		return "all";
+	}
+	return "?";
+}
+
+/* Human readable flower keys of a filter zebra generated */
+static const char *qos_filter_match2str(const struct tc_filter *f, char *buf, size_t len)
+{
+	const struct tc_flower *fl = &f->u.flower;
+	char addr[2 * INET6_ADDRSTRLEN + 2];
+
+	buf[0] = '\0';
+
+	if (CHECK_FLAG(fl->filter_bm, TC_FLOWER_SRC_IP)) {
+		qos_addr2str(&fl->src_ip, fl->src_mask, addr, sizeof(addr));
+		snprintf(buf + strlen(buf), len - strlen(buf), "src %s ", addr);
+	}
+	if (CHECK_FLAG(fl->filter_bm, TC_FLOWER_DST_IP)) {
+		qos_addr2str(&fl->dst_ip, fl->dst_mask, addr, sizeof(addr));
+		snprintf(buf + strlen(buf), len - strlen(buf), "dst %s ", addr);
+	}
+	if (CHECK_FLAG(fl->filter_bm, TC_FLOWER_DSFIELD))
+		snprintf(buf + strlen(buf), len - strlen(buf), "dscp %s ",
+			 qos_dscp_name(fl->dsfield >> 2));
+
+	if (buf[0])
+		buf[strlen(buf) - 1] = '\0';
+	else
+		snprintf(buf, len, "any");
+
+	return buf;
+}
+
+static const char *qos_filter_action2str(const struct tc_filter *f, char *buf, size_t len)
+{
+	if (CHECK_FLAG(f->u.flower.filter_bm, TC_FLOWER_ACT_GOTO_CHAIN))
+		snprintf(buf, len, "goto chain %u", f->u.flower.goto_chain);
+	else
+		snprintf(buf, len, "classify");
+
+	return buf;
+}
+
+static const char *qos_handle2str(uint32_t minor, char *buf, size_t len)
+{
+	if (minor)
+		snprintf(buf, len, "%x:%x", TC_QDISC_MAJOR_ZEBRA >> 16, minor);
+	else
+		snprintf(buf, len, "%x:", TC_QDISC_MAJOR_ZEBRA >> 16);
+
+	return buf;
+}
+
+/* Counters of the kernel filters, indexed like hw->filters */
+struct qos_filter_show_stats {
+	const struct qos_hw *hw;
+	/* attach point being dumped */
+	uint32_t parent;
+	struct zebra_tc_filter_stats *stats;
+	/* counters available */
+	bool *valid;
+	/* present in the kernel */
+	bool *found;
+	/* at least one attach point could be read */
+	bool any;
+};
+
+static void qos_filter_stats_cb(const struct zebra_tc_filter_stats *st, void *arg)
+{
+	struct qos_filter_show_stats *fs = arg;
+
+	for (unsigned int i = 0; i < fs->hw->nfilters; i++) {
+		const struct tc_filter *f = &fs->hw->filters[i];
+
+		if (f->parent == fs->parent && f->chain == st->chain &&
+		    f->priority == st->priority && f->handle == st->handle) {
+			fs->stats[i] = *st;
+			fs->valid[i] = st->stats_valid;
+			fs->found[i] = true;
+			return;
+		}
+	}
+}
+
+static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp, json_object *json)
+{
+	struct zebra_if *zif = ifp->info;
+	struct zebra_if_qos *qos = zif ? zif->qos : NULL;
+	const struct qos_hw *hw = qos ? qos->installed : NULL;
+	struct qos_show_stats cs = {};
+	struct qos_filter_show_stats fs = {};
+	json_object *json_if = NULL, *json_cmaps = NULL;
+	bool have_class_stats;
+	unsigned int i, j, missing = 0;
+
+	if (json) {
+		json_if = json_object_new_object();
+		json_object_object_add(json, ifp->name, json_if);
+		if (qos && qos->service_policy[0])
+			json_object_string_add(json_if, "servicePolicyOutput", qos->service_policy);
+		json_object_boolean_add(json_if, "installed", !!hw);
+	} else {
+		vty_out(vty, "Interface %s", ifp->name);
+		if (qos && qos->service_policy[0])
+			vty_out(vty, ", service-policy output %s", qos->service_policy);
+		vty_out(vty, "\n");
+	}
+
+	if (!hw) {
+		const char *reason = !qos || !qos->service_policy[0]
+					     ? "no service-policy"
+					     : (qos->reason ? qos->reason : "not installed");
+
+		if (json_if)
+			json_object_string_add(json_if, "reason", reason);
+		else
+			vty_out(vty, "  No classes installed: %s\n\n", reason);
+		return;
+	}
+
+	/* class statistics */
+	cs.hw = hw;
+	cs.stats = XCALLOC(MTYPE_TMP, hw->nclasses * sizeof(*cs.stats));
+	cs.valid = XCALLOC(MTYPE_TMP, hw->nclasses * sizeof(*cs.valid));
+	have_class_stats = kernel_tc_class_stats(hw->ifindex, qos_show_stats_cb, &cs) == 0;
+
+	/* filter statistics, per attach point: the root qdisc and inner classes */
+	fs.hw = hw;
+	fs.stats = XCALLOC(MTYPE_TMP, MAX(hw->nfilters, 1) * sizeof(*fs.stats));
+	fs.valid = XCALLOC(MTYPE_TMP, MAX(hw->nfilters, 1) * sizeof(*fs.valid));
+	fs.found = XCALLOC(MTYPE_TMP, MAX(hw->nfilters, 1) * sizeof(*fs.found));
+	for (i = 0; i < hw->nclasses; i++) {
+		const struct qos_hw_class *hc = &hw->classes[i];
+		uint32_t attach;
+
+		if (i == 0)
+			attach = 0;
+		else if (!hc->leaf)
+			attach = hc->minor;
+		else
+			continue;
+
+		fs.parent = attach;
+		if (kernel_tc_filter_stats(hw->ifindex, QOS_TC_HANDLE(TC_QDISC_MAJOR_ZEBRA, attach),
+					   qos_filter_stats_cb, &fs) == 0)
+			fs.any = true;
+	}
+
+	if (json_if) {
+		json_cmaps = json_object_new_array();
+		json_object_object_add(json_if, "classMaps", json_cmaps);
+	}
+
+	/* every class except the HTB root class, in hierarchy order */
+	for (i = 1; i < hw->nclasses; i++) {
+		const struct qos_hw_class *hc = &hw->classes[i];
+		const struct qos_class_map *cmap = qos_class_map_lookup(hc->cmap);
+		const char *mtype;
+		uint32_t attach = hc->parent == QOS_ROOT_MINOR ? 0 : hc->parent;
+		char classid[16], parent[16], attach_str[16], buf[64];
+		json_object *jc = NULL, *jfilters = NULL;
+		unsigned int nfilt = 0;
+
+		if (strcmp(hc->cmap, QOS_CLASS_DEFAULT) == 0)
+			mtype = "everything else";
+		else if (!cmap)
+			mtype = "not configured";
+		else if (cmap->match_any)
+			mtype = "match-any";
+		else
+			mtype = "match-all";
+
+		qos_handle2str(hc->minor, classid, sizeof(classid));
+		qos_handle2str(hc->parent, parent, sizeof(parent));
+		qos_handle2str(attach, attach_str, sizeof(attach_str));
+
+		if (json_cmaps) {
+			jc = json_object_new_object();
+			json_object_array_add(json_cmaps, jc);
+			json_object_string_add(jc, "classMap", hc->cmap);
+			json_object_string_add(jc, "matchType", mtype);
+			json_object_string_add(jc, "policyMap", hc->pmap);
+			json_object_string_add(jc, "classId", classid);
+			json_object_string_add(jc, "parent", parent);
+			json_object_string_add(jc, "filtersAttachedTo", attach_str);
+			if (!hc->leaf)
+				json_object_boolean_add(jc, "hasChildPolicy", true);
+			if (cs.valid[i]) {
+				const struct zebra_tc_class_stats *st = &cs.stats[i];
+				json_object *js = json_object_new_object();
+
+				json_object_object_add(jc, "classStats", js);
+				json_object_int_add(js, "packets", st->packets);
+				json_object_int_add(js, "bytes", st->bytes);
+				json_object_int_add(js, "drops", st->drops);
+				json_object_int_add(js, "overlimits", st->overlimits);
+				if (st->rate_valid) {
+					json_object_int_add(js, "currentRate", st->bps);
+					json_object_int_add(js, "currentPps", st->pps);
+				}
+			}
+			jfilters = json_object_new_array();
+			json_object_object_add(jc, "filters", jfilters);
+		} else {
+			vty_out(vty, "\n  Class-map %s (%s)\n", hc->cmap, mtype);
+			vty_out(vty, "    Policy-map %s, HTB class %s, parent %s%s\n", hc->pmap,
+				classid, parent, hc->leaf ? "" : ", has a child policy");
+			if (cs.valid[i]) {
+				const struct zebra_tc_class_stats *st = &cs.stats[i];
+
+				vty_out(vty,
+					"    Class: %" PRIu64 " packets, %" PRIu64
+					" bytes, %u drops, %u overlimits",
+					st->packets, st->bytes, st->drops, st->overlimits);
+				if (st->rate_valid)
+					vty_out(vty, ", current %s",
+						qos_measured2str(st->bps, buf, sizeof(buf)));
+				vty_out(vty, "\n");
+			} else {
+				vty_out(vty, "    Class: statistics %s\n",
+					have_class_stats ? "not found" : "not available");
+			}
+		}
+
+		for (j = 0; j < hw->nfilters; j++) {
+			const struct tc_filter *f = &hw->filters[j];
+			char match[160], action[32], pkts[24], bytes[24];
+
+			if (hw->finfo[j].owner != hc->minor)
+				continue;
+
+			qos_filter_match2str(f, match, sizeof(match));
+			qos_filter_action2str(f, action, sizeof(action));
+
+			if (jfilters) {
+				json_object *jf = json_object_new_object();
+
+				json_object_array_add(jfilters, jf);
+				json_object_int_add(jf, "chain", f->chain);
+				json_object_int_add(jf, "pref", f->priority);
+				json_object_string_add(jf, "protocol",
+						       qos_filter_proto2str(f->protocol));
+				json_object_string_add(jf, "match", match);
+				json_object_string_add(jf, "action", action);
+				json_object_string_add(jf, "origin", hw->finfo[j].origin);
+				if (fs.any)
+					json_object_boolean_add(jf, "inKernel", fs.found[j]);
+				if (fs.valid[j]) {
+					json_object_int_add(jf, "packets", fs.stats[j].packets);
+					json_object_int_add(jf, "bytes", fs.stats[j].bytes);
+				}
+				nfilt++;
+				continue;
+			}
+
+			if (nfilt++ == 0) {
+				vty_out(vty, "    Filters attached to %s, in evaluation order:\n",
+					attach_str);
+				vty_out(vty, "      %-5s %-4s %-5s %-44s %-13s %-10s %-12s %s\n",
+					"Chain", "Pref", "Proto", "Match", "Action", "Packets",
+					"Bytes", "Origin");
+			}
+
+			if (fs.valid[j]) {
+				snprintf(pkts, sizeof(pkts), "%" PRIu64, fs.stats[j].packets);
+				snprintf(bytes, sizeof(bytes), "%" PRIu64, fs.stats[j].bytes);
+			} else if (fs.any && !fs.found[j]) {
+				/* the kernel does not have it: install failed */
+				snprintf(pkts, sizeof(pkts), "missing");
+				snprintf(bytes, sizeof(bytes), "-");
+				missing++;
+			} else {
+				snprintf(pkts, sizeof(pkts), "-");
+				snprintf(bytes, sizeof(bytes), "-");
+			}
+
+			vty_out(vty, "      %-5u %-4u %-5s %-44s %-13s %-10s %-12s %s\n", f->chain,
+				f->priority, qos_filter_proto2str(f->protocol), match, action,
+				pkts, bytes, hw->finfo[j].origin);
+		}
+
+		if (!jfilters && nfilt == 0)
+			vty_out(vty, "    No filters: the class-map matches nothing\n");
+	}
+
+	if (json_if) {
+		json_object_boolean_add(json_if, "filterStatistics", fs.any);
+	} else {
+		if (!fs.any)
+			vty_out(vty, "\n  Filter statistics not available\n");
+		else if (missing)
+			vty_out(vty,
+				"\n  Warning: %u of %u filters are missing from the kernel (\"missing\"),\n"
+				"  traffic they should classify goes to the default class.\n"
+				"  The kernel needs cls_flower and act_gact.\n",
+				missing, hw->nfilters);
+		vty_out(vty, "\n");
+	}
+
+	XFREE(MTYPE_TMP, cs.stats);
+	XFREE(MTYPE_TMP, cs.valid);
+	XFREE(MTYPE_TMP, fs.stats);
+	XFREE(MTYPE_TMP, fs.valid);
+	XFREE(MTYPE_TMP, fs.found);
+}
+
+DEFPY (show_class_map_interface,
+       show_class_map_interface_cmd,
+       "show class-map interface IFNAME$ifname [json$json]",
+       SHOW_STR
+       "QoS class-maps\n"
+       INTERFACE_STR
+       "Interface name\n"
+       JSON_STR)
+{
+	struct vrf *vrf;
+	struct interface *ifp;
+	json_object *json_out = json ? json_object_new_object() : NULL;
+	bool found = false;
+
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+		FOR_ALL_INTERFACES (vrf, ifp) {
+			if (strcmp(ifname, ifp->name))
+				continue;
+			qos_show_class_map_interface(vty, ifp, json_out);
+			found = true;
+		}
+	}
+
+	if (json_out) {
+		vty_json(vty, json_out);
+	} else if (!found) {
+		vty_out(vty, "%% Interface %s not found\n", ifname);
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
+/*
  * ----------------------------------------------------------------------
  * Init
  * ----------------------------------------------------------------------
@@ -1428,6 +1879,7 @@ void zebra_qos_init(void)
 	access_list_delete_hook(qos_acl_changed);
 
 	install_element(VIEW_NODE, &show_qos_interface_cmd);
+	install_element(VIEW_NODE, &show_class_map_interface_cmd);
 }
 
 void zebra_qos_terminate(void)

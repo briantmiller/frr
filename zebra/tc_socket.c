@@ -23,6 +23,13 @@ enum zebra_dplane_result kernel_tc_update(struct zebra_dplane_ctx *ctx)
 	return ZEBRA_DPLANE_REQUEST_FAILURE;
 }
 
+int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
+			   void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg),
+			   void *arg)
+{
+	return -1;
+}
+
 int kernel_tc_class_stats(ifindex_t ifindex,
 			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
 			  void *arg)

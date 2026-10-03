@@ -122,6 +122,11 @@ struct tc_flower {
  * ordered evaluation of policy-map classes.
  */
 #define TC_FLOWER_ACT_GOTO_CHAIN (1 << 8)
+/*
+ * Select the class and also attach a gact "pass" action: it does not change
+ * the result but gives the filter packet/byte counters.
+ */
+#define TC_FLOWER_ACT_COUNT (1 << 9)
 
 	uint32_t filter_bm;
 
