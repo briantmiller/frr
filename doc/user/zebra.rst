@@ -647,6 +647,54 @@ existing HTB classes are updated in place without disturbing traffic.
    be inspected with ``tc -s class show dev IFNAME`` and
    ``tc filter show dev IFNAME``.
 
+.. clicmd:: show class-map interface IFNAME [json]
+
+   Show, for every class of the service-policy applied to the interface
+   (including the classes of child policies and the ``class-default``
+   classes), the class-map and its match type, the HTB class and its
+   statistics, and the tc flower filters generated for the class-map, in the
+   order the kernel evaluates them:
+
+   .. code-block:: frr
+
+      Interface r1-eth0, service-policy output PARENT
+
+        Class-map VOICE (match-any)
+          Policy-map PARENT, HTB class beef:2, parent beef:1
+          Class: 1250 packets, 312500 bytes, 0 drops, 0 overlimits, current 1.20Mbps
+          Filters attached to beef:, in evaluation order:
+            Chain Pref Proto Match                Action        Packets    Bytes        Origin
+            0     1    ipv4  src 10.1.1.0/24      goto chain 1  15         3600         access-list VOICE seq 5 deny
+            0     2    ipv4  src 10.0.0.0/8       classify      1210       302500       access-list VOICE seq 10 permit
+            0     3    ipv6  src 2001:db8::/32    classify      0          0            ipv6 access-list VOICE seq 5 permit
+            0     4    all   any                  goto chain 1  40         10000        no match: next statement
+            1     1    ipv4  dscp ef              classify      40         10000        match ip dscp ef
+            1     2    ipv6  dscp ef              classify      0          0            match ip dscp ef
+            1     3    all   any                  goto chain 2  0          0            no match: next statement
+
+   ``Chain`` / ``Pref``
+      Position of the filter: the kernel starts with chain 0 and evaluates
+      the filters of a chain by increasing preference.
+
+   ``Action``
+      ``classify`` puts matching packets into the class. ``goto chain N``
+      continues the evaluation in chain N: it implements access-list
+      ``deny`` entries and the move from one match statement to the next.
+
+   ``Packets`` / ``Bytes``
+      Packets that matched the filter. ``missing`` means the filter is not
+      in the kernel (its installation failed, e.g. because the kernel lacks
+      ``cls_flower`` or ``act_gact``); a warning is printed below the
+      output in that case.
+
+   ``Origin``
+      The access-list entry or match statement the filter was generated
+      from.
+
+   Filter counters start when the hierarchy is installed. Classifying
+   filters carry a ``gact pass`` action, which does not change the result
+   but gives them counters.
+
 .. _administrative-distance:
 
 Administrative Distance

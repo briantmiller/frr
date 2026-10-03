@@ -432,6 +432,136 @@ def test_qos_show_statistics(tgen):
     wait_for(_idle, "rate estimate did not decay", count=20)
 
 
+# (class-map, policy-map, HTB class, filters attached to, number of filters)
+# for r1/frr.conf, in the order "show class-map interface" lists them.
+EXPECTED_CLASS_MAPS = [
+    # ACL VOICE: 2 IPv4 + 1 IPv6 entries + end, dscp ef: IPv4 + IPv6 + end
+    ("VOICE", "PARENT", "beef:2", "beef:", 7),
+    # match-all: 1 ACL entry combined with cs6 + end
+    ("MGMT", "PARENT", "beef:3", "beef:", 2),
+    ("WEB", "PARENT", "beef:4", "beef:", 2),
+    ("BULK", "CHILD", "beef:5", "beef:4", 3),
+    ("class-default", "CHILD", "beef:6", "beef:4", 1),
+    ("class-default", "PARENT", "beef:7", "beef:", 1),
+]
+
+
+def show_class_map_json(router, intf=INTF):
+    out = router.vtysh_cmd("show class-map interface {} json".format(intf), isjson=True)
+    return out.get(intf, {})
+
+
+def test_qos_show_class_map(tgen):
+    "show class-map interface lists the filters of every class-map"
+
+    r1 = tgen.gears["r1"]
+    flower = kernel_supports_flower(tgen)
+
+    def _structure():
+        data = show_class_map_json(r1)
+        if not data.get("installed"):
+            return "not installed: {}".format(data)
+        cmaps = data.get("classMaps", [])
+        have = [
+            (
+                c["classMap"],
+                c["policyMap"],
+                c["classId"],
+                c["filtersAttachedTo"],
+                len(c["filters"]),
+            )
+            for c in cmaps
+        ]
+        if have != EXPECTED_CLASS_MAPS:
+            return "class-maps {} != {}".format(have, EXPECTED_CLASS_MAPS)
+        if not data.get("filterStatistics"):
+            return "filter statistics could not be read"
+        for c in cmaps:
+            if "classStats" not in c:
+                return "no class statistics for {}".format(c["classId"])
+            for f in c["filters"]:
+                if f.get("inKernel") is not flower:
+                    return "{} filter {} inKernel={}, expected {}".format(
+                        c["classMap"], f, f.get("inKernel"), flower
+                    )
+        return None
+
+    wait_for(_structure, "show class-map interface structure")
+
+    data = show_class_map_json(r1)
+    voice = data["classMaps"][0]
+    assert voice["matchType"] == "match-any", voice
+    origins = [f["origin"] for f in voice["filters"]]
+    assert origins == [
+        "access-list VOICE seq 5 deny",
+        "access-list VOICE seq 10 permit",
+        "ipv6 access-list VOICE seq 5 permit",
+        "no match: next statement",
+        "match ip dscp ef",
+        "match ip dscp ef",
+        "no match: next statement",
+    ], origins
+    matches = [(f["protocol"], f["match"], f["action"]) for f in voice["filters"]]
+    assert matches == [
+        ("ipv4", "src 10.1.1.0/24", "goto chain 1"),
+        ("ipv4", "src 10.0.0.0/8", "classify"),
+        ("ipv6", "src 2001:db8:99::/48", "classify"),
+        ("all", "any", "goto chain 1"),
+        ("ipv4", "dscp ef", "classify"),
+        ("ipv6", "dscp ef", "classify"),
+        ("all", "any", "goto chain 2"),
+    ], matches
+    mgmt = data["classMaps"][1]
+    assert mgmt["filters"][0]["match"] == "src 172.16.0.0/24 dscp cs6", mgmt
+
+    out_if = r1.vtysh_cmd("show class-map interface " + INTF)
+    for needle in (
+        "Interface r1-eth0, service-policy output PARENT",
+        "Class-map VOICE (match-any)",
+        "Policy-map CHILD, HTB class beef:5, parent beef:4",
+        "Filters attached to beef:4, in evaluation order:",
+        "access-list WEB seq 5 permit",
+        "class-default: everything else",
+    ):
+        assert needle in out_if, "missing {!r} in:\n{}".format(needle, out_if)
+    logger.info("show class-map interface:\n%s", out_if)
+
+    # filters zebra could not install are flagged
+    warned = "filters are missing from the kernel" in out_if
+    assert warned is not flower, "missing-filter warning={} with flower={}:\n{}".format(
+        warned, flower, out_if
+    )
+
+    out = r1.vtysh_cmd("show class-map interface does-not-exist")
+    assert "Interface does-not-exist not found" in out, out
+
+    if not flower:
+        return
+
+    # per filter hit counters follow the traffic
+    def _filter_packets(origin):
+        voice = show_class_map_json(r1)["classMaps"][0]
+        return {f["origin"]: f.get("packets", 0) for f in voice["filters"]}[origin]
+
+    permit = "access-list VOICE seq 10 permit"
+    deny = "access-list VOICE seq 5 deny"
+    send_udp(r1, "10.3.3.3", "192.0.2.2", TOS["default"], 1)
+    send_udp(r1, "10.1.1.1", "192.0.2.2", TOS["default"], 1)
+    permit_before = _filter_packets(permit)
+    deny_before = _filter_packets(deny)
+    send_udp(r1, "10.3.3.3", "192.0.2.2", TOS["default"], 25)
+    send_udp(r1, "10.1.1.1", "192.0.2.2", TOS["default"], 15)
+
+    def _counted():
+        p = _filter_packets(permit) - permit_before
+        d = _filter_packets(deny) - deny_before
+        if p < 25 or d < 15:
+            return "permit filter +{} (want 25), deny filter +{} (want 15)".format(p, d)
+        return None
+
+    wait_for(_counted, "filter counters", count=10)
+
+
 def test_qos_filters_installed(tgen):
     "flower filters and filter chains are installed"
 

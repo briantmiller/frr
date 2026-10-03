@@ -97,6 +97,31 @@ extern int kernel_tc_class_stats(ifindex_t ifindex,
 				 void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
 				 void *arg);
 
+/* A TC filter and the counters of its (first) action, as reported by the kernel */
+struct zebra_tc_filter_stats {
+	/* full handles */
+	uint32_t parent;
+	uint32_t handle;
+	uint32_t chain;
+	uint16_t priority;
+	uint16_t protocol;
+	char kind[16];
+
+	/* filters without actions have no counters */
+	bool stats_valid;
+	uint64_t bytes;
+	uint64_t packets;
+};
+
+/*
+ * Synchronously read the filters attached to @parent (full handle) on
+ * @ifindex, in all chains, and call @cb for each.  Returns 0 on success, -1
+ * on failure or when not supported by the platform.
+ */
+extern int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
+				  void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg),
+				  void *arg);
+
 /*
  * Master-pthread handler for kernel-originated TC qdisc notifications
  * (DPLANE_OP_TC_QDISC_NOTIFY ctx).
