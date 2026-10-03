@@ -1151,7 +1151,7 @@ static const char *qos_bps2str(uint64_t bps, char *buf, size_t len)
 	else if (bps >= 1000ULL && bps % 10ULL == 0)
 		snprintf(buf, len, "%.2fkbps", bps / 1e3);
 	else
-		snprintf(buf, len, "%" PRIu64 "bps", bps);
+		snprintf(buf, len, "%lubps", bps);
 
 	return buf;
 }
