@@ -2830,6 +2830,75 @@ module frr-zebra {
               }
             }
           }
+
+          case vxlan {
+            container vxlan {
+              presence "Create a VXLAN interface.";
+              description
+                "A VXLAN tunnel endpoint with an IPv4 underlay.";
+
+              leaf vni {
+                type uint32 {
+                  range "1..16777215";
+                }
+                mandatory true;
+                description
+                  "VXLAN network identifier.";
+              }
+
+              leaf local {
+                type inet:ipv4-address-no-zone;
+                description
+                  "Local tunnel endpoint address.";
+              }
+
+              leaf remote {
+                type inet:ipv4-address-no-zone;
+                description
+                  "Remote tunnel endpoint (unicast) or multicast group. A
+                   multicast group requires dev.";
+              }
+
+              leaf dev {
+                type string {
+                  length "1..15";
+                }
+                description
+                  "Underlay device the tunnel is bound to.";
+              }
+
+              leaf dstport {
+                type uint16 {
+                  range "1..65535";
+                }
+                default "4789";
+                description
+                  "UDP destination port (the IANA port by default; the
+                   kernel's own default is 8472).";
+              }
+
+              leaf ttl {
+                type uint8 {
+                  range "1..255";
+                }
+                description
+                  "TTL of encapsulated packets.";
+              }
+
+              leaf tos {
+                type uint8;
+                description
+                  "TOS of encapsulated packets.";
+              }
+
+              leaf learning {
+                type boolean;
+                description
+                  "Learn remote MAC addresses from received frames (kernel
+                   default on); EVPN deployments turn it off.";
+              }
+            }
+          }
         }
       }
 

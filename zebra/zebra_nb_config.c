@@ -1553,7 +1553,7 @@ int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
 /*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
  *
- * Every kind (bridge, veth, vlan, gre, dummy, and future ones) shares these
+ * Every kind (bridge, veth, vlan, gre, dummy, vxlan, and future ones) shares these
  * callbacks.  Create/modify of the individual leaves are no-ops: the whole
  * container is evaluated once per transaction in apply_finish, so leaves that
  * depend on one another (gre local/dev/remote) are always seen consistently.
@@ -1584,6 +1584,35 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 
 	if (strmatch(kind, "bridge")) {
 		p->kind = ZEBRA_LINK_BRIDGE;
+	} else if (strmatch(kind, "vxlan")) {
+		struct zebra_link_vxlan *v = &p->u.vxlan;
+
+		p->kind = ZEBRA_LINK_VXLAN;
+		v->vni = yang_dnode_get_uint32(dnode, "vni");
+		v->dstport = yang_dnode_get_uint16(dnode, "dstport");
+
+		if (yang_dnode_exists(dnode, "local")) {
+			v->has_local = true;
+			yang_dnode_get_ipv4(&v->local, dnode, "local");
+		}
+		if (yang_dnode_exists(dnode, "remote")) {
+			v->has_remote = true;
+			yang_dnode_get_ipv4(&v->remote, dnode, "remote");
+		}
+		if (yang_dnode_exists(dnode, "dev"))
+			strlcpy(v->dev, yang_dnode_get_string(dnode, "dev"), sizeof(v->dev));
+		if (yang_dnode_exists(dnode, "ttl")) {
+			v->has_ttl = true;
+			v->ttl = yang_dnode_get_uint8(dnode, "ttl");
+		}
+		if (yang_dnode_exists(dnode, "tos")) {
+			v->has_tos = true;
+			v->tos = yang_dnode_get_uint8(dnode, "tos");
+		}
+		if (yang_dnode_exists(dnode, "learning")) {
+			v->has_learning = true;
+			v->learning = yang_dnode_get_bool(dnode, "learning");
+		}
 	} else if (strmatch(kind, "dummy")) {
 		p->kind = ZEBRA_LINK_DUMMY;
 	} else if (strmatch(kind, "veth")) {

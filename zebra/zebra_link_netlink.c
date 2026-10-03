@@ -61,6 +61,22 @@ static const char *gre_validate(const char *ifname,
 	return NULL;
 }
 
+static const char *vxlan_validate(const char *ifname, const struct zebra_link_params *p)
+{
+	const struct zebra_link_vxlan *v = &p->u.vxlan;
+
+	if (v->vni == 0 || v->vni > ZEBRA_LINK_VNI_MAX)
+		return "vxlan vni must be in the range 1-16777215";
+	if (v->dev[0] && strcmp(v->dev, ifname) == 0)
+		return "vxlan dev must differ from the interface name";
+	/* A multicast group is joined through the underlay device */
+	if (v->has_remote && IN_MULTICAST(ntohl(v->remote.s_addr)) && !v->dev[0])
+		return "a multicast vxlan remote requires a dev";
+	if (v->has_remote && v->remote.s_addr == INADDR_ANY)
+		return "vxlan remote must not be 0.0.0.0";
+	return NULL;
+}
+
 const char *zebra_link_params_validate(const char *ifname,
 				       const struct zebra_link_params *p)
 {
@@ -80,6 +96,8 @@ const char *zebra_link_params_validate(const char *ifname,
 		return gre_validate(ifname, p);
 	case ZEBRA_LINK_DUMMY:
 		return NULL;
+	case ZEBRA_LINK_VXLAN:
+		return vxlan_validate(ifname, p);
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;
@@ -437,7 +455,52 @@ static bool gre_put_data(struct nlmsghdr *n, size_t buflen,
 	return true;
 }
 
+/* ---- vxlan (IPv4 underlay) ---- */
+
+static bool vxlan_put_data(struct nlmsghdr *n, size_t buflen,
+			   const struct zebra_link_params *p, int link_ifindex)
+{
+	const struct zebra_link_vxlan *v = &p->u.vxlan;
+	uint16_t port = v->dstport ? v->dstport : ZEBRA_LINK_VXLAN_DEFAULT_PORT;
+
+	if (!nl_attr_put32(n, buflen, IFLA_VXLAN_ID, v->vni))
+		return false;
+
+	if (link_ifindex > 0 && !nl_attr_put32(n, buflen, IFLA_VXLAN_LINK, link_ifindex))
+		return false;
+
+	/* in_addr is already in network byte order */
+	if (v->has_local &&
+	    !nl_attr_put(n, buflen, IFLA_VXLAN_LOCAL, &v->local, sizeof(v->local)))
+		return false;
+
+	/* GROUP carries a unicast remote as well as a multicast group */
+	if (v->has_remote &&
+	    !nl_attr_put(n, buflen, IFLA_VXLAN_GROUP, &v->remote, sizeof(v->remote)))
+		return false;
+
+	/* The destination port is big-endian on the wire */
+	if (!nl_attr_put16(n, buflen, IFLA_VXLAN_PORT, htons(port)))
+		return false;
+
+	if (v->has_ttl && !nl_attr_put8(n, buflen, IFLA_VXLAN_TTL, v->ttl))
+		return false;
+
+	if (v->has_tos && !nl_attr_put8(n, buflen, IFLA_VXLAN_TOS, v->tos))
+		return false;
+
+	if (v->has_learning && !nl_attr_put8(n, buflen, IFLA_VXLAN_LEARNING, v->learning ? 1 : 0))
+		return false;
+
+	return true;
+}
+
 static const struct link_kind_ops link_kinds[] = {
+	{
+		.kind = ZEBRA_LINK_VXLAN,
+		.name = "vxlan",
+		.put_data = vxlan_put_data,
+	},
 	{
 		.kind = ZEBRA_LINK_DUMMY,
 		.name = "dummy",

@@ -575,6 +575,68 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan",
+			.cbs = {
+				.create = lib_interface_zebra_link_type_create,
+				.destroy = lib_interface_zebra_link_type_destroy,
+				.apply_finish = lib_interface_zebra_link_type_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/local",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/dev",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/remote",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/dstport",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/ttl",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/tos",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/learning",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan/vni",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/mpls",
 			.cbs = {
 				.modify = lib_interface_zebra_mpls_modify,

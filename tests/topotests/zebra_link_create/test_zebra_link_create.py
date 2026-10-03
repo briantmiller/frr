@@ -518,6 +518,56 @@ def test_dummy(tgen):
     conf(r1, "no interface dm0", "no interface dm1", "no interface br4")
 
 
+def test_vxlan(tgen):
+    "link-type vxlan: unicast, parameter change, multicast group on a dev"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "vxlan", "id 99 dstport 4789 local 10.0.0.1 remote 10.0.0.2"):
+        pytest.skip("kernel lacks vxlan support")
+
+    conf(
+        r1,
+        "interface vx0",
+        "link-type vxlan vni 100 local 10.255.1.1 remote 10.255.1.2 ttl 8 learning off",
+    )
+    exp = {
+        "linkinfo": {
+            "info_kind": "vxlan",
+            "info_data": {
+                "id": 100,
+                "local": "10.255.1.1",
+                "remote": "10.255.1.2",
+                "ttl": 8,
+                "learning": False,
+                "port": 4789,
+            },
+        }
+    }
+    assert wait_link(r1, "vx0", exp) is None
+
+    # a changed definition re-creates the interface
+    conf(r1, "interface vx0", "link-type vxlan vni 101 dstport 4790 remote 10.255.1.2")
+    exp = {"linkinfo": {"info_data": {"id": 101, "port": 4790, "remote": "10.255.1.2"}}}
+    assert wait_link(r1, "vx0", exp) is None
+
+    # a multicast group needs an underlay device; created once it exists
+    conf(r1, "interface vx5", "link-type vxlan vni 7 remote 239.1.1.1 dev ul0")
+    assert link(r1, "vx5") is None
+    conf(r1, "interface ul0", "link-type bridge")
+    exp = {
+        "link": "ul0",
+        "linkinfo": {"info_kind": "vxlan", "info_data": {"id": 7, "group": "239.1.1.1"}},
+    }
+    assert wait_link(r1, "vx5", exp) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " link-type vxlan vni 101 remote 10.255.1.2 dstport 4790" in out
+
+    for name in ("vx0", "vx5", "ul0"):
+        conf(r1, "interface " + name, "no link-type")
+        assert wait_link(r1, name, None) is None
+    conf(r1, "no interface vx0", "no interface vx5", "no interface ul0")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

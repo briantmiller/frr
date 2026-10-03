@@ -497,7 +497,7 @@ static void lib_interface_zebra_link_detect_cli_write(
  */
 static void link_type_enqueue_destroy_others(struct vty *vty, const char *keep)
 {
-	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy" };
+	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy", "vxlan" };
 	char xpath[XPATH_MAXLEN];
 	size_t i;
 
@@ -668,13 +668,84 @@ DEFPY_YANG (link_type_gre,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (link_type_vxlan,
+	link_type_vxlan_cmd,
+	"link-type vxlan vni (1-16777215)$vni [local A.B.C.D$local] [remote A.B.C.D$remote] [dev IFNAME$dev] [dstport (1-65535)$dstport] [ttl (1-255)$ttl] [tos (0-255)$tos] [learning <on|off>$learning]",
+	"Create this interface in the kernel\n"
+	"VXLAN tunnel endpoint\n"
+	"VXLAN network identifier\n"
+	"VNI\n"
+	"Local tunnel endpoint\n"
+	"Local IPv4 address\n"
+	"Remote tunnel endpoint or multicast group\n"
+	"Remote IPv4 address\n"
+	"Bind the tunnel to an underlay device\n"
+	"Name of the device\n"
+	"UDP destination port (default 4789)\n"
+	"Port\n"
+	"TTL of encapsulated packets\n"
+	"TTL value\n"
+	"TOS of encapsulated packets\n"
+	"TOS value\n"
+	"Learn remote MAC addresses from received frames\n"
+	"Learn\n"
+	"Do not learn\n")
+{
+	char ifname[IFNAMSIZ];
+	struct in_addr group;
+
+	if (dev && link_type_curr_ifname(vty, ifname, sizeof(ifname)) && strmatch(dev, ifname)) {
+		vty_out(vty, "%% The dev must differ from the interface name\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	if (remote_str && inet_pton(AF_INET, remote_str, &group) == 1 &&
+	    IN_MULTICAST(ntohl(group.s_addr)) && !dev) {
+		vty_out(vty, "%% A multicast remote requires a dev\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	link_type_enqueue_destroy_others(vty, "vxlan");
+	link_type_enqueue_container(vty, "vxlan");
+	/* The command is the full definition: parameters not given are removed */
+	link_type_enqueue_leaf(vty, "vxlan", "vni", vni_str);
+	link_type_enqueue_leaf(vty, "vxlan", "local", local_str);
+	link_type_enqueue_leaf(vty, "vxlan", "remote", remote_str);
+	link_type_enqueue_leaf(vty, "vxlan", "dev", dev);
+	/* dstport has a default, so it is reset rather than removed */
+	link_type_enqueue_leaf(vty, "vxlan", "dstport", dstport_str ? dstport_str : "4789");
+	link_type_enqueue_leaf(vty, "vxlan", "ttl", ttl_str);
+	link_type_enqueue_leaf(vty, "vxlan", "tos", tos_str);
+	link_type_enqueue_leaf(vty, "vxlan", "learning",
+			       learning ? (strmatch(learning, "on") ? "true" : "false") : NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|dummy|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|dummy|vxlan vni (1-16777215) [local A.B.C.D] [remote A.B.C.D] [dev IFNAME] [dstport (1-65535)] [ttl (1-255)] [tos (0-255)] [learning <on|off>]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
 	"Linux bridge\n"
 	"Dummy interface\n"
+	"VXLAN tunnel endpoint\n"
+	"VXLAN network identifier\n"
+	"VNI\n"
+	"Local tunnel endpoint\n"
+	"Local IPv4 address\n"
+	"Remote tunnel endpoint or multicast group\n"
+	"Remote IPv4 address\n"
+	"Bind the tunnel to an underlay device\n"
+	"Name of the device\n"
+	"UDP destination port\n"
+	"Port\n"
+	"TTL of encapsulated packets\n"
+	"TTL value\n"
+	"TOS of encapsulated packets\n"
+	"TOS value\n"
+	"Learn remote MAC addresses from received frames\n"
+	"Learn\n"
+	"Do not learn\n"
 	"Virtual ethernet pair\n"
 	"Other end of the pair\n"
 	"Name of the peer interface\n"
@@ -738,6 +809,31 @@ static void lib_interface_zebra_link_type_vlan_cli_write(struct vty *vty,
 	if (yang_dnode_exists(dnode, "encapsulation") &&
 	    (show_defaults || !yang_dnode_is_default(dnode, "encapsulation")))
 		vty_out(vty, " encapsulation %s", yang_dnode_get_string(dnode, "encapsulation"));
+
+	vty_out(vty, "\n");
+}
+
+static void lib_interface_zebra_link_type_vxlan_cli_write(struct vty *vty,
+							   const struct lyd_node *dnode,
+							   bool show_defaults)
+{
+	vty_out(vty, " link-type vxlan vni %u", yang_dnode_get_uint32(dnode, "vni"));
+
+	if (yang_dnode_exists(dnode, "local"))
+		vty_out(vty, " local %s", yang_dnode_get_string(dnode, "local"));
+	if (yang_dnode_exists(dnode, "remote"))
+		vty_out(vty, " remote %s", yang_dnode_get_string(dnode, "remote"));
+	if (yang_dnode_exists(dnode, "dev"))
+		vty_out(vty, " dev %s", yang_dnode_get_string(dnode, "dev"));
+	if (show_defaults || !yang_dnode_is_default(dnode, "dstport"))
+		vty_out(vty, " dstport %u", yang_dnode_get_uint16(dnode, "dstport"));
+	if (yang_dnode_exists(dnode, "ttl"))
+		vty_out(vty, " ttl %u", yang_dnode_get_uint8(dnode, "ttl"));
+	if (yang_dnode_exists(dnode, "tos"))
+		vty_out(vty, " tos %u", yang_dnode_get_uint8(dnode, "tos"));
+	if (yang_dnode_exists(dnode, "learning"))
+		vty_out(vty, " learning %s",
+			yang_dnode_get_bool(dnode, "learning") ? "on" : "off");
 
 	vty_out(vty, "\n");
 }
@@ -3679,6 +3775,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_link_type_vlan_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan",
+			.cbs.cli_show = lib_interface_zebra_link_type_vxlan_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/gre",
 			.cbs.cli_show = lib_interface_zebra_link_type_gre_cli_write,
 		},
@@ -3918,6 +4018,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
 	install_element(INTERFACE_NODE, &link_type_bridge_cmd);
 	install_element(INTERFACE_NODE, &link_type_dummy_cmd);
+	install_element(INTERFACE_NODE, &link_type_vxlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_veth_cmd);
 	install_element(INTERFACE_NODE, &link_type_vlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);
