@@ -497,7 +497,7 @@ static void lib_interface_zebra_link_detect_cli_write(
  */
 static void link_type_enqueue_destroy_others(struct vty *vty, const char *keep)
 {
-	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy", "vxlan" };
+	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy", "vxlan", "bareudp" };
 	char xpath[XPATH_MAXLEN];
 	size_t i;
 
@@ -721,13 +721,51 @@ DEFPY_YANG (link_type_vxlan,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (link_type_bareudp,
+	link_type_bareudp_cmd,
+	"link-type bareudp dstport (1-65535)$dstport ethertype <ipv4|ipv6|mpls-unicast|mpls-multicast>$ethertype [{srcport-min (1-65535)$srcport_min|multiproto$multiproto}]",
+	"Create this interface in the kernel\n"
+	"Bare UDP tunnel\n"
+	"UDP destination port\n"
+	"Port\n"
+	"Protocol carried in the UDP payload\n"
+	"IPv4\n"
+	"IPv6\n"
+	"MPLS unicast\n"
+	"MPLS multicast\n"
+	"Lowest UDP source port used\n"
+	"Port\n"
+	"Also carry the companion protocol (IPv6 with IPv4, MPLS multicast with unicast)\n")
+{
+	link_type_enqueue_destroy_others(vty, "bareudp");
+	link_type_enqueue_container(vty, "bareudp");
+	/* The command is the full definition: parameters not given are removed */
+	link_type_enqueue_leaf(vty, "bareudp", "dstport", dstport_str);
+	link_type_enqueue_leaf(vty, "bareudp", "ethertype", ethertype);
+	link_type_enqueue_leaf(vty, "bareudp", "srcport-min", srcport_min_str);
+	link_type_enqueue_leaf(vty, "bareudp", "multiproto", multiproto ? "true" : NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|dummy|vxlan [vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|dummy|bareudp [dstport (1-65535) ethertype <ipv4|ipv6|mpls-unicast|mpls-multicast> [{srcport-min (1-65535)|multiproto}]]|vxlan [vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
 	"Linux bridge\n"
 	"Dummy interface\n"
+	"Bare UDP tunnel\n"
+	"UDP destination port\n"
+	"Port\n"
+	"Protocol carried in the UDP payload\n"
+	"IPv4\n"
+	"IPv6\n"
+	"MPLS unicast\n"
+	"MPLS multicast\n"
+	"Lowest UDP source port used\n"
+	"Port\n"
+	"Also carry the companion protocol\n"
 	"VXLAN tunnel endpoint\n"
 	"VXLAN network identifier\n"
 	"VNI\n"
@@ -809,6 +847,22 @@ static void lib_interface_zebra_link_type_vlan_cli_write(struct vty *vty,
 	if (yang_dnode_exists(dnode, "encapsulation") &&
 	    (show_defaults || !yang_dnode_is_default(dnode, "encapsulation")))
 		vty_out(vty, " encapsulation %s", yang_dnode_get_string(dnode, "encapsulation"));
+
+	vty_out(vty, "\n");
+}
+
+static void lib_interface_zebra_link_type_bareudp_cli_write(struct vty *vty,
+							     const struct lyd_node *dnode,
+							     bool show_defaults)
+{
+	vty_out(vty, " link-type bareudp dstport %u ethertype %s",
+		yang_dnode_get_uint16(dnode, "dstport"),
+		yang_dnode_get_string(dnode, "ethertype"));
+
+	if (yang_dnode_exists(dnode, "srcport-min"))
+		vty_out(vty, " srcport-min %u", yang_dnode_get_uint16(dnode, "srcport-min"));
+	if (yang_dnode_exists(dnode, "multiproto") && yang_dnode_get_bool(dnode, "multiproto"))
+		vty_out(vty, " multiproto");
 
 	vty_out(vty, "\n");
 }
@@ -3775,6 +3829,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_link_type_vlan_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp",
+			.cbs.cli_show = lib_interface_zebra_link_type_bareudp_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/vxlan",
 			.cbs.cli_show = lib_interface_zebra_link_type_vxlan_cli_write,
 		},
@@ -4019,6 +4077,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &link_type_bridge_cmd);
 	install_element(INTERFACE_NODE, &link_type_dummy_cmd);
 	install_element(INTERFACE_NODE, &link_type_vxlan_cmd);
+	install_element(INTERFACE_NODE, &link_type_bareudp_cmd);
 	install_element(INTERFACE_NODE, &link_type_veth_cmd);
 	install_element(INTERFACE_NODE, &link_type_vlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);

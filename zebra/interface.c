@@ -1727,6 +1727,7 @@ static void interface_update_l2info(struct zebra_dplane_ctx *ctx,
 	case ZEBRA_IF_VETH:
 	case ZEBRA_IF_BOND:
 	case ZEBRA_IF_DUMMY:
+	case ZEBRA_IF_BAREUDP:
 		break;
 	}
 }
@@ -2621,6 +2622,9 @@ static const char *zebra_ziftype_2str(enum zebra_iftype zif_type)
 
 	case ZEBRA_IF_DUMMY:
 		return "dummy";
+
+	case ZEBRA_IF_BAREUDP:
+		return "bareudp";
 
 	default:
 		return "Unknown";

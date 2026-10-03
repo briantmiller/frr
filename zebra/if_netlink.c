@@ -231,6 +231,8 @@ static void netlink_determine_zebra_iftype(const char *kind,
 		*zif_type = ZEBRA_IF_IP6GRE;
 	else if (strcmp(kind, "dummy") == 0)
 		*zif_type = ZEBRA_IF_DUMMY;
+	else if (strcmp(kind, "bareudp") == 0)
+		*zif_type = ZEBRA_IF_BAREUDP;
 }
 
 static void netlink_vrf_change(struct nlmsghdr *h, struct rtattr *tb,
@@ -612,6 +614,7 @@ static void netlink_interface_update_l2info(struct zebra_dplane_ctx *ctx,
 	case ZEBRA_IF_VETH:
 	case ZEBRA_IF_BOND:
 	case ZEBRA_IF_DUMMY:
+	case ZEBRA_IF_BAREUDP:
 		break;
 	}
 }

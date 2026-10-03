@@ -111,7 +111,7 @@ const char *zebra_link_opt_format(const struct zebra_link_opt_def *def, uint64_t
 		break;
 	case ZLO_UINT:
 	case ZLO_SECS:
-		snprintf(buf, buflen, "%lu", val);
+		snprintf(buf, buflen, "%" PRIu64 "", val);
 		break;
 	case ZLO_ENUM:
 	case ZLO_VLANPROTO:

@@ -266,6 +266,20 @@ Standard Commands
    8472). ``learning off`` is what EVPN deployments use. Creation waits until
    ``dev`` exists. Changing the parameters re-creates the interface.
 
+.. clicmd:: link-type bareudp dstport (1-65535) ethertype <ipv4|ipv6|mpls-unicast|mpls-multicast> [{srcport-min (1-65535)|multiproto}]
+
+   Create this interface as a bare UDP tunnel (RFC 7510 style, with no
+   encapsulation header besides UDP). ``dstport`` is the UDP port to listen
+   on and ``ethertype`` is the payload carried; both are required. Typical use
+   is MPLS-over-UDP (``dstport 6635 ethertype mpls-unicast``). ``srcport-min``
+   sets the lowest source port used for entropy. ``multiproto`` additionally
+   accepts IPv6 (for ``ipv4``) or MPLS multicast (for ``mpls-unicast``) on
+   the same device.
+
+   The device carries no tunnel endpoints: the remote address and the label or
+   route are provided by the routes that use the device (for example lightweight
+   tunnel routes). Requires a kernel built with ``CONFIG_BAREUDP``.
+
 .. clicmd:: no link-type [...]
 
    Remove the link-type configuration. Zebra deletes the kernel interface it

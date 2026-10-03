@@ -94,6 +94,7 @@ enum zebra_iftype {
 	ZEBRA_IF_GRETAP,    /* GRETAP interface */
 	ZEBRA_IF_IP6GRETAP, /* IP6GRETAP interface */
 	ZEBRA_IF_DUMMY,	    /* Dummy interface */
+	ZEBRA_IF_BAREUDP,   /* Bare UDP tunnel */
 };
 
 /*

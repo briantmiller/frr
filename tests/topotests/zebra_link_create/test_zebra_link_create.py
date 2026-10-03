@@ -567,6 +567,34 @@ def test_vxlan(tgen):
     conf(r1, "no interface vx0", "no interface vx5", "no interface ul0")
 
 
+def test_bareudp(tgen):
+    "link-type bareudp: create, parameter change, validation, remove"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bareudp", "dstport 6635 ethertype mpls_uc"):
+        pytest.skip("kernel lacks bareudp support")
+
+    conf(r1, "interface bu0", "link-type bareudp dstport 6635 ethertype mpls-unicast srcport-min 1024 multiproto")
+    exp = {
+        "linkinfo": {
+            "info_kind": "bareudp",
+            "info_data": {"dstport": 6635, "ethertype": "mpls_uc", "srcportmin": 1024, "multiproto": True},
+        }
+    }
+    assert wait_link(r1, "bu0", exp) is None
+
+    # a changed definition re-creates the interface
+    conf(r1, "interface bu0", "link-type bareudp dstport 4754 ethertype ipv4")
+    exp = {"linkinfo": {"info_data": {"dstport": 4754}}}
+    assert wait_link(r1, "bu0", exp) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " link-type bareudp dstport 4754 ethertype ipv4" in out
+
+    conf(r1, "interface bu0", "no link-type")
+    assert wait_link(r1, "bu0", None) is None
+    conf(r1, "no interface bu0")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

@@ -1553,7 +1553,7 @@ int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
 /*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
  *
- * Every kind (bridge, veth, vlan, gre, dummy, vxlan, and future ones) shares these
+ * Every kind (bridge, veth, vlan, gre, dummy, vxlan, bareudp, and future ones) shares these
  * callbacks.  Create/modify of the individual leaves are no-ops: the whole
  * container is evaluated once per transaction in apply_finish, so leaves that
  * depend on one another (gre local/dev/remote) are always seen consistently.
@@ -1613,6 +1613,26 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 			v->has_learning = true;
 			v->learning = yang_dnode_get_bool(dnode, "learning");
 		}
+	} else if (strmatch(kind, "bareudp")) {
+		struct zebra_link_bareudp *b = &p->u.bareudp;
+
+		p->kind = ZEBRA_LINK_BAREUDP;
+		b->dstport = yang_dnode_get_uint16(dnode, "dstport");
+		str = yang_dnode_get_string(dnode, "ethertype");
+		if (strmatch(str, "ipv4"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_IPV4;
+		else if (strmatch(str, "ipv6"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_IPV6;
+		else if (strmatch(str, "mpls-unicast"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_MPLS_UC;
+		else if (strmatch(str, "mpls-multicast"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_MPLS_MC;
+		else
+			return false;
+		if (yang_dnode_exists(dnode, "srcport-min"))
+			b->srcport_min = yang_dnode_get_uint16(dnode, "srcport-min");
+		if (yang_dnode_exists(dnode, "multiproto"))
+			b->multiproto = yang_dnode_get_bool(dnode, "multiproto");
 	} else if (strmatch(kind, "dummy")) {
 		p->kind = ZEBRA_LINK_DUMMY;
 	} else if (strmatch(kind, "veth")) {

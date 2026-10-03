@@ -142,6 +142,8 @@ static bool link_matches_kind(struct interface *ifp, enum zebra_link_kind kind)
 		return IS_ZEBRA_IF_DUMMY(ifp);
 	case ZEBRA_LINK_VXLAN:
 		return IS_ZEBRA_IF_VXLAN(ifp);
+	case ZEBRA_LINK_BAREUDP:
+		return IS_ZEBRA_IF_BAREUDP(ifp);
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;

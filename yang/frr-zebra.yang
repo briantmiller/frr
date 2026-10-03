@@ -178,6 +178,12 @@ module frr-zebra {
       "Zebra interface type dummy.";
   }
 
+  identity zif-bareudp {
+    base zebra-interface-type;
+    description
+      "Zebra interface type bareudp.";
+  }
+
   /*
    * VxLAN Network Identifier type
    */
@@ -2827,6 +2833,64 @@ module frr-zebra {
                 type uint8;
                 description
                   "TOS of encapsulated packets.";
+              }
+            }
+          }
+
+          case bareudp {
+            container bareudp {
+              presence "Create a bare UDP tunnel.";
+              description
+                "A bare UDP tunnel: a layer 3 protocol carried directly in
+                 UDP, with no tunnel header. The tunnel endpoints come from
+                 the routes that use the device.";
+
+              leaf dstport {
+                type uint16 {
+                  range "1..65535";
+                }
+                mandatory true;
+                description
+                  "UDP destination port.";
+              }
+
+              leaf ethertype {
+                type enumeration {
+                  enum ipv4 {
+                    description
+                      "IPv4 payload.";
+                  }
+                  enum ipv6 {
+                    description
+                      "IPv6 payload.";
+                  }
+                  enum mpls-unicast {
+                    description
+                      "MPLS unicast payload.";
+                  }
+                  enum mpls-multicast {
+                    description
+                      "MPLS multicast payload.";
+                  }
+                }
+                mandatory true;
+                description
+                  "Protocol carried in the UDP payload.";
+              }
+
+              leaf srcport-min {
+                type uint16 {
+                  range "1..65535";
+                }
+                description
+                  "Lowest UDP source port used (the kernel default is 1024).";
+              }
+
+              leaf multiproto {
+                type boolean;
+                description
+                  "Also carry the companion protocol: IPv6 with IPv4, or MPLS
+                   multicast with MPLS unicast.";
               }
             }
           }

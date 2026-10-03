@@ -256,6 +256,7 @@ DECLARE_HOOK(zebra_if_extra_info, (struct vty * vty, json_object *json_if, struc
 #define IS_ZEBRA_IF_IP6GRETAP(ifp)                                                                \
 	(((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_IP6GRETAP)
 
+#define IS_ZEBRA_IF_BAREUDP(ifp) (((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_BAREUDP)
 #define IS_ZEBRA_IF_DUMMY(ifp) (((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_DUMMY)
 
 #define IS_ZEBRA_IF_BRIDGE_SLAVE(ifp)					\

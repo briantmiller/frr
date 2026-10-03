@@ -637,6 +637,40 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp",
+			.cbs = {
+				.create = lib_interface_zebra_link_type_create,
+				.destroy = lib_interface_zebra_link_type_destroy,
+				.apply_finish = lib_interface_zebra_link_type_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp/dstport",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp/ethertype",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp/srcport-min",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bareudp/multiproto",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/mpls",
 			.cbs = {
 				.modify = lib_interface_zebra_mpls_modify,

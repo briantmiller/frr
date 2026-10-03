@@ -3,7 +3,7 @@
  * Zebra - configured (zebra-created) Linux link types.
  *
  * Describes links that zebra is asked to create in the kernel through
- * configuration: bridge, veth, vlan, (standard) gre, dummy and vxlan.  The parameter
+ * configuration: bridge, veth, vlan, (standard) gre, dummy, vxlan and bareudp.  The parameter
  * structures in this file are intentionally free of zebra/lib types so that
  * they can be carried inside a dataplane context and consumed by the netlink
  * encoder (zebra_link_netlink.c) without any additional dependencies.
@@ -36,6 +36,7 @@ enum zebra_link_kind {
 	ZEBRA_LINK_GRE,
 	ZEBRA_LINK_DUMMY,
 	ZEBRA_LINK_VXLAN,
+	ZEBRA_LINK_BAREUDP,
 	/* Future: GRETAP, IP6GRE, IP6GRETAP, VXLAN, ... */
 	ZEBRA_LINK_KIND_MAX,
 };
@@ -168,6 +169,26 @@ struct zebra_link_vxlan {
 };
 
 /*
+ * Bare UDP tunnel: the payload (an L3 protocol) is carried directly in UDP,
+ * without a tunnel header.  The endpoints come from the routes / lightweight
+ * tunnel encapsulations that use the device, not from the device itself.
+ */
+enum zebra_link_bareudp_ethertype {
+	ZEBRA_LINK_BAREUDP_IPV4 = 0,
+	ZEBRA_LINK_BAREUDP_IPV6,
+	ZEBRA_LINK_BAREUDP_MPLS_UC,
+	ZEBRA_LINK_BAREUDP_MPLS_MC,
+};
+
+struct zebra_link_bareudp {
+	uint16_t dstport; /* UDP destination port, host order, required */
+	enum zebra_link_bareudp_ethertype ethertype;
+	uint16_t srcport_min; /* 0: kernel default */
+	/* Also carry the companion protocol (ipv4 + ipv6, or mpls uc + mc) */
+	bool multiproto;
+};
+
+/*
  * Always memset() to zero before filling in: the struct is compared with
  * memcmp() to detect configuration changes.
  */
@@ -179,6 +200,7 @@ struct zebra_link_params {
 		struct zebra_link_vlan vlan;
 		struct zebra_link_gre gre;
 		struct zebra_link_vxlan vxlan;
+		struct zebra_link_bareudp bareudp;
 	} u;
 };
 
@@ -197,6 +219,8 @@ static inline const char *zebra_link_kind2str(enum zebra_link_kind kind)
 		return "dummy";
 	case ZEBRA_LINK_VXLAN:
 		return "vxlan";
+	case ZEBRA_LINK_BAREUDP:
+		return "bareudp";
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;

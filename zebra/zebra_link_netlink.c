@@ -77,6 +77,17 @@ static const char *vxlan_validate(const char *ifname, const struct zebra_link_pa
 	return NULL;
 }
 
+static const char *bareudp_validate(const struct zebra_link_params *p)
+{
+	const struct zebra_link_bareudp *b = &p->u.bareudp;
+
+	if (b->dstport == 0)
+		return "bareudp dstport is required";
+	if (b->ethertype > ZEBRA_LINK_BAREUDP_MPLS_MC)
+		return "unknown bareudp ethertype";
+	return NULL;
+}
+
 const char *zebra_link_params_validate(const char *ifname,
 				       const struct zebra_link_params *p)
 {
@@ -98,6 +109,8 @@ const char *zebra_link_params_validate(const char *ifname,
 		return NULL;
 	case ZEBRA_LINK_VXLAN:
 		return vxlan_validate(ifname, p);
+	case ZEBRA_LINK_BAREUDP:
+		return bareudp_validate(p);
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;
@@ -160,6 +173,20 @@ const char *zebra_link_opts_validate(const struct zebra_link_opts_req *r)
 #include <linux/veth.h>
 #include <linux/if_bridge.h>
 #include <arpa/inet.h>
+
+/*
+ * Older kernel headers lack the bareudp attributes; these values are part of
+ * the stable kernel ABI.
+ */
+#ifndef IFLA_BAREUDP_MAX
+enum {
+	IFLA_BAREUDP_UNSPEC,
+	IFLA_BAREUDP_PORT,
+	IFLA_BAREUDP_ETHERTYPE,
+	IFLA_BAREUDP_SRCPORT_MIN,
+	IFLA_BAREUDP_MULTIPROTO_MODE,
+};
+#endif
 
 #include "lib/netlink_parser.h"
 
@@ -495,7 +522,52 @@ static bool vxlan_put_data(struct nlmsghdr *n, size_t buflen,
 	return true;
 }
 
+/* ---- bareudp ---- */
+
+static bool bareudp_put_data(struct nlmsghdr *n, size_t buflen,
+			     const struct zebra_link_params *p, int link_ifindex)
+{
+	const struct zebra_link_bareudp *b = &p->u.bareudp;
+	uint16_t ethertype;
+
+	switch (b->ethertype) {
+	case ZEBRA_LINK_BAREUDP_IPV4:
+		ethertype = ETH_P_IP;
+		break;
+	case ZEBRA_LINK_BAREUDP_IPV6:
+		ethertype = ETH_P_IPV6;
+		break;
+	case ZEBRA_LINK_BAREUDP_MPLS_UC:
+		ethertype = ETH_P_MPLS_UC;
+		break;
+	case ZEBRA_LINK_BAREUDP_MPLS_MC:
+		ethertype = ETH_P_MPLS_MC;
+		break;
+	default:
+		return false;
+	}
+
+	/* The port and the ethertype are big-endian on the wire */
+	if (!nl_attr_put16(n, buflen, IFLA_BAREUDP_PORT, htons(b->dstport)) ||
+	    !nl_attr_put16(n, buflen, IFLA_BAREUDP_ETHERTYPE, htons(ethertype)))
+		return false;
+
+	if (b->srcport_min && !nl_attr_put16(n, buflen, IFLA_BAREUDP_SRCPORT_MIN, b->srcport_min))
+		return false;
+
+	/* A flag attribute: present or absent, no payload */
+	if (b->multiproto && !nl_attr_put(n, buflen, IFLA_BAREUDP_MULTIPROTO_MODE, NULL, 0))
+		return false;
+
+	return true;
+}
+
 static const struct link_kind_ops link_kinds[] = {
+	{
+		.kind = ZEBRA_LINK_BAREUDP,
+		.name = "bareudp",
+		.put_data = bareudp_put_data,
+	},
 	{
 		.kind = ZEBRA_LINK_VXLAN,
 		.name = "vxlan",
