@@ -874,6 +874,10 @@ static ssize_t netlink_link_msg_encoder(struct zebra_dplane_ctx *ctx, void *buf,
 		req.op = ZEBRA_LINK_NL_SET_MASTER;
 		req.ifindex = dplane_ctx_get_ifindex(ctx);
 		req.master_ifindex = dplane_ctx_link_get_master_ifindex(ctx);
+	} else if (op == DPLANE_OP_LINK_MTU_SET) {
+		req.op = ZEBRA_LINK_NL_SET_MTU;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+		req.mtu = dplane_ctx_link_get_mtu(ctx);
 	} else if (op == DPLANE_OP_LINK_OPTS_SET) {
 		req.op = ZEBRA_LINK_NL_OPTS;
 		req.ifindex = dplane_ctx_get_ifindex(ctx);

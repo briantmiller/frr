@@ -120,6 +120,8 @@ int lib_interface_zebra_bandwidth_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_bandwidth_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_master_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args);
+int lib_interface_zebra_mtu_modify(struct nb_cb_modify_args *args);
+int lib_interface_zebra_mtu_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_bridge_options_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_bridge_options_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_bridge_port_options_modify(struct nb_cb_modify_args *args);

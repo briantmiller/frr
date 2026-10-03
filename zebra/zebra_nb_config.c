@@ -1410,6 +1410,35 @@ int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/mtu
+ */
+int lib_interface_zebra_mtu_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_mtu(ifp, yang_dnode_get_uint32(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_mtu_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_mtu(ifp);
+
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-options/<name>
  *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-port-options/<name>
  *

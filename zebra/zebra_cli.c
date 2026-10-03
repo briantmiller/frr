@@ -937,6 +937,27 @@ DEFPY_YANG (interface_master,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (interface_mtu,
+	interface_mtu_cmd,
+	"[no] mtu ![(68-65535)$mtu_val]",
+	NO_STR
+	"Set the MTU of this interface\n"
+	"MTU in bytes\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/mtu", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/mtu", NB_OP_MODIFY, mtu_val_str);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_mtu_cli_write(struct vty *vty, const struct lyd_node *dnode,
+					      bool show_defaults)
+{
+	vty_out(vty, " mtu %u\n", yang_dnode_get_uint32(dnode, NULL));
+}
+
 static void lib_interface_zebra_master_cli_write(struct vty *vty,
 						 const struct lyd_node *dnode,
 						 bool show_defaults)
@@ -3790,6 +3811,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/master",
 			.cbs.cli_show = lib_interface_zebra_master_cli_write,
 		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/mtu",
+			.cbs.cli_show = lib_interface_zebra_mtu_cli_write,
+		},
 #define X(sym, name, ...)                                                                          \
 		{                                                                                  \
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-options/" name, \
@@ -4083,6 +4108,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);
 	install_element(INTERFACE_NODE, &no_link_type_cmd);
 	install_element(INTERFACE_NODE, &interface_master_cmd);
+	install_element(INTERFACE_NODE, &interface_mtu_cmd);
 	install_element(INTERFACE_NODE, &interface_bridge_vlan_cmd);
 #define X(sym, ...) install_element(INTERFACE_NODE, &bridge_opt_##sym##_cmd);
 	ZEBRA_BRIDGE_OPT_LIST(X)

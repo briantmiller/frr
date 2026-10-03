@@ -47,6 +47,16 @@ struct zebra_link_cfg {
 	/* ifindex of the master we last successfully enslaved to, or 0 */
 	ifindex_t master_applied;
 
+	/* Desired MTU */
+	bool has_mtu;
+	uint32_t mtu;
+	bool mtu_inflight;
+	/* Tried once for this value on this kernel link (not retried by itself) */
+	bool mtu_done;
+	/* We changed the MTU; mtu_orig is what it was before */
+	bool mtu_changed;
+	uint32_t mtu_orig;
+
 	/* Desired bridge-port vlan state and what has been pushed to the kernel */
 	struct zebra_link_vlan_cfg *vl;
 	uint32_t vl_gen;	   /* bumped on every vlan configuration change */
@@ -93,7 +103,7 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	 * will look at it.
 	 */
 	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_inflight ||
-	    cfg->master_inflight || cfg->vl || cfg->brport_inflight ||
+	    cfg->master_inflight || cfg->has_mtu || cfg->mtu_inflight || cfg->vl || cfg->brport_inflight ||
 	    cfg->isolated_set || cfg->opt[ZLO_SCOPE_BRIDGE] || cfg->opt[ZLO_SCOPE_PORT] ||
 	    cfg->opt_reset[ZLO_SCOPE_BRIDGE] || cfg->opt_reset[ZLO_SCOPE_PORT] ||
 	    cfg->opt_inflight[ZLO_SCOPE_BRIDGE] || cfg->opt_inflight[ZLO_SCOPE_PORT])
@@ -356,6 +366,27 @@ static void link_cfg_realize(struct interface *ifp)
 		}
 	}
 
+	/* --- mtu --- */
+	if (cfg->has_mtu && ifp_is_real(ifp) && !cfg->mtu_inflight && !cfg->mtu_done) {
+		if (ifp->mtu == cfg->mtu) {
+			cfg->mtu_done = true;
+		} else {
+			/*
+			 * Remember what it was so that removing the
+			 * configuration can put it back.
+			 */
+			if (!cfg->mtu_changed)
+				cfg->mtu_orig = ifp->mtu;
+			cfg->mtu_inflight = true;
+			if (dplane_link_mtu_set(ifp, cfg->mtu) != ZEBRA_DPLANE_REQUEST_QUEUED) {
+				cfg->mtu_inflight = false;
+				cfg->mtu_done = true;
+				zlog_warn("%s: unable to queue mtu %u for %s", __func__,
+					  cfg->mtu, ifp->name);
+			}
+		}
+	}
+
 	/* --- bridge port vlans --- */
 	if ((cfg->vl || cfg->isolated_set) && ifp_is_real(ifp) && !cfg->master_inflight &&
 	    !cfg->brport_inflight) {
@@ -506,6 +537,45 @@ void zebra_link_cfg_unset_master(struct interface *ifp)
 	cfg->has_master = false;
 	cfg->master[0] = '\0';
 	cfg->master_applied = 0;
+	link_cfg_release_if_empty(ifp);
+}
+
+void zebra_link_cfg_set_mtu(struct interface *ifp, uint32_t mtu)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, true);
+
+	if (!cfg)
+		return;
+
+	if (!cfg->has_mtu || cfg->mtu != mtu)
+		cfg->mtu_done = false;
+
+	cfg->mtu = mtu;
+	cfg->has_mtu = true;
+
+	link_cfg_realize(ifp);
+}
+
+void zebra_link_cfg_unset_mtu(struct interface *ifp)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, false);
+
+	if (!cfg || !cfg->has_mtu)
+		return;
+
+	/*
+	 * Put the old MTU back, but only if the interface still has the one we
+	 * set; if somebody else changed it since, leave it alone.
+	 */
+	if (ifp_is_real(ifp) && cfg->mtu_changed && cfg->mtu_orig && !cfg->mtu_inflight &&
+	    ifp->mtu == cfg->mtu)
+		dplane_link_mtu_set(ifp, cfg->mtu_orig);
+
+	cfg->has_mtu = false;
+	cfg->mtu = 0;
+	cfg->mtu_done = false;
+	cfg->mtu_changed = false;
+	cfg->mtu_orig = 0;
 	link_cfg_release_if_empty(ifp);
 }
 
@@ -688,6 +758,11 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 		cfg->create_inflight = false;
 		cfg->master_inflight = false;
 		cfg->master_applied = 0;
+		/* A new kernel link starts from its own MTU */
+		cfg->mtu_inflight = false;
+		cfg->mtu_done = false;
+		cfg->mtu_changed = false;
+		cfg->mtu_orig = 0;
 		/* The port state went with the interface; re-apply on return */
 		cfg->vl_applied_gen = 0;
 		cfg->vl_applied_bridge = 0;
@@ -757,6 +832,16 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 		if (!ok)
 			zlog_warn("Failed to set master of %s (master ifindex %d)", name,
 				  dplane_ctx_link_get_master_ifindex(ctx));
+	} else if (op == DPLANE_OP_LINK_MTU_SET) {
+		if (cfg && cfg->mtu_inflight) {
+			cfg->mtu_inflight = false;
+			/* One attempt per value; a failure is not retried by itself */
+			cfg->mtu_done = true;
+			if (ok)
+				cfg->mtu_changed = true;
+		}
+		if (!ok)
+			zlog_warn("Failed to set MTU of %s to %u", name, dplane_ctx_link_get_mtu(ctx));
 	} else if (op == DPLANE_OP_LINK_BRPORT_SET) {
 		if (cfg && cfg->brport_inflight)
 			cfg->brport_inflight--;

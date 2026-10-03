@@ -2231,6 +2231,19 @@ module frr-zebra {
            bond, VRF, ...). Applied as soon as both interfaces exist.";
       }
 
+      leaf mtu {
+        type uint32 {
+          range "68..65535";
+        }
+        description
+          "MTU of the interface, whether or not zebra created it. Applied once
+           when configured and again when the interface is re-created. Removing
+           the setting restores the MTU the interface had before zebra changed
+           it. A value the kernel refuses (for example more than the parent
+           device allows) is logged and not retried until the setting is
+           entered again.";
+      }
+
       list bridge-vlan {
         key "id";
         description

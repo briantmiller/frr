@@ -595,6 +595,44 @@ def test_bareudp(tgen):
     conf(r1, "no interface bu0")
 
 
+def test_mtu(tgen):
+    "mtu: applied on creation, changed, restored, re-applied on re-creation"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bridge"):
+        pytest.skip("kernel lacks bridge support")
+
+    conf(r1, "interface mt0", "link-type bridge", "mtu 1400")
+    assert wait_link(r1, "mt0", {"mtu": 1400}) is None
+
+    conf(r1, "interface mt0", "mtu 1300")
+    assert wait_link(r1, "mt0", {"mtu": 1300}) is None
+    assert " mtu 1300" in r1.vtysh_cmd("show running-config")
+
+    # removed behind our back: re-created with the configured MTU
+    r1.cmd("ip link del mt0")
+    assert wait_link(r1, "mt0", {"mtu": 1300}) is None
+
+    # no mtu restores the MTU the interface had before zebra changed it
+    conf(r1, "interface mt0", "no mtu")
+    assert wait_link(r1, "mt0", {"mtu": 1500}) is None
+
+    # a link zebra did not create can be given an MTU too
+    r1.cmd("ip link add mt1 type bridge")
+    conf(r1, "interface mt1", "mtu 1280")
+    assert wait_link(r1, "mt1", {"mtu": 1280}) is None
+    conf(r1, "interface mt1", "no mtu")
+    assert wait_link(r1, "mt1", {"mtu": 1500}) is None
+    r1.cmd("ip link del mt1")
+
+    # out-of-range values are rejected by the CLI
+    out = r1.vtysh_cmd("configure terminal\ninterface mt0\nmtu 10")
+    assert "Unknown command" in out or "range" in out.lower() or "%" in out
+
+    conf(r1, "interface mt0", "no link-type")
+    assert wait_link(r1, "mt0", None) is None
+    conf(r1, "no interface mt0", "no interface mt1")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

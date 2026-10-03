@@ -741,6 +741,25 @@ ssize_t zebra_link_nl_encode(const struct zebra_link_nl_req *req, void *buf,
 			return 0;
 		}
 		return NLMSG_ALIGN(msg->n.nlmsg_len);
+
+	case ZEBRA_LINK_NL_SET_MTU:
+		if (req->ifindex <= 0) {
+			*err = "interface does not exist";
+			return 0;
+		}
+		if (req->mtu < ZEBRA_LINK_MTU_MIN || req->mtu > ZEBRA_LINK_MTU_MAX) {
+			*err = "MTU out of range";
+			return 0;
+		}
+		msg->n.nlmsg_type = RTM_NEWLINK;
+		msg->n.nlmsg_flags = NLM_F_REQUEST;
+		msg->ifi.ifi_family = AF_UNSPEC;
+		msg->ifi.ifi_index = req->ifindex;
+		if (!nl_attr_put32(&msg->n, buflen, IFLA_MTU, req->mtu)) {
+			*err = "netlink message buffer too small";
+			return 0;
+		}
+		return NLMSG_ALIGN(msg->n.nlmsg_len);
 	}
 
 	*err = "unknown link request";

@@ -37,6 +37,7 @@ enum zebra_link_nl_op {
 	ZEBRA_LINK_NL_SET_MASTER, /* RTM_NEWLINK with IFLA_MASTER */
 	ZEBRA_LINK_NL_BRPORT,	  /* AF_BRIDGE vlan add/del, port isolation */
 	ZEBRA_LINK_NL_OPTS,	  /* bridge or bridge port settings, in place */
+	ZEBRA_LINK_NL_SET_MTU,	  /* RTM_NEWLINK with IFLA_MTU */
 };
 
 struct zebra_link_nl_req {
@@ -54,6 +55,9 @@ struct zebra_link_nl_req {
 
 	/* Set-master only: ifindex of master, 0 to release from any master */
 	int master_ifindex;
+
+	/* Set-mtu only */
+	uint32_t mtu;
 
 	/* Bridge-port requests only */
 	const struct zebra_link_brport_req *brport;

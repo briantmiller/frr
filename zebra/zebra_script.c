@@ -429,6 +429,7 @@ void lua_pushzebra_dplane_ctx(lua_State *L, const struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_MASTER_SET:
 	case DPLANE_OP_LINK_BRPORT_SET:
 	case DPLANE_OP_LINK_OPTS_SET:
+	case DPLANE_OP_LINK_MTU_SET:
 		/* Not currently handled */
 	case DPLANE_OP_INTF_NETCONFIG: /*NYI*/
 	case DPLANE_OP_INTF_SPEED_GET:

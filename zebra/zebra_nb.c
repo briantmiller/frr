@@ -427,6 +427,13 @@ const struct frr_yang_module_info frr_zebra_info = {
 				.destroy = lib_interface_zebra_master_destroy,
 			}
 		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/mtu",
+			.cbs = {
+				.modify = lib_interface_zebra_mtu_modify,
+				.destroy = lib_interface_zebra_mtu_destroy,
+			}
+		},
 /* One entry per setting, from the table in zebra_link_opts.h */
 #define X(sym, name, ...)                                                                          \
 		{                                                                                  \

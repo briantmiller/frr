@@ -101,6 +101,10 @@ enum zebra_link_vlan_mode {
 	ZEBRA_LINK_VLAN_PRIVATE,
 };
 
+/* Range of a configurable MTU */
+#define ZEBRA_LINK_MTU_MIN 68
+#define ZEBRA_LINK_MTU_MAX 65535
+
 #define ZEBRA_LINK_VID_MIN 1
 #define ZEBRA_LINK_VID_MAX 4094
 

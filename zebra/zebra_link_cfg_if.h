@@ -40,6 +40,13 @@ extern void zebra_link_cfg_unset_link(struct interface *ifp);
  */
 extern void zebra_link_cfg_set_master(struct interface *ifp, const char *master);
 
+/*
+ * Configure the MTU of an interface, whether or not zebra created it.  Unset
+ * restores the MTU the interface had before zebra first changed it.
+ */
+extern void zebra_link_cfg_set_mtu(struct interface *ifp, uint32_t mtu);
+extern void zebra_link_cfg_unset_mtu(struct interface *ifp);
+
 /* Remove the configured master (the interface is released if we set it). */
 extern void zebra_link_cfg_unset_master(struct interface *ifp);
 

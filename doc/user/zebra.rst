@@ -296,6 +296,19 @@ Standard Commands
    Enslave this interface to ``IFNAME`` (for example a bridge). Works for any
    interface, whether or not zebra created it. ``no master`` releases it.
 
+.. clicmd:: mtu (68-65535)
+
+   Set the MTU of this interface in the kernel. Works for any interface,
+   whether or not zebra created it. The MTU is applied when it is configured
+   and again whenever the interface is created or re-created. It is not
+   enforced continuously: if someone else changes the MTU afterwards, zebra
+   leaves it alone.
+
+   ``no mtu`` puts back the MTU the interface had before zebra changed it
+   (unless it has been changed by someone else since). A value the kernel
+   refuses, for example a VLAN MTU larger than its parent's, is logged and not
+   retried until the command is entered again, so configure the parent first.
+
 .. clicmd:: bridge-vlan (1-4094) [to (1-4094)] <on|off|untagged|private>
 
    Configure the VLAN membership of this interface when it is a bridge port

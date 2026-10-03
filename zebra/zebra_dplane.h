@@ -241,6 +241,8 @@ enum dplane_op_e {
 	DPLANE_OP_LINK_BRPORT_SET,
 	/* Bridge or bridge port settings (stp, multicast, flooding, ...) */
 	DPLANE_OP_LINK_OPTS_SET,
+	/* MTU of an interface */
+	DPLANE_OP_LINK_MTU_SET,
 };
 
 /* Operational status of Bridge Ports */
@@ -1208,6 +1210,9 @@ struct zebra_link_opts_req;
 enum zebra_dplane_result dplane_link_opts_set(struct interface *ifp,
 					      const struct zebra_link_opts_req *req);
 
+/* Set the MTU of 'ifp'. */
+enum zebra_dplane_result dplane_link_mtu_set(struct interface *ifp, uint32_t mtu);
+
 /* Accessors for the link ops */
 const struct zebra_link_params *
 dplane_ctx_link_get_params(const struct zebra_dplane_ctx *ctx);
@@ -1217,6 +1222,7 @@ const struct zebra_link_brport_req *
 dplane_ctx_link_get_brport(const struct zebra_dplane_ctx *ctx);
 const struct zebra_link_opts_req *
 dplane_ctx_link_get_opts(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_link_get_mtu(const struct zebra_dplane_ctx *ctx);
 
 /*
  * Enqueue an SRv6 encap source address set

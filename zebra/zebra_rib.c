@@ -5333,6 +5333,7 @@ static void rib_process_dplane_results(struct event *event)
 			case DPLANE_OP_LINK_MASTER_SET:
 			case DPLANE_OP_LINK_BRPORT_SET:
 			case DPLANE_OP_LINK_OPTS_SET:
+			case DPLANE_OP_LINK_MTU_SET:
 				zebra_link_cfg_dplane_result(ctx);
 				break;
 
