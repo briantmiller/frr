@@ -32,6 +32,8 @@
 #include "zebra/table_manager.h"
 #include "zebra/ipforward.h"
 #include "zebra/zebra_nhg.h"
+#include "zebra/zebra_link_cfg_if.h"
+#include "zebra/zebra_link_netlink.h"
 
 /*
  * XPath: /frr-zebra:zebra/ip-forwarding
@@ -1376,6 +1378,402 @@ int lib_interface_zebra_bandwidth_destroy(struct nb_cb_destroy_args *args)
 		zebra_interface_up_update(ifp);
 
 	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/master
+ */
+int lib_interface_zebra_master_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_master(ifp, yang_dnode_get_string(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_master_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_master(ifp);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/mtu
+ */
+int lib_interface_zebra_mtu_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_mtu(ifp, yang_dnode_get_uint32(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_mtu_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_mtu(ifp);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-options/<name>
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-port-options/<name>
+ *
+ * All settings share these callbacks; the option is found from the leaf name
+ * in the table in zebra_link_opts.h.
+ */
+static int link_opt_modify(struct nb_cb_modify_args *args, enum zebra_link_opt_scope scope)
+{
+	const struct zebra_link_opt_def *t;
+	unsigned int count;
+	struct interface *ifp;
+	uint64_t val;
+	int idx;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	idx = zebra_link_opt_find(scope, args->dnode->schema->name);
+	t = zebra_link_opt_table(scope, &count);
+	if (idx < 0 || !zebra_link_opt_parse(&t[idx], yang_dnode_get_string(args->dnode, NULL), &val))
+		return NB_ERR;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_opt(ifp, scope, idx, val);
+
+	return NB_OK;
+}
+
+static int link_opt_destroy(struct nb_cb_destroy_args *args, enum zebra_link_opt_scope scope)
+{
+	struct interface *ifp;
+	int idx;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	idx = zebra_link_opt_find(scope, args->dnode->schema->name);
+	if (idx < 0)
+		return NB_ERR;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_opt(ifp, scope, idx);
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_options_modify(struct nb_cb_modify_args *args)
+{
+	return link_opt_modify(args, ZLO_SCOPE_BRIDGE);
+}
+
+int lib_interface_zebra_bridge_options_destroy(struct nb_cb_destroy_args *args)
+{
+	return link_opt_destroy(args, ZLO_SCOPE_BRIDGE);
+}
+
+int lib_interface_zebra_bridge_port_options_modify(struct nb_cb_modify_args *args)
+{
+	return link_opt_modify(args, ZLO_SCOPE_PORT);
+}
+
+int lib_interface_zebra_bridge_port_options_destroy(struct nb_cb_destroy_args *args)
+{
+	return link_opt_destroy(args, ZLO_SCOPE_PORT);
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bridge-vlan
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bridge-pvid
+ *
+ * The entry is applied from apply_finish, once per transaction, when it has
+ * been created or its mode changed.
+ */
+int lib_interface_zebra_bridge_vlan_create(struct nb_cb_create_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_vlan_mode_modify(struct nb_cb_modify_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_vlan_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_unset_bridge_vlan(ifp, yang_dnode_get_uint16(args->dnode, "id"));
+
+	return NB_OK;
+}
+
+void lib_interface_zebra_bridge_vlan_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	struct interface *ifp = nb_running_get_entry(args->dnode, NULL, true);
+	const char *mode = yang_dnode_get_string(args->dnode, "mode");
+	enum zebra_link_vlan_mode m = ZEBRA_LINK_VLAN_UNSET;
+
+	if (strmatch(mode, "on"))
+		m = ZEBRA_LINK_VLAN_ON;
+	else if (strmatch(mode, "off"))
+		m = ZEBRA_LINK_VLAN_OFF;
+	else if (strmatch(mode, "untagged"))
+		m = ZEBRA_LINK_VLAN_UNTAGGED;
+	else if (strmatch(mode, "private"))
+		m = ZEBRA_LINK_VLAN_PRIVATE;
+
+	zebra_link_cfg_set_bridge_vlan(ifp, yang_dnode_get_uint16(args->dnode, "id"), m);
+}
+
+int lib_interface_zebra_bridge_pvid_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_bridge_pvid(ifp, yang_dnode_get_uint16(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_link_cfg_set_bridge_pvid(ifp, 0);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
+ *
+ * Every kind (bridge, veth, vlan, gre, dummy, vxlan, bareudp, and future ones) shares these
+ * callbacks.  Create/modify of the individual leaves are no-ops: the whole
+ * container is evaluated once per transaction in apply_finish, so leaves that
+ * depend on one another (gre local/dev/remote) are always seen consistently.
+ */
+int lib_interface_zebra_link_type_create(struct nb_cb_create_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_link_type_param_modify(struct nb_cb_modify_args *args)
+{
+	return NB_OK;
+}
+
+int lib_interface_zebra_link_type_param_destroy(struct nb_cb_destroy_args *args)
+{
+	return NB_OK;
+}
+
+/* Build link parameters from a link-type/<kind> container. */
+static bool link_type_params_from_dnode(const struct lyd_node *dnode,
+					struct zebra_link_params *p)
+{
+	const char *kind = dnode->schema->name;
+	const char *str;
+
+	memset(p, 0, sizeof(*p));
+
+	if (strmatch(kind, "bridge")) {
+		p->kind = ZEBRA_LINK_BRIDGE;
+	} else if (strmatch(kind, "vxlan")) {
+		struct zebra_link_vxlan *v = &p->u.vxlan;
+
+		p->kind = ZEBRA_LINK_VXLAN;
+		v->vni = yang_dnode_get_uint32(dnode, "vni");
+		v->dstport = yang_dnode_get_uint16(dnode, "dstport");
+
+		if (yang_dnode_exists(dnode, "local")) {
+			v->has_local = true;
+			yang_dnode_get_ipv4(&v->local, dnode, "local");
+		}
+		if (yang_dnode_exists(dnode, "remote")) {
+			v->has_remote = true;
+			yang_dnode_get_ipv4(&v->remote, dnode, "remote");
+		}
+		if (yang_dnode_exists(dnode, "dev"))
+			strlcpy(v->dev, yang_dnode_get_string(dnode, "dev"), sizeof(v->dev));
+		if (yang_dnode_exists(dnode, "ttl")) {
+			v->has_ttl = true;
+			v->ttl = yang_dnode_get_uint8(dnode, "ttl");
+		}
+		if (yang_dnode_exists(dnode, "tos")) {
+			v->has_tos = true;
+			v->tos = yang_dnode_get_uint8(dnode, "tos");
+		}
+		if (yang_dnode_exists(dnode, "learning")) {
+			v->has_learning = true;
+			v->learning = yang_dnode_get_bool(dnode, "learning");
+		}
+	} else if (strmatch(kind, "bareudp")) {
+		struct zebra_link_bareudp *b = &p->u.bareudp;
+
+		p->kind = ZEBRA_LINK_BAREUDP;
+		b->dstport = yang_dnode_get_uint16(dnode, "dstport");
+		str = yang_dnode_get_string(dnode, "ethertype");
+		if (strmatch(str, "ipv4"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_IPV4;
+		else if (strmatch(str, "ipv6"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_IPV6;
+		else if (strmatch(str, "mpls-unicast"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_MPLS_UC;
+		else if (strmatch(str, "mpls-multicast"))
+			b->ethertype = ZEBRA_LINK_BAREUDP_MPLS_MC;
+		else
+			return false;
+		if (yang_dnode_exists(dnode, "srcport-min"))
+			b->srcport_min = yang_dnode_get_uint16(dnode, "srcport-min");
+		if (yang_dnode_exists(dnode, "multiproto"))
+			b->multiproto = yang_dnode_get_bool(dnode, "multiproto");
+	} else if (strmatch(kind, "dummy")) {
+		p->kind = ZEBRA_LINK_DUMMY;
+	} else if (strmatch(kind, "veth")) {
+		p->kind = ZEBRA_LINK_VETH;
+		strlcpy(p->u.veth.peer_name, yang_dnode_get_string(dnode, "peer-name"),
+			sizeof(p->u.veth.peer_name));
+	} else if (strmatch(kind, "vlan")) {
+		p->kind = ZEBRA_LINK_VLAN;
+		strlcpy(p->u.vlan.parent, yang_dnode_get_string(dnode, "parent"),
+			sizeof(p->u.vlan.parent));
+		p->u.vlan.vid = yang_dnode_get_uint16(dnode, "id");
+		/* dot1q is the default encapsulation */
+		p->u.vlan.encap = ZEBRA_LINK_VLAN_DOT1Q;
+		if (yang_dnode_exists(dnode, "encapsulation") &&
+		    strmatch(yang_dnode_get_string(dnode, "encapsulation"), "q-in-q"))
+			p->u.vlan.encap = ZEBRA_LINK_VLAN_QINQ;
+	} else if (strmatch(kind, "gre")) {
+		struct zebra_link_gre *g = &p->u.gre;
+
+		p->kind = ZEBRA_LINK_GRE;
+
+		if (yang_dnode_exists(dnode, "local")) {
+			g->has_local = true;
+			yang_dnode_get_ipv4(&g->local, dnode, "local");
+		}
+		if (yang_dnode_exists(dnode, "dev"))
+			strlcpy(g->dev, yang_dnode_get_string(dnode, "dev"),
+				sizeof(g->dev));
+
+		/* remote is "any" or an address; "any" sends no remote at all */
+		str = yang_dnode_get_string(dnode, "remote");
+		if (!strmatch(str, "any")) {
+			if (inet_pton(AF_INET, str, &g->remote) != 1)
+				return false;
+			g->has_remote = true;
+		}
+
+		if (yang_dnode_exists(dnode, "key")) {
+			g->has_key = true;
+			g->key = yang_dnode_get_uint32(dnode, "key");
+		}
+		if (yang_dnode_exists(dnode, "ttl")) {
+			g->has_ttl = true;
+			g->ttl = yang_dnode_get_uint8(dnode, "ttl");
+		}
+		if (yang_dnode_exists(dnode, "tos")) {
+			g->has_tos = true;
+			g->tos = yang_dnode_get_uint8(dnode, "tos");
+		}
+	} else {
+		return false;
+	}
+
+	return true;
+}
+
+/* Does the candidate/running configuration have any link-type kind besides
+ * 'dnode'?  A CLI replace destroys the old kind and creates the new one in
+ * the same transaction, in either order.
+ */
+static bool link_type_kind_matches(const struct zebra_link_params *cur,
+				   const struct lyd_node *dnode)
+{
+	const char *kind = dnode->schema->name;
+
+	return strmatch(kind, zebra_link_kind2str(cur->kind));
+}
+
+int lib_interface_zebra_link_type_destroy(struct nb_cb_destroy_args *args)
+{
+	const struct zebra_link_params *cur;
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+
+	/*
+	 * Only act if this kind is still the active one.  When a different
+	 * kind replaces it in the same transaction and has already been
+	 * applied, there is nothing left to remove.
+	 */
+	cur = zebra_link_cfg_get_link(ifp);
+	if (cur && link_type_kind_matches(cur, args->dnode))
+		zebra_link_cfg_unset_link(ifp);
+
+	return NB_OK;
+}
+
+void lib_interface_zebra_link_type_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	struct zebra_link_params params;
+	struct interface *ifp;
+	const char *err;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+
+	if (!link_type_params_from_dnode(args->dnode, &params)) {
+		zlog_warn("%s: invalid link-type configuration for %s", __func__, ifp->name);
+		return;
+	}
+
+	err = zebra_link_params_validate(ifp->name, &params);
+	if (err) {
+		/* The CLI rejects these up front; this covers other front ends */
+		zlog_warn("%s: link-type %s on %s not applied: %s", __func__,
+			  zebra_link_kind2str(params.kind), ifp->name, err);
+		return;
+	}
+
+	zebra_link_cfg_set_link(ifp, &params);
 }
 
 /*

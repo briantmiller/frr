@@ -38,6 +38,7 @@
 #include "zebra/zebra_evpn_mh.h"
 #include "zebra/zebra_trace.h"
 #include "zebra/zebra_l2.h"
+#include "zebra/zebra_link_cfg_if.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, ZINFO, "Zebra Interface Information");
 
@@ -263,6 +264,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 		zebra_ns_unlink_ifp(ifp);
 
 		XFREE(MTYPE_ZIF_DESC, zebra_if->desc);
+
+		zebra_link_cfg_if_free(ifp);
 
 		event_cancel(&zebra_if->speed_update);
 
@@ -592,6 +595,8 @@ void if_add_update(struct interface *ifp)
 	assert(if_data);
 
 	zebra_qos_if_added(ifp);
+	/* Configured links/masters may now be creatable or enslavable */
+	zebra_link_cfg_if_added(ifp);
 
 	if (if_data->multicast == IF_ZEBRA_DATA_ON)
 		if_set_flags(ifp, IFF_MULTICAST);
@@ -827,6 +832,9 @@ void if_delete_update(struct interface **pifp)
 		       sizeof(struct zebra_l2info_brslave));
 		zebra_evpn_mac_ifp_del(ifp);
 	}
+
+	/* Configured links that vanished are re-evaluated (and re-created) */
+	zebra_link_cfg_if_deleted(ifp);
 
 	if (!ifp->configured) {
 		if (IS_ZEBRA_DEBUG_KERNEL)
@@ -1725,6 +1733,7 @@ static void interface_update_l2info(struct zebra_dplane_ctx *ctx,
 	case ZEBRA_IF_VETH:
 	case ZEBRA_IF_BOND:
 	case ZEBRA_IF_DUMMY:
+	case ZEBRA_IF_BAREUDP:
 		break;
 	}
 }
@@ -2619,6 +2628,9 @@ static const char *zebra_ziftype_2str(enum zebra_iftype zif_type)
 
 	case ZEBRA_IF_DUMMY:
 		return "dummy";
+
+	case ZEBRA_IF_BAREUDP:
+		return "bareudp";
 
 	default:
 		return "Unknown";

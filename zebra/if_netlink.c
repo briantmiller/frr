@@ -61,6 +61,7 @@
 #include "zebra/zebra_vxlan.h"
 #include "zebra/zebra_evpn_mh.h"
 #include "zebra/zebra_l2.h"
+#include "zebra/zebra_link_netlink.h"
 #include "zebra/netconf_netlink.h"
 #include "zebra/zebra_trace.h"
 #include "lib/netlink_parser.h"
@@ -230,6 +231,8 @@ static void netlink_determine_zebra_iftype(const char *kind,
 		*zif_type = ZEBRA_IF_IP6GRE;
 	else if (strcmp(kind, "dummy") == 0)
 		*zif_type = ZEBRA_IF_DUMMY;
+	else if (strcmp(kind, "bareudp") == 0)
+		*zif_type = ZEBRA_IF_BAREUDP;
 }
 
 static void netlink_vrf_change(struct nlmsghdr *h, struct rtattr *tb,
@@ -611,6 +614,7 @@ static void netlink_interface_update_l2info(struct zebra_dplane_ctx *ctx,
 	case ZEBRA_IF_VETH:
 	case ZEBRA_IF_BOND:
 	case ZEBRA_IF_DUMMY:
+	case ZEBRA_IF_BAREUDP:
 		break;
 	}
 }
@@ -843,6 +847,62 @@ netlink_put_gre_set_msg(struct nl_batch *bth, struct zebra_dplane_ctx *ctx)
 	ret = netlink_batch_add_msg(bth, ctx, netlink_gre_set_msg_encoder, false);
 
 	return ret;
+}
+
+/*
+ * Encode link create / delete / set-master requests (zebra-configured links).
+ * The message construction itself lives in zebra_link_netlink.c.
+ */
+static ssize_t netlink_link_msg_encoder(struct zebra_dplane_ctx *ctx, void *buf,
+					size_t buflen)
+{
+	struct zebra_link_nl_req req = {};
+	enum dplane_op_e op = dplane_ctx_get_op(ctx);
+	const char *err = NULL;
+	ssize_t len;
+
+	req.ifname = dplane_ctx_get_ifname(ctx);
+
+	if (op == DPLANE_OP_LINK_CREATE) {
+		req.op = ZEBRA_LINK_NL_CREATE;
+		req.params = dplane_ctx_link_get_params(ctx);
+		req.link_ifindex = dplane_ctx_link_get_link_ifindex(ctx);
+	} else if (op == DPLANE_OP_LINK_DELETE) {
+		req.op = ZEBRA_LINK_NL_DELETE;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+	} else if (op == DPLANE_OP_LINK_MASTER_SET) {
+		req.op = ZEBRA_LINK_NL_SET_MASTER;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+		req.master_ifindex = dplane_ctx_link_get_master_ifindex(ctx);
+	} else if (op == DPLANE_OP_LINK_MTU_SET) {
+		req.op = ZEBRA_LINK_NL_SET_MTU;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+		req.mtu = dplane_ctx_link_get_mtu(ctx);
+	} else if (op == DPLANE_OP_LINK_OPTS_SET) {
+		req.op = ZEBRA_LINK_NL_OPTS;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+		req.opts = dplane_ctx_link_get_opts(ctx);
+	} else if (op == DPLANE_OP_LINK_BRPORT_SET) {
+		req.op = ZEBRA_LINK_NL_BRPORT;
+		req.ifindex = dplane_ctx_get_ifindex(ctx);
+		req.brport = dplane_ctx_link_get_brport(ctx);
+	} else {
+		return 0;
+	}
+
+	len = zebra_link_nl_encode(&req, buf, buflen, &err);
+	if (len == 0)
+		zlog_warn("%s: unable to build %s request for %s: %s", __func__,
+			  dplane_op2str(dplane_ctx_get_op(ctx)),
+			  dplane_ctx_get_ifname(ctx), err ? err : "unknown error");
+
+	return len;
+}
+
+enum netlink_msg_status netlink_put_link_msg(struct nl_batch *bth,
+					     struct zebra_dplane_ctx *ctx)
+{
+	return netlink_batch_add_msg(bth, ctx, netlink_link_msg_encoder, false);
 }
 
 /* Interface lookup by netlink socket. */

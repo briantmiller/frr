@@ -89,6 +89,8 @@ enum zebra_if_flags {
 	((zif)->protodown_rc == ZEBRA_PROTODOWN_EXTERNAL)
 
 /* `zebra' daemon local interface structure. */
+struct zebra_link_cfg;
+
 struct zebra_if {
 	/* back pointer to the interface */
 	struct interface *ifp;
@@ -190,6 +192,9 @@ struct zebra_if {
 	/* list of zebra_mac entries using this interface as destination */
 	struct list *mac_list;
 
+	/* Configured link type / master (see zebra_link_cfg.c), or NULL */
+	struct zebra_link_cfg *link_cfg;
+
 	/* Link fields - for sub-interfaces. */
 	ns_id_t link_nsid;
 	ifindex_t link_ifindex;
@@ -254,6 +259,7 @@ DECLARE_HOOK(zebra_if_extra_info, (struct vty * vty, json_object *json_if, struc
 #define IS_ZEBRA_IF_IP6GRETAP(ifp)                                                                \
 	(((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_IP6GRETAP)
 
+#define IS_ZEBRA_IF_BAREUDP(ifp) (((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_BAREUDP)
 #define IS_ZEBRA_IF_DUMMY(ifp) (((struct zebra_if *)(ifp->info))->zif_type == ZEBRA_IF_DUMMY)
 
 #define IS_ZEBRA_IF_BRIDGE_SLAVE(ifp)					\

@@ -29,6 +29,8 @@
 #include "zebra/zebra_neigh.h"
 #include "zebra/zebra_tc.h"
 #include "zebra/zebra_trace.h"
+#include "zebra/zebra_link_cfg.h"
+#include "zebra/zebra_link_opts.h"
 #include "printfrr.h"
 
 /* Memory types */
@@ -363,6 +365,19 @@ struct dplane_gre_ctx {
 	struct zebra_l2info_gre info;
 };
 
+/*
+ * Link create/delete/master-set from configuration.  The interface is
+ * identified by name (create) or by ifindex in zd_ifindex (delete, master).
+ */
+struct dplane_link_ctx {
+	struct zebra_link_params params;
+	ifindex_t link_ifindex;	  /* resolved vlan parent / gre dev */
+	ifindex_t master_ifindex; /* 0 == no master */
+	struct zebra_link_brport_req brport;
+	struct zebra_link_opts_req *opts; /* allocated, freed with the context */
+	uint32_t mtu;
+};
+
 
 /*
  * Network interface configuration info - aligned with netlink's NETCONF
@@ -534,6 +549,7 @@ struct zebra_dplane_ctx {
 		} ipset_entry;
 		struct dplane_neigh_table neightable;
 		struct dplane_gre_ctx gre;
+		struct dplane_link_ctx link;
 		struct dplane_netconf_info netconf;
 		enum zebra_dplane_startup_notifications spot;
 		struct dplane_srv6_encap_ctx srv6_encap;
@@ -720,6 +736,9 @@ static struct zebra_dplane_globals {
 	_Atomic uint32_t dg_gre_set_in;
 	_Atomic uint32_t dg_gre_set_errors;
 
+	_Atomic uint32_t dg_link_in;
+	_Atomic uint32_t dg_link_errors;
+
 	_Atomic uint32_t dg_intfs_in;
 	_Atomic uint32_t dg_intf_errors;
 
@@ -830,6 +849,9 @@ void dplane_enable_sys_route_notifs(void)
 static void dplane_ctx_free_internal(struct zebra_dplane_ctx *ctx)
 {
 	struct dplane_intf_extra *if_extra;
+
+	if (ctx->zd_op == DPLANE_OP_LINK_OPTS_SET && ctx->u.link.opts)
+		XFREE(MTYPE_DP_CTX, ctx->u.link.opts);
 
 	/*
 	 * Some internal allocations may need to be freed, depending on
@@ -960,6 +982,12 @@ static void dplane_ctx_free_internal(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_MAC_DELETE:
 	case DPLANE_OP_NH_FDB_INSTALL:
 	case DPLANE_OP_NH_FDB_DELETE:
+	case DPLANE_OP_LINK_CREATE:
+	case DPLANE_OP_LINK_DELETE:
+	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
+	case DPLANE_OP_LINK_OPTS_SET:
+	case DPLANE_OP_LINK_MTU_SET:
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:
 	case DPLANE_OP_NEIGH_DELETE:
@@ -1209,6 +1237,19 @@ const char *dplane_op2str(enum dplane_op_e op)
 		return "NH_FDB_INSTALL";
 	case DPLANE_OP_NH_FDB_DELETE:
 		return "NH_FDB_DELETE";
+
+	case DPLANE_OP_LINK_CREATE:
+		return "LINK_CREATE";
+	case DPLANE_OP_LINK_DELETE:
+		return "LINK_DELETE";
+	case DPLANE_OP_LINK_MASTER_SET:
+		return "LINK_MASTER_SET";
+	case DPLANE_OP_LINK_BRPORT_SET:
+		return "LINK_BRPORT_SET";
+	case DPLANE_OP_LINK_OPTS_SET:
+		return "LINK_OPTS_SET";
+	case DPLANE_OP_LINK_MTU_SET:
+		return "LINK_MTU_SET";
 
 	case DPLANE_OP_LSP_INSTALL:
 		return "LSP_INSTALL";
@@ -6776,6 +6817,171 @@ done:
 }
 
 /*
+ * Accessors for link create/delete/master-set contexts
+ */
+const struct zebra_link_params *
+dplane_ctx_link_get_params(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.link.params;
+}
+
+ifindex_t dplane_ctx_link_get_link_ifindex(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.link.link_ifindex;
+}
+
+ifindex_t dplane_ctx_link_get_master_ifindex(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.link.master_ifindex;
+}
+
+const struct zebra_link_opts_req *
+dplane_ctx_link_get_opts(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.link.opts;
+}
+
+uint32_t dplane_ctx_link_get_mtu(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.link.mtu;
+}
+
+const struct zebra_link_brport_req *
+dplane_ctx_link_get_brport(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.link.brport;
+}
+
+/*
+ * Common helper for link create/delete/master-set/brport-set.
+ */
+static enum zebra_dplane_result
+dplane_link_enqueue(struct interface *ifp, enum dplane_op_e op,
+		    const struct zebra_link_params *params, ifindex_t link_ifindex,
+		    ifindex_t master_ifindex, const struct zebra_link_brport_req *brport,
+		    const struct zebra_link_opts_req *opts, uint32_t mtu)
+{
+	enum zebra_dplane_result result = ZEBRA_DPLANE_REQUEST_FAILURE;
+	struct zebra_dplane_ctx *ctx;
+	struct zebra_vrf *zvrf;
+	struct zebra_ns *zns;
+	int ret = EINVAL;
+
+	ctx = dplane_ctx_alloc();
+
+	if (!ifp || !ifp->vrf)
+		goto done;
+
+	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
+		zlog_debug("init dplane ctx %s: if %s(%u) link %d master %d",
+			   dplane_op2str(op), ifp->name, ifp->ifindex, link_ifindex,
+			   master_ifindex);
+
+	zvrf = ifp->vrf->info;
+	if (zvrf && zvrf->zns)
+		zns = zvrf->zns;
+	else
+		zns = zebra_ns_lookup(NS_DEFAULT);
+	if (!zns)
+		goto done;
+
+	ctx->zd_op = op;
+	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
+
+	dplane_ctx_ns_init(ctx, zns, false);
+
+	dplane_ctx_set_ifname(ctx, ifp->name);
+	ctx->zd_vrf_id = ifp->vrf->vrf_id;
+	ctx->zd_ifindex = ifp->ifindex;
+
+	if (params)
+		memcpy(&ctx->u.link.params, params, sizeof(ctx->u.link.params));
+	ctx->u.link.link_ifindex = link_ifindex;
+	ctx->u.link.master_ifindex = master_ifindex;
+	ctx->u.link.mtu = mtu;
+	if (brport)
+		memcpy(&ctx->u.link.brport, brport, sizeof(ctx->u.link.brport));
+	if (opts) {
+		ctx->u.link.opts = XCALLOC(MTYPE_DP_CTX, sizeof(*opts));
+		memcpy(ctx->u.link.opts, opts, sizeof(*opts));
+	}
+
+	/* Enqueue context for processing */
+	ret = dplane_update_enqueue(ctx);
+
+done:
+	atomic_fetch_add_explicit(&zdplane_info.dg_link_in, 1, memory_order_relaxed);
+
+	if (ret == AOK) {
+		result = ZEBRA_DPLANE_REQUEST_QUEUED;
+	} else {
+		atomic_fetch_add_explicit(&zdplane_info.dg_link_errors, 1,
+					  memory_order_relaxed);
+		dplane_ctx_free(&ctx);
+		result = ZEBRA_DPLANE_REQUEST_FAILURE;
+	}
+	return result;
+}
+
+enum zebra_dplane_result
+dplane_link_create(struct interface *ifp, const struct zebra_link_params *params,
+		   ifindex_t link_ifindex)
+{
+	if (!params)
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_CREATE, params, link_ifindex, 0,
+				  NULL, NULL, 0);
+}
+
+enum zebra_dplane_result dplane_link_delete(struct interface *ifp)
+{
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_DELETE, NULL, 0, 0, NULL, NULL, 0);
+}
+
+enum zebra_dplane_result dplane_link_master_set(struct interface *ifp,
+						ifindex_t master_ifindex)
+{
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_MASTER_SET, NULL, 0,
+				   master_ifindex, NULL, NULL, 0);
+}
+
+enum zebra_dplane_result
+dplane_link_brport_set(struct interface *ifp, const struct zebra_link_brport_req *req)
+{
+	if (!req)
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_BRPORT_SET, NULL, 0, 0, req, NULL, 0);
+}
+
+enum zebra_dplane_result dplane_link_opts_set(struct interface *ifp,
+					      const struct zebra_link_opts_req *req)
+{
+	if (!req)
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_OPTS_SET, NULL, 0, 0, NULL, req, 0);
+}
+
+enum zebra_dplane_result dplane_link_mtu_set(struct interface *ifp, uint32_t mtu)
+{
+	return dplane_link_enqueue(ifp, DPLANE_OP_LINK_MTU_SET, NULL, 0, 0, NULL, NULL, mtu);
+}
+
+/*
  * Common helper api for SRv6 encapsulation source address set
  */
 enum zebra_dplane_result
@@ -7128,6 +7334,13 @@ int dplane_show_helper(struct vty *vty, bool detailed)
 				    memory_order_relaxed);
 	vty_out(vty, "GRE set updates:       %"PRIu64"\n", incoming);
 	vty_out(vty, "GRE set errors:        %"PRIu64"\n", errs);
+
+	incoming = atomic_load_explicit(&zdplane_info.dg_link_in,
+					memory_order_relaxed);
+	errs = atomic_load_explicit(&zdplane_info.dg_link_errors,
+				    memory_order_relaxed);
+	vty_out(vty, "Link create/delete/master updates: %"PRIu64"\n", incoming);
+	vty_out(vty, "Link create/delete/master errors:  %"PRIu64"\n", errs);
 	return CMD_SUCCESS;
 }
 
@@ -7580,6 +7793,19 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 			   dplane_op2str(dplane_ctx_get_op(ctx)));
 		break;
 
+	case DPLANE_OP_LINK_CREATE:
+	case DPLANE_OP_LINK_DELETE:
+	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
+	case DPLANE_OP_LINK_OPTS_SET:
+	case DPLANE_OP_LINK_MTU_SET:
+		zlog_debug("Dplane link op %s, ifp %s, idx %u, type %s, link %d, master %d",
+			   dplane_op2str(dplane_ctx_get_op(ctx)),
+			   dplane_ctx_get_ifname(ctx), dplane_ctx_get_ifindex(ctx),
+			   zebra_link_kind2str(ctx->u.link.params.kind),
+			   ctx->u.link.link_ifindex, ctx->u.link.master_ifindex);
+		break;
+
 	case DPLANE_OP_NH_FDB_INSTALL:
 	case DPLANE_OP_NH_FDB_DELETE:
 		zlog_debug("ID (0x%x) Dplane fdb-nh update ctx %p op %s cnt %u",
@@ -7825,6 +8051,17 @@ static void kernel_dplane_handle_result(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_NH_FDB_DELETE:
 		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
 			atomic_fetch_add_explicit(&zdplane_info.dg_nh_fdb_errors, 1,
+						  memory_order_relaxed);
+		break;
+
+	case DPLANE_OP_LINK_CREATE:
+	case DPLANE_OP_LINK_DELETE:
+	case DPLANE_OP_LINK_MASTER_SET:
+	case DPLANE_OP_LINK_BRPORT_SET:
+	case DPLANE_OP_LINK_OPTS_SET:
+	case DPLANE_OP_LINK_MTU_SET:
+		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
+			atomic_fetch_add_explicit(&zdplane_info.dg_link_errors, 1,
 						  memory_order_relaxed);
 		break;
 

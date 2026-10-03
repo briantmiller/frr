@@ -178,6 +178,12 @@ module frr-zebra {
       "Zebra interface type dummy.";
   }
 
+  identity zif-bareudp {
+    base zebra-interface-type;
+    description
+      "Zebra interface type bareudp.";
+  }
+
   /*
    * VxLAN Network Identifier type
    */
@@ -2214,6 +2220,763 @@ module frr-zebra {
         type boolean;
         description
           "Interface admin status.";
+      }
+
+      leaf master {
+        type string {
+          length "1..15";
+        }
+        description
+          "Name of the interface this interface is enslaved to (a bridge,
+           bond, VRF, ...). Applied as soon as both interfaces exist.";
+      }
+
+      leaf mtu {
+        type uint32 {
+          range "68..65535";
+        }
+        description
+          "MTU of the interface, whether or not zebra created it. Applied once
+           when configured and again when the interface is re-created. Removing
+           the setting restores the MTU the interface had before zebra changed
+           it. A value the kernel refuses (for example more than the parent
+           device allows) is logged and not retried until the setting is
+           entered again.";
+      }
+
+      list bridge-vlan {
+        key "id";
+        description
+          "VLAN membership of this interface when it is a bridge port. Applied
+           once the interface is enslaved to a bridge, with the bridge's VLAN
+           filtering enabled for it to have any effect.";
+
+        leaf id {
+          type uint16 {
+            range "1..4094";
+          }
+          description
+            "VLAN identifier.";
+        }
+
+        leaf mode {
+          type enumeration {
+            enum on {
+              description
+                "Tagged member of the VLAN.";
+            }
+            enum off {
+              description
+                "Not a member of the VLAN; removes it if present (for example
+                 the default VLAN 1 the kernel adds to new ports).";
+            }
+            enum untagged {
+              description
+                "Member of the VLAN; frames leave the port untagged.";
+            }
+            enum private {
+              description
+                "Tagged member of the VLAN and the port is isolated: it can
+                 only communicate with non-isolated ports. The kernel has no
+                 per-VLAN isolation, so any private VLAN isolates the whole
+                 port.";
+            }
+          }
+          mandatory true;
+          description
+            "How this interface takes part in the VLAN.";
+        }
+      }
+
+      leaf bridge-pvid {
+        type uint16 {
+          range "1..4094";
+        }
+        description
+          "Native VLAN (PVID): untagged frames received on this port are
+           classified into this VLAN. It should also be a member (on,
+           untagged or private).";
+      }
+
+      container bridge-options {
+        description
+          "Settings of this interface when it is a Linux bridge. Applied in
+           place; an option that is not configured is left alone. Removing
+           an option sets the kernel default again.";
+
+        leaf stp {
+          type boolean;
+          description
+            "Spanning tree protocol (kernel STP).";
+        }
+
+        leaf ageing-time {
+          type uint32 {
+            range "0..10000";
+          }
+          description
+            "FDB ageing time in seconds (kernel default 300).";
+        }
+
+        leaf forward-delay {
+          type uint32 {
+            range "2..30";
+          }
+          description
+            "STP forward delay in seconds (kernel default 15).";
+        }
+
+        leaf hello-time {
+          type uint32 {
+            range "1..10";
+          }
+          description
+            "STP hello time in seconds (kernel default 2).";
+        }
+
+        leaf max-age {
+          type uint32 {
+            range "6..40";
+          }
+          description
+            "STP max age in seconds (kernel default 20).";
+        }
+
+        leaf priority {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "STP bridge priority (kernel default 32768).";
+        }
+
+        leaf vlan-filtering {
+          type boolean;
+          description
+            "VLAN filtering.";
+        }
+
+        leaf vlan-protocol {
+          type enumeration {
+            enum dot1q;
+            enum dot1ad;
+          }
+          description
+            "VLAN ethertype used by the bridge.";
+        }
+
+        leaf vlan-default-pvid {
+          type uint16 {
+            range "0..4094";
+          }
+          description
+            "Default PVID given to new ports, 0 for none (kernel default 1).";
+        }
+
+        leaf vlan-stats {
+          type boolean;
+          description
+            "Per-VLAN statistics.";
+        }
+
+        leaf vlan-stats-per-port {
+          type boolean;
+          description
+            "Per-VLAN per-port statistics.";
+        }
+
+        leaf group-fwd-mask {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "Bitmask of link-local group addresses (01-80-C2-00-00-0X) the bridge forwards.";
+        }
+
+        leaf group-address {
+          type yang:mac-address;
+          description
+            "Destination address of STP frames.";
+        }
+
+        leaf multicast-snooping {
+          type boolean;
+          description
+            "IGMP/MLD snooping.";
+        }
+
+        leaf multicast-router {
+          type enumeration {
+            enum disabled;
+            enum auto;
+            enum enabled;
+          }
+          description
+            "Whether the bridge itself is a multicast router.";
+        }
+
+        leaf multicast-querier {
+          type boolean;
+          description
+            "Act as IGMP/MLD querier.";
+        }
+
+        leaf multicast-query-use-ifaddr {
+          type boolean;
+          description
+            "Use the bridge address as source of IGMP queries.";
+        }
+
+        leaf multicast-stats {
+          type boolean;
+          description
+            "Multicast statistics.";
+        }
+
+        leaf multicast-igmp-version {
+          type uint8 {
+            range "2..3";
+          }
+          description
+            "IGMP version.";
+        }
+
+        leaf multicast-mld-version {
+          type uint8 {
+            range "1..2";
+          }
+          description
+            "MLD version.";
+        }
+
+        leaf multicast-hash-max {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Maximum multicast group hash table size.";
+        }
+
+        leaf multicast-last-member-count {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Last member query count (kernel default 2).";
+        }
+
+        leaf multicast-startup-query-count {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Startup query count (kernel default 2).";
+        }
+
+        leaf multicast-last-member-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Last member query interval, centiseconds (kernel default 100).";
+        }
+
+        leaf multicast-membership-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Group membership interval, centiseconds (kernel default 26000).";
+        }
+
+        leaf multicast-querier-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Other querier present interval, centiseconds (kernel default 25500).";
+        }
+
+        leaf multicast-query-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Query interval, centiseconds (kernel default 12500).";
+        }
+
+        leaf multicast-query-response-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Query response interval, centiseconds (kernel default 1000).";
+        }
+
+        leaf multicast-startup-query-interval {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Startup query interval, centiseconds (kernel default 3125).";
+        }
+
+        leaf fdb-max-learned {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum number of learned FDB entries, 0 for no limit.";
+        }
+    }
+
+      container bridge-port-options {
+        description
+          "Settings of this interface when it is a bridge port. Applied once
+           the interface is enslaved to a bridge. Removing an option sets
+           the kernel default again.";
+
+        leaf state {
+          type enumeration {
+            enum disabled;
+            enum listening;
+            enum learning;
+            enum forwarding;
+            enum blocking;
+          }
+          description
+            "STP state of the port.";
+        }
+
+        leaf priority {
+          type uint16 {
+            range "0..255";
+          }
+          description
+            "STP port priority (kernel default 32).";
+        }
+
+        leaf cost {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "STP path cost, 0 for automatic.";
+        }
+
+        leaf hairpin {
+          type boolean;
+          description
+            "Hairpin mode: reflect frames back out of the port they came in on.";
+        }
+
+        leaf bpdu-guard {
+          type boolean;
+          description
+            "Disable the port if it receives a BPDU.";
+        }
+
+        leaf root-block {
+          type boolean;
+          description
+            "Do not let the port become a root port.";
+        }
+
+        leaf fast-leave {
+          type boolean;
+          description
+            "Multicast fast leave.";
+        }
+
+        leaf learning {
+          type boolean;
+          description
+            "Learn MAC addresses on the port (kernel default on).";
+        }
+
+        leaf unicast-flood {
+          type boolean;
+          description
+            "Flood unknown unicast to the port (kernel default on).";
+        }
+
+        leaf multicast-flood {
+          type boolean;
+          description
+            "Flood unknown multicast to the port (kernel default on).";
+        }
+
+        leaf broadcast-flood {
+          type boolean;
+          description
+            "Flood broadcast to the port (kernel default on).";
+        }
+
+        leaf multicast-to-unicast {
+          type boolean;
+          description
+            "Send multicast as unicast to the port.";
+        }
+
+        leaf proxy-arp {
+          type boolean;
+          description
+            "Proxy ARP.";
+        }
+
+        leaf proxy-arp-wifi {
+          type boolean;
+          description
+            "Proxy ARP for wireless clients.";
+        }
+
+        leaf neigh-suppress {
+          type boolean;
+          description
+            "ARP/ND suppression.";
+        }
+
+        leaf neigh-vlan-suppress {
+          type boolean;
+          description
+            "Per-VLAN ARP/ND suppression.";
+        }
+
+        leaf vlan-tunnel {
+          type boolean;
+          description
+            "VLAN to tunnel id mapping.";
+        }
+
+        leaf isolated {
+          type boolean;
+          description
+            "Isolate the port from other isolated ports (overrides private VLANs).";
+        }
+
+        leaf locked {
+          type boolean;
+          description
+            "Locked port: drop traffic from addresses not in the FDB.";
+        }
+
+        leaf mab {
+          type boolean;
+          description
+            "MAC authentication bypass on a locked port.";
+        }
+
+        leaf multicast-router {
+          type enumeration {
+            enum disabled;
+            enum learning;
+            enum permanent;
+            enum temp;
+          }
+          description
+            "Multicast router state of the port.";
+        }
+
+        leaf group-fwd-mask {
+          type uint16 {
+            range "0..65535";
+          }
+          description
+            "Link-local group addresses forwarded through this port.";
+        }
+
+        leaf multicast-max-groups {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum multicast groups learned on the port, 0 for no limit.";
+        }
+
+        leaf multicast-eht-hosts-limit {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Maximum explicit-host-tracking hosts per port.";
+        }
+    }
+
+      container link-type {
+        description
+          "Type and parameters of a link that zebra creates in the kernel.
+           An existing kernel interface is never modified in place.";
+
+        choice type {
+          description
+            "The kind of link to create. New kinds (gretap, ip6gre, vxlan,
+             ...) are added as additional cases.";
+
+          case bridge {
+            container bridge {
+              presence "Create a bridge.";
+              description
+                "A Linux bridge. Its settings are in bridge-options.";
+            }
+          }
+
+          case dummy {
+            container dummy {
+              presence "Create a dummy interface.";
+              description
+                "A dummy interface: a virtual interface that is not attached
+                 to anything, typically used to carry addresses.";
+            }
+          }
+
+          case veth {
+            container veth {
+              presence "Create a veth pair.";
+              description
+                "A virtual ethernet pair; this interface is one end.";
+
+              leaf peer-name {
+                type string {
+                  length "1..15";
+                }
+                mandatory true;
+                description
+                  "Name of the other end of the pair.";
+              }
+            }
+          }
+
+          case vlan {
+            container vlan {
+              presence "Create a VLAN interface.";
+              description
+                "A VLAN sub-interface of a parent device.";
+
+              leaf parent {
+                type string {
+                  length "1..15";
+                }
+                mandatory true;
+                description
+                  "Name of the parent device.";
+              }
+
+              leaf id {
+                type uint16 {
+                  range "1..4094";
+                }
+                mandatory true;
+                description
+                  "VLAN identifier.";
+              }
+
+              leaf encapsulation {
+                type enumeration {
+                  enum dot1q {
+                    description
+                      "IEEE 802.1Q single tagging.";
+                  }
+                  enum q-in-q {
+                    description
+                      "IEEE 802.1ad provider bridging (q-in-q).";
+                  }
+                }
+                default "dot1q";
+                description
+                  "VLAN encapsulation.";
+              }
+            }
+          }
+
+          case gre {
+            container gre {
+              presence "Create a GRE tunnel.";
+              description
+                "A standard (IPv4, layer 3) GRE tunnel.";
+
+              must "local or dev" {
+                error-message
+                  "A GRE tunnel requires a local address or a dev.";
+              }
+
+              leaf local {
+                type inet:ipv4-address-no-zone;
+                description
+                  "Local tunnel endpoint address.";
+              }
+
+              leaf dev {
+                type string {
+                  length "1..15";
+                }
+                description
+                  "Underlying device the tunnel is bound to.";
+              }
+
+              leaf remote {
+                type union {
+                  type inet:ipv4-address-no-zone;
+                  type enumeration {
+                    enum any {
+                      description
+                        "Accept GRE from any remote endpoint.";
+                    }
+                  }
+                }
+                mandatory true;
+                description
+                  "Remote tunnel endpoint address, or 'any'.";
+              }
+
+              leaf key {
+                type uint32;
+                description
+                  "GRE key, used for both directions.";
+              }
+
+              leaf ttl {
+                type uint8 {
+                  range "1..255";
+                }
+                description
+                  "TTL of encapsulated packets.";
+              }
+
+              leaf tos {
+                type uint8;
+                description
+                  "TOS of encapsulated packets.";
+              }
+            }
+          }
+
+          case bareudp {
+            container bareudp {
+              presence "Create a bare UDP tunnel.";
+              description
+                "A bare UDP tunnel: a layer 3 protocol carried directly in
+                 UDP, with no tunnel header. The tunnel endpoints come from
+                 the routes that use the device.";
+
+              leaf dstport {
+                type uint16 {
+                  range "1..65535";
+                }
+                mandatory true;
+                description
+                  "UDP destination port.";
+              }
+
+              leaf ethertype {
+                type enumeration {
+                  enum ipv4 {
+                    description
+                      "IPv4 payload.";
+                  }
+                  enum ipv6 {
+                    description
+                      "IPv6 payload.";
+                  }
+                  enum mpls-unicast {
+                    description
+                      "MPLS unicast payload.";
+                  }
+                  enum mpls-multicast {
+                    description
+                      "MPLS multicast payload.";
+                  }
+                }
+                mandatory true;
+                description
+                  "Protocol carried in the UDP payload.";
+              }
+
+              leaf srcport-min {
+                type uint16 {
+                  range "1..65535";
+                }
+                description
+                  "Lowest UDP source port used (the kernel default is 1024).";
+              }
+
+              leaf multiproto {
+                type boolean;
+                description
+                  "Also carry the companion protocol: IPv6 with IPv4, or MPLS
+                   multicast with MPLS unicast.";
+              }
+            }
+          }
+
+          case vxlan {
+            container vxlan {
+              presence "Create a VXLAN interface.";
+              description
+                "A VXLAN tunnel endpoint with an IPv4 underlay.";
+
+              leaf vni {
+                type uint32 {
+                  range "1..16777215";
+                }
+                mandatory true;
+                description
+                  "VXLAN network identifier.";
+              }
+
+              leaf local {
+                type inet:ipv4-address-no-zone;
+                description
+                  "Local tunnel endpoint address.";
+              }
+
+              leaf remote {
+                type inet:ipv4-address-no-zone;
+                description
+                  "Remote tunnel endpoint (unicast) or multicast group. A
+                   multicast group requires dev.";
+              }
+
+              leaf dev {
+                type string {
+                  length "1..15";
+                }
+                description
+                  "Underlay device the tunnel is bound to.";
+              }
+
+              leaf dstport {
+                type uint16 {
+                  range "1..65535";
+                }
+                default "4789";
+                description
+                  "UDP destination port (the IANA port by default; the
+                   kernel's own default is 8472).";
+              }
+
+              leaf ttl {
+                type uint8 {
+                  range "1..255";
+                }
+                description
+                  "TTL of encapsulated packets.";
+              }
+
+              leaf tos {
+                type uint8;
+                description
+                  "TOS of encapsulated packets.";
+              }
+
+              leaf learning {
+                type boolean;
+                description
+                  "Learn remote MAC addresses from received frames (kernel
+                   default on); EVPN deployments turn it off.";
+              }
+            }
+          }
+        }
       }
 
       leaf mpls {
