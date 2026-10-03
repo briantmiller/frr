@@ -256,10 +256,11 @@ Standard Commands
    ``local`` or ``dev`` is required. ``remote`` is an address or ``any``.
    ``key``, ``ttl`` and ``tos`` are optional.
 
-.. clicmd:: link-type vxlan vni (1-16777215) [local A.B.C.D] [remote A.B.C.D] [dev IFNAME] [dstport (1-65535)] [ttl (1-255)] [tos (0-255)] [learning <on|off>]
+.. clicmd:: link-type vxlan vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]
 
    Create this interface as a VXLAN tunnel endpoint with an IPv4 underlay.
-   ``vni`` is required. ``remote`` is a unicast peer or a multicast group; a
+   ``vni`` is required and comes first; the other parameters may follow in any
+   order. ``remote`` is a unicast peer or a multicast group; a
    multicast group requires ``dev``, the underlay device that joins it.
    ``dstport`` defaults to 4789, the IANA port (the kernel's own default is
    8472). ``learning off`` is what EVPN deployments use. Creation waits until

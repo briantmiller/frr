@@ -545,7 +545,7 @@ def test_vxlan(tgen):
     assert wait_link(r1, "vx0", exp) is None
 
     # a changed definition re-creates the interface
-    conf(r1, "interface vx0", "link-type vxlan vni 101 dstport 4790 remote 10.255.1.2")
+    conf(r1, "interface vx0", "link-type vxlan vni 101 dstport 4790 remote 10.255.1.2")  # any order after vni
     exp = {"linkinfo": {"info_data": {"id": 101, "port": 4790, "remote": "10.255.1.2"}}}
     assert wait_link(r1, "vx0", exp) is None
 

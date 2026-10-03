@@ -670,7 +670,7 @@ DEFPY_YANG (link_type_gre,
 
 DEFPY_YANG (link_type_vxlan,
 	link_type_vxlan_cmd,
-	"link-type vxlan vni (1-16777215)$vni [local A.B.C.D$local] [remote A.B.C.D$remote] [dev IFNAME$dev] [dstport (1-65535)$dstport] [ttl (1-255)$ttl] [tos (0-255)$tos] [learning <on|off>$learning]",
+	"link-type vxlan vni (1-16777215)$vni [{local A.B.C.D$local|remote A.B.C.D$remote|dev IFNAME$dev|dstport (1-65535)$dstport|ttl (1-255)$ttl|tos (0-255)$tos|learning <on|off>$learning}]",
 	"Create this interface in the kernel\n"
 	"VXLAN tunnel endpoint\n"
 	"VXLAN network identifier\n"
@@ -723,7 +723,7 @@ DEFPY_YANG (link_type_vxlan,
 
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|dummy|vxlan vni (1-16777215) [local A.B.C.D] [remote A.B.C.D] [dev IFNAME] [dstport (1-65535)] [ttl (1-255)] [tos (0-255)] [learning <on|off>]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|dummy|vxlan [vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
 	"Linux bridge\n"
