@@ -68,6 +68,35 @@ void zebra_tc_filters_free(void *arg);
 uint32_t zebra_tc_filter_hash_key(const void *arg);
 bool zebra_tc_filter_hash_equal(const void *arg1, const void *arg2);
 
+/* Statistics of one TC class, as reported by the kernel */
+struct zebra_tc_class_stats {
+	/* full handles */
+	uint32_t handle;
+	uint32_t parent;
+
+	uint64_t bytes;
+	uint64_t packets;
+
+	/* rate estimator, only valid when the class has one */
+	bool rate_valid;
+	uint64_t bps; /* bits per second */
+	uint64_t pps;
+
+	uint32_t qlen;
+	uint32_t backlog; /* bytes */
+	uint32_t drops;
+	uint32_t overlimits;
+};
+
+/*
+ * Synchronously read the statistics of every TC class on @ifindex (default
+ * namespace) and call @cb for each.  Returns 0 on success, -1 on failure or
+ * when not supported by the platform.
+ */
+extern int kernel_tc_class_stats(ifindex_t ifindex,
+				 void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+				 void *arg);
+
 /*
  * Master-pthread handler for kernel-originated TC qdisc notifications
  * (DPLANE_OP_TC_QDISC_NOTIFY ctx).

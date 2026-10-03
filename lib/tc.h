@@ -67,6 +67,8 @@ struct tc_class_htb {
 	uint32_t quantum;
 	/* interface MTU used for burst calculation, 0 means 1500 */
 	uint32_t mtu;
+	/* ask the kernel to maintain a rate estimator for the class */
+	bool rate_est;
 };
 
 struct tc_class {

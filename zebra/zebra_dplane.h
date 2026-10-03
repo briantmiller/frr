@@ -630,6 +630,7 @@ uint32_t dplane_ctx_tc_class_get_parent(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_class_get_prio(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_class_get_quantum(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_class_get_mtu(const struct zebra_dplane_ctx *ctx);
+bool dplane_ctx_tc_class_get_rate_est(const struct zebra_dplane_ctx *ctx);
 
 int dplane_ctx_tc_qdisc_notify_get_kind(const struct zebra_dplane_ctx *ctx);
 ifindex_t dplane_ctx_tc_qdisc_notify_get_ifindex(const struct zebra_dplane_ctx *ctx);

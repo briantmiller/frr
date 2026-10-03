@@ -576,11 +576,45 @@ HTB qdisc of the interface is deleted and installed again. When only rates,
 ceilings or priorities change, e.g. after ``qos bandwidth`` was modified, the
 existing HTB classes are updated in place without disturbing traffic.
 
-.. clicmd:: show qos interface [IFNAME]
+.. clicmd:: show qos interface [IFNAME] [json]
 
    Show the QoS bandwidth, service-policy and the HTB classes installed on
-   the interface. Zebra owned qdiscs use the handle ``beef:``, so the kernel
-   state can be inspected with ``tc -s class show dev IFNAME`` and
+   the interface, followed by the statistics of every class read from the
+   kernel:
+
+   ``Current`` / ``Pps``
+      Current rate of the class. Zebra creates its classes with a kernel
+      rate estimator (1 second interval, averaged over about 4 seconds), so
+      the value follows changes in the traffic with a few seconds of delay.
+
+   ``%Rate``
+      Current rate as a percentage of the guaranteed rate (``bandwidth``).
+      Above 100% the class is borrowing bandwidth other classes do not use.
+
+   ``%Ceil``
+      Current rate as a percentage of the ceiling (``max-bandwidth``). A
+      class close to 100% is being shaped.
+
+   ``Packets`` / ``Bytes`` / ``Drops`` / ``Backlog``
+      Counters since the classes were installed, and the bytes and packets
+      currently queued in the class.
+
+   .. code-block:: frr
+
+      Class      Current      Pps       %Rate  %Ceil  Packets      Bytes          Drops     Backlog     Name
+      beef:1     10.73Mbps    930       54%    54%    6558         9455236        0         0b/0p       PARENT
+      beef:2     0bps         0         0%     0%     0            0              0         0b/0p       PARENT/VOICE
+      beef:7     10.73Mbps    930       537%   72%    6558         9455236        0         102424b/72p PARENT/class-default
+
+   Counters restart from zero when the hierarchy is re-installed (policy-map,
+   class-map or access-list changes), but not when only rates change. The
+   ``json`` output carries the same information per class (``currentRate``,
+   ``currentPps``, ``rateUtilization``, ``ceilUtilization``, ``bytes``,
+   ``packets``, ``drops``, ``overlimits``, ``backlogBytes``,
+   ``backlogPackets``).
+
+   Zebra owned qdiscs use the handle ``beef:``, so the kernel state can also
+   be inspected with ``tc -s class show dev IFNAME`` and
    ``tc filter show dev IFNAME``.
 
 .. _administrative-distance:
