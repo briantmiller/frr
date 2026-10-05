@@ -48,6 +48,12 @@ module frr-qos {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-10-05 {
+    description
+      "Add HFSC policy-maps and service curves.";
+    reference "FRRouting";
+  }
+
   revision 2026-10-03 {
     description
       "Initial revision";
@@ -104,6 +110,35 @@ module frr-qos {
             "Absolute rate.";
         }
       }
+    }
+  }
+
+  grouping service-curve {
+    description
+      "HFSC service curve: rate m1 for the first d microseconds of a
+       backlog period, rate m2 afterwards.  Without m1 and d the curve
+       is linear with rate m2.  Percentages refer to the interface QoS
+       bandwidth.";
+
+    container m1 {
+      description
+        "Rate of the first segment of the curve.";
+      uses rate-spec;
+    }
+
+    leaf d {
+      type uint32 {
+        range "1..max";
+      }
+      units "microseconds";
+      description
+        "Length of the first segment of the curve.";
+    }
+
+    container m2 {
+      description
+        "Rate of the second segment of the curve, the long term rate.";
+      uses rate-spec;
     }
   }
 
@@ -184,9 +219,46 @@ module frr-qos {
           "Policy-map name.";
       }
 
+      leaf type {
+        type enumeration {
+          enum htb {
+            value 0;
+            description
+              "Hierarchical token bucket: guaranteed rate, ceiling and
+               priority per class.";
+          }
+          enum hfsc {
+            value 1;
+            description
+              "Hierarchical fair service curve: real-time, link-sharing
+               and upper-limit service curves per class.";
+          }
+        }
+        default "htb";
+        description
+          "Queueing discipline the policy-map is implemented with.  The
+           policy-maps of a hierarchy (child service-policies) must all
+           be of the same type.";
+      }
+
       list class {
         key "name";
         ordered-by user;
+        /*
+         * must, not when: a "when" turning false (e.g. after changing the
+         * policy-map type) would silently delete the settings.
+         */
+        must "../type = 'htb' or not(bandwidth/percent or bandwidth/bps"
+           + " or max-bandwidth/percent or max-bandwidth/bps or priority)" {
+          error-message
+            "bandwidth, max-bandwidth and priority are HTB settings, "
+            + "they cannot be used in an hfsc policy-map (use rt, ls, sc and ul)";
+        }
+        must "../type = 'hfsc' or not(rt or ls or sc or ul)" {
+          error-message
+            "rt, ls, sc and ul are HFSC settings, they cannot be used "
+            + "in an htb policy-map (create it with: policy-map NAME hfsc)";
+        }
         description
           "Traffic class within the policy.  Classes are evaluated in
            the order they are configured; class-default always matches
@@ -223,6 +295,63 @@ module frr-qos {
           description
             "HTB priority, 0 is the highest.  Classes with a higher
              priority are offered excess bandwidth first.";
+        }
+
+        container rt {
+          presence "rt service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Real-time service curve (HFSC rsc): the guaranteed rate and
+             delay of a leaf class, independent of link-sharing.";
+          uses service-curve;
+        }
+
+        container ls {
+          presence "ls service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Link-share service curve (HFSC fsc): how the bandwidth not
+             used by real-time traffic is shared between sibling classes.";
+          uses service-curve;
+        }
+
+        container sc {
+          presence "sc service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Shorthand setting both the real-time and the link-share curve.
+             rt and ls, when configured, take precedence over it.";
+          uses service-curve;
+        }
+
+        container ul {
+          presence "ul service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Upper-limit service curve (HFSC usc): the most link-sharing
+             may give the class.  Only meaningful together with a
+             link-share curve.";
+          uses service-curve;
         }
 
         leaf queue-limit {

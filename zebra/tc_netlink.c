@@ -279,6 +279,16 @@ static ssize_t netlink_qdisc_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 			nl_attr_nest_end(&req->n, nest);
 			break;
 		}
+		case TC_QDISC_HFSC: {
+			/* hfsc options are a plain struct, not nested */
+			struct tc_hfsc_qopt qopt = {
+				.defcls = dplane_ctx_tc_qdisc_get_defcls(ctx),
+			};
+
+			if (!nl_attr_put(&req->n, datalen, TCA_OPTIONS, &qopt, sizeof(qopt)))
+				return 0;
+			break;
+		}
 		case TC_QDISC_PFIFO: {
 			/* fifo options are a plain struct, not nested */
 			struct tc_fifo_qopt fifo = {
@@ -454,6 +464,32 @@ static ssize_t netlink_tclass_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 				return 0;
 			if (!nl_attr_put(&req->n, datalen, TCA_HTB_CTAB, ctab, sizeof(ctab)))
 				return 0;
+			break;
+		}
+		case TC_QDISC_HFSC: {
+			/*
+			 * Service curves, kernel units: bytes/sec and usec.
+			 * Unset curves (m2 == 0) are left out.
+			 */
+			const struct tc_hfsc_curve *curves[] = {
+				dplane_ctx_tc_class_get_hfsc_rsc(ctx),
+				dplane_ctx_tc_class_get_hfsc_fsc(ctx),
+				dplane_ctx_tc_class_get_hfsc_usc(ctx),
+			};
+			const int types[] = { TCA_HFSC_RSC, TCA_HFSC_FSC, TCA_HFSC_USC };
+
+			for (size_t k = 0; k < array_size(curves); k++) {
+				struct tc_service_curve sc;
+
+				if (!curves[k]->m2)
+					continue;
+
+				sc.m1 = MIN(curves[k]->m1, UINT32_MAX);
+				sc.d = curves[k]->d;
+				sc.m2 = MIN(curves[k]->m2, UINT32_MAX);
+				if (!nl_attr_put(&req->n, datalen, types[k], &sc, sizeof(sc)))
+					return 0;
+			}
 			break;
 		}
 		default:

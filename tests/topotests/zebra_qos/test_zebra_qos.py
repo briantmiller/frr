@@ -173,6 +173,61 @@ def tc_classes(router, intf=INTF):
     return classes
 
 
+def _time2us(text):
+    m = re.match(r"([\d.]+)(us|ms|s)$", text)
+    assert m, "cannot parse tc time {!r}".format(text)
+    return int(
+        round(float(m.group(1)) * {"us": 1, "ms": 1000, "s": 1000000}[m.group(2)])
+    )
+
+
+def tc_hfsc_classes_parse(out):
+    """
+    Parse "tc -s class show" output of an HFSC hierarchy into
+    {classid: {parent, leaf_qdisc, rt, ls, ul, bytes, packets}}, curves as
+    (m1 bps, d usec, m2 bps) or None.  tc prints "sc" when rt == ls.  The
+    qdisc's internal root class ("class hfsc beef: root") is skipped.
+    """
+    classes = {}
+    current = None
+    for line in out.splitlines():
+        m = re.match(
+            r"class hfsc (\S+) (?:dev \S+ )?(?:root|parent (\S+))(?: leaf (\S+))?(.*)$",
+            line,
+        )
+        if m:
+            current = None
+            if m.group(1).endswith(":"):
+                continue
+            current = m.group(1)
+            curves = {}
+            for name, m1, d, m2 in re.findall(
+                r"\b(sc|rt|ls|ul) m1 (\S+) d (\S+) m2 (\S+)", m.group(4)
+            ):
+                curves[name] = (_rate2bps(m1), _time2us(d), _rate2bps(m2))
+            if "sc" in curves:
+                curves["rt"] = curves["ls"] = curves.pop("sc")
+            classes[current] = dict(
+                parent=m.group(2),
+                leaf_qdisc=m.group(3),
+                rt=curves.get("rt"),
+                ls=curves.get("ls"),
+                ul=curves.get("ul"),
+                bytes=0,
+                packets=0,
+            )
+            continue
+        m = re.match(r"\s*Sent (\d+) bytes (\d+) pkt", line)
+        if m and current:
+            classes[current]["bytes"] = int(m.group(1))
+            classes[current]["packets"] = int(m.group(2))
+    return classes
+
+
+def tc_hfsc_classes(router, intf=INTF):
+    return tc_hfsc_classes_parse(router.cmd("tc -s class show dev {}".format(intf)))
+
+
 def tc_qdiscs(router, intf=INTF):
     out = router.cmd("tc -j qdisc show dev {}".format(intf))
     try:
@@ -333,7 +388,7 @@ def test_qos_show_commands(tgen):
         for needle in (
             "QoS bandwidth: 20.00Mbps",
             "Service policy (output): PARENT",
-            "State: installed, 7 classes",
+            "State: installed (htb), 7 classes",
             "PARENT/VOICE",
             "CHILD/BULK",
         ):
@@ -993,6 +1048,234 @@ def test_qos_extended_acl(tgen):
     wait_for(
         functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
         "hierarchy not restored after removing EXT",
+    )
+
+
+# HPARENT/HCHILD from r1/frr.conf at 20mbps: (parent, rt, ls, ul) with
+# curves as (m1 bps, d usec, m2 bps).  Percentages refer to the interface
+# QoS bandwidth, sc sets rt and ls, classes without link-share get what
+# the siblings leave of the parent's.
+EXPECTED_HFSC_20M = {
+    "beef:1": ("beef:", None, (0, 0, 20000000), (0, 0, 20000000)),
+    # VOICE: rt m1 4mbps d 10ms m2 2mbps, ls 20%
+    "beef:2": ("beef:1", (4000000, 10000, 2000000), (0, 0, 4000000), None),
+    # WEB: sc 40%, ul 75%, child policy HCHILD
+    "beef:3": ("beef:1", (0, 0, 8000000), (0, 0, 8000000), (0, 0, 15000000)),
+    # HCHILD/BULK: ls 5%, ul 8mbps
+    "beef:4": ("beef:3", None, (0, 0, 1000000), (0, 0, 8000000)),
+    # HCHILD/class-default: 8mbps (WEB's link-share) - 1mbps
+    "beef:5": ("beef:3", None, (0, 0, 7000000), None),
+    # HPARENT/class-default: ls m1 30% d 20ms m2 1500kbps
+    "beef:6": ("beef:1", None, (6000000, 20000, 1500000), None),
+}
+
+
+def kernel_supports_hfsc(tgen):
+    "Probe sch_hfsc on r2, which has no QoS configuration"
+    r2 = tgen.gears["r2"]
+    r2.cmd("tc qdisc del dev r2-eth0 root 2>/dev/null")
+    out = r2.cmd("tc qdisc add dev r2-eth0 root handle 1: hfsc 2>&1 && echo HFSC-OK")
+    r2.cmd("tc qdisc del dev r2-eth0 root 2>/dev/null")
+    return "HFSC-OK" in out
+
+
+def _curve(c):
+    "JSON curve of show qos interface to a tuple"
+    return (c["m1"], c["d"], c["m2"]) if c else None
+
+
+# Same at 40mbps: percentages double, absolute rates stay
+EXPECTED_HFSC_40M = {
+    "beef:1": ("beef:", None, (0, 0, 40000000), (0, 0, 40000000)),
+    "beef:2": ("beef:1", (4000000, 10000, 2000000), (0, 0, 8000000), None),
+    "beef:3": ("beef:1", (0, 0, 16000000), (0, 0, 16000000), (0, 0, 30000000)),
+    "beef:4": ("beef:3", None, (0, 0, 2000000), (0, 0, 8000000)),
+    "beef:5": ("beef:3", None, (0, 0, 14000000), None),
+    "beef:6": ("beef:1", None, (12000000, 20000, 1500000), None),
+}
+
+
+def check_hfsc_zebra(router, expected):
+    "zebra's view (show qos interface json) of the HFSC hierarchy"
+    data = show_qos_json(router)
+    if not data.get("installed") or data.get("qdisc") != "hfsc":
+        return "HFSC policy not installed: {}".format(data)
+    have = {
+        c["classId"]: (
+            c["parent"] if c["parent"] != "root" else "beef:",
+            _curve(c.get("rt")),
+            _curve(c.get("ls")),
+            _curve(c.get("ul")),
+        )
+        for c in data["classes"]
+    }
+    if have != expected:
+        return "zebra HFSC classes {} != expected {}".format(have, expected)
+    if data.get("defaultClass") != "beef:6":
+        return "default class {}".format(data.get("defaultClass"))
+    return None
+
+
+def check_hfsc_kernel(router, expected):
+    "the kernel's view (tc) of the HFSC hierarchy"
+    root = root_qdisc(router)
+    if not root or root.get("kind") != "hfsc" or root.get("handle") != "beef:":
+        return "no zebra HFSC root qdisc: {}".format(root)
+    classes = tc_hfsc_classes(router)
+    have = {cid: (c["parent"], c["rt"], c["ls"], c["ul"]) for cid, c in classes.items()}
+    if set(have) != set(expected):
+        return "kernel HFSC classes {} != expected {}".format(
+            sorted(have), sorted(expected)
+        )
+    for cid, want in expected.items():
+        if have[cid][0] != want[0]:
+            return "{} parent {} != {}".format(cid, have[cid][0], want[0])
+        # the kernel converts curves to its internal format and back, and
+        # tc rounds what it prints (e.g. 2mbit can come back as 1999Kbit)
+        for name, h, w in zip(("rt", "ls", "ul"), have[cid][1:], want[1:]):
+            if (h is None) != (w is None):
+                return "{} {}: kernel {} expected {}".format(cid, name, h, w)
+            if h and not all(abs(a - b) <= b * 0.01 for a, b in zip(h, w)):
+                return "{} {}: kernel {} expected {}".format(cid, name, h, w)
+    for cid, limit in (("beef:2", 64), ("beef:4", 200)):
+        fifo = [
+            q
+            for q in tc_qdiscs(router)
+            if q.get("parent") == cid and q.get("options", {}).get("limit") == limit
+        ]
+        if not fifo:
+            return "no pfifo limit {} below {}".format(limit, cid)
+    return None
+
+
+def test_qos_hfsc(tgen):
+    "HFSC policy-maps: configuration, validation and installation"
+
+    r1 = tgen.gears["r1"]
+    hfsc = kernel_supports_hfsc(tgen)
+
+    running = r1.vtysh_cmd("show running-config")
+    for line in (
+        "policy-map HPARENT hfsc",
+        "policy-map HCHILD hfsc",
+        "  rt m1 4mbps d 10ms m2 2mbps",
+        "  sc m2 percent 40",
+        "  ul m2 percent 75",
+        "  ls m1 percent 30 d 20ms m2 1500kbps",
+        "  ul m2 8mbps",
+    ):
+        assert line + "\n" in running, "missing {!r} in:\n{}".format(line, running)
+
+    # HTB settings in an HFSC policy-map, and the other way round
+    out = r1.vtysh_cmd("""
+        configure terminal
+         policy-map HPARENT
+          class VOICE
+           bandwidth percent 10
+        """)
+    assert "are HTB settings" in out, out
+    out = r1.vtysh_cmd("""
+        configure terminal
+         policy-map PARENT
+          class VOICE
+           rt m2 1mbps
+        """)
+    assert "are HFSC settings" in out, out
+    # changing the type of a configured policy-map must not drop settings
+    out = r1.vtysh_cmd("configure terminal\npolicy-map PARENT hfsc")
+    assert "are HTB settings" in out, out
+    running = r1.vtysh_cmd("show running-config")
+    assert (
+        "policy-map PARENT\n" in running and "  bandwidth 5mbps\n" in running
+    ), running
+
+    r1.vtysh_cmd("""
+        configure terminal
+         interface r1-eth0
+          service-policy output HPARENT
+        """)
+    try:
+        wait_for(
+            functools.partial(check_hfsc_zebra, r1, EXPECTED_HFSC_20M),
+            "zebra HFSC hierarchy",
+        )
+        if hfsc:
+            wait_for(
+                functools.partial(check_hfsc_kernel, r1, EXPECTED_HFSC_20M),
+                "kernel HFSC hierarchy",
+            )
+        else:
+            out = r1.vtysh_cmd("show qos interface " + INTF)
+            assert "Warning: only 0 of 6 classes are in the kernel" in out, out
+            logger.info("kernel lacks sch_hfsc: kernel state not checked")
+
+        # interface bandwidth change: curves follow, classes updated in place
+        if hfsc:
+            send_udp(r1, "192.0.2.1", "192.0.2.2", TOS["default"], 50)
+            before = tc_hfsc_classes(r1)
+            assert before["beef:6"]["packets"] >= 50, before
+        r1.vtysh_cmd("configure terminal\ninterface r1-eth0\nqos bandwidth 40mbps")
+        wait_for(
+            functools.partial(check_hfsc_zebra, r1, EXPECTED_HFSC_40M),
+            "zebra HFSC hierarchy at 40mbps",
+        )
+        if hfsc:
+            wait_for(
+                functools.partial(check_hfsc_kernel, r1, EXPECTED_HFSC_40M),
+                "kernel HFSC hierarchy at 40mbps",
+            )
+            after = tc_hfsc_classes(r1)
+            assert (
+                after["beef:6"]["packets"] >= before["beef:6"]["packets"]
+            ), "class counters reset: the hierarchy was re-installed"
+        r1.vtysh_cmd("configure terminal\ninterface r1-eth0\nqos bandwidth 20mbps")
+        wait_for(
+            functools.partial(check_hfsc_zebra, r1, EXPECTED_HFSC_20M),
+            "zebra HFSC hierarchy back at 20mbps",
+        )
+
+        # an HTB child policy below an HFSC class cannot be installed
+        r1.vtysh_cmd("""
+            configure terminal
+             policy-map HPARENT
+              class WEB
+               service-policy CHILD
+            """)
+
+        def _mismatch():
+            data = show_qos_json(r1)
+            if data.get("installed"):
+                return "still installed: {}".format(data)
+            if "types must match" not in data.get("reason", ""):
+                return "reason: {}".format(data.get("reason"))
+            root = root_qdisc(r1)
+            if root and root.get("handle") == "beef:":
+                return "zebra qdisc still in the kernel: {}".format(root)
+            return None
+
+        wait_for(_mismatch, "HTB child below HFSC class")
+        r1.vtysh_cmd("""
+            configure terminal
+             policy-map HPARENT
+              class WEB
+               service-policy HCHILD
+            """)
+        wait_for(
+            functools.partial(check_hfsc_zebra, r1, EXPECTED_HFSC_20M),
+            "HFSC hierarchy after fixing the child policy",
+        )
+    finally:
+        r1.vtysh_cmd("""
+            configure terminal
+             interface r1-eth0
+              qos bandwidth 20mbps
+              service-policy output PARENT
+            """)
+
+    # back to HTB
+    wait_for(
+        functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
+        "HTB hierarchy not restored after HFSC",
     )
 
 

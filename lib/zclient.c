@@ -2157,6 +2157,7 @@ int zapi_tc_class_encode(uint8_t cmd, struct stream *s, struct tc_class *class)
 	case TC_QDISC_UNSPEC:
 	case TC_QDISC_NOQUEUE:
 	case TC_QDISC_PFIFO:
+	case TC_QDISC_HFSC:
 		/* not implemented */
 		break;
 	}

@@ -246,11 +246,40 @@ static int qos_policy_class_move(struct nb_cb_move_args *args)
 	return NB_OK;
 }
 
+/* HFSC curve a node below .../class/<rt|ls|sc|ul> belongs to, NULL otherwise */
+static struct qos_curve *qos_policy_class_curve(const struct lyd_node *dnode,
+						struct qos_policy_class *pclass)
+{
+	for (; dnode; dnode = lyd_parent(dnode)) {
+		const char *name = dnode->schema->name;
+
+		if (strcmp(name, "class") == 0)
+			return NULL;
+		if (strcmp(name, "rt") == 0)
+			return &pclass->rt;
+		if (strcmp(name, "ls") == 0)
+			return &pclass->ls;
+		if (strcmp(name, "sc") == 0)
+			return &pclass->sc;
+		if (strcmp(name, "ul") == 0)
+			return &pclass->ul;
+	}
+
+	return NULL;
+}
+
 static struct qos_rate *qos_policy_class_rate(const struct lyd_node *dnode,
 					      struct qos_policy_class *pclass)
 {
-	/* dnode is .../<container>/<leaf> */
+	/*
+	 * dnode is .../<bandwidth|max-bandwidth>/<percent|bps> or
+	 * .../<rt|ls|sc|ul>/<m1|m2>/<percent|bps>
+	 */
 	const char *container = lyd_parent(dnode)->schema->name;
+	struct qos_curve *curve = qos_policy_class_curve(dnode, pclass);
+
+	if (curve)
+		return strcmp(container, "m1") == 0 ? &curve->m1 : &curve->m2;
 
 	if (strcmp(container, "max-bandwidth") == 0)
 		return &pclass->max_bandwidth;
@@ -320,6 +349,82 @@ static int qos_policy_class_rate_percent_destroy(struct nb_cb_destroy_args *args
 static int qos_policy_class_rate_bps_destroy(struct nb_cb_destroy_args *args)
 {
 	return qos_policy_class_rate_destroy(args, QOS_RATE_BPS);
+}
+
+static int qos_policy_class_curve_create(struct nb_cb_create_args *args)
+{
+	struct qos_policy_class *pclass;
+	struct qos_curve *curve;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	pclass = nb_running_get_entry(args->dnode, NULL, true);
+	curve = qos_policy_class_curve(args->dnode, pclass);
+	/* m1, d and m2 follow in the same transaction */
+	memset(curve, 0, sizeof(*curve));
+	curve->set = true;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_policy_class_curve_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_policy_class *pclass;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	pclass = nb_running_get_entry(args->dnode, NULL, true);
+	/* only the container gets a destroy callback, clear all of it */
+	memset(qos_policy_class_curve(args->dnode, pclass), 0, sizeof(struct qos_curve));
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_policy_class_curve_d_modify(struct nb_cb_modify_args *args)
+{
+	struct qos_policy_class *pclass;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	pclass = nb_running_get_entry(args->dnode, NULL, true);
+	qos_policy_class_curve(args->dnode, pclass)->d = yang_dnode_get_uint32(args->dnode, NULL);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_policy_class_curve_d_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_policy_class *pclass;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	pclass = nb_running_get_entry(args->dnode, NULL, true);
+	qos_policy_class_curve(args->dnode, pclass)->d = 0;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_policy_map_type_modify(struct nb_cb_modify_args *args)
+{
+	struct qos_policy_map *pmap;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	pmap = nb_running_get_entry(args->dnode, NULL, true);
+	/* enum hfsc has value 1 */
+	pmap->hfsc = yang_dnode_get_enum(args->dnode, NULL) == 1;
+	zebra_qos_config_changed();
+
+	return NB_OK;
 }
 
 static int qos_policy_class_priority_modify(struct nb_cb_modify_args *args)
@@ -530,6 +635,12 @@ const struct frr_yang_module_info frr_qos_info = {
 			}
 		},
 		{
+			.xpath = "/frr-qos:qos/policy-map/type",
+			.cbs = {
+				.modify = qos_policy_map_type_modify,
+			}
+		},
+		{
 			.xpath = "/frr-qos:qos/policy-map/class",
 			.cbs = {
 				.create = qos_policy_class_create,
@@ -570,6 +681,174 @@ const struct frr_yang_module_info frr_qos_info = {
 			.cbs = {
 				.modify = qos_policy_class_priority_modify,
 				.destroy = qos_policy_class_priority_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt",
+			.cbs = {
+				.create = qos_policy_class_curve_create,
+				.destroy = qos_policy_class_curve_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt/d",
+			.cbs = {
+				.modify = qos_policy_class_curve_d_modify,
+				.destroy = qos_policy_class_curve_d_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt/m1/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt/m1/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt/m2/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt/m2/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls",
+			.cbs = {
+				.create = qos_policy_class_curve_create,
+				.destroy = qos_policy_class_curve_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls/d",
+			.cbs = {
+				.modify = qos_policy_class_curve_d_modify,
+				.destroy = qos_policy_class_curve_d_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls/m1/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls/m1/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls/m2/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls/m2/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc",
+			.cbs = {
+				.create = qos_policy_class_curve_create,
+				.destroy = qos_policy_class_curve_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc/d",
+			.cbs = {
+				.modify = qos_policy_class_curve_d_modify,
+				.destroy = qos_policy_class_curve_d_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc/m1/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc/m1/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc/m2/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc/m2/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul",
+			.cbs = {
+				.create = qos_policy_class_curve_create,
+				.destroy = qos_policy_class_curve_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul/d",
+			.cbs = {
+				.modify = qos_policy_class_curve_d_modify,
+				.destroy = qos_policy_class_curve_d_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul/m1/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul/m1/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul/m2/percent",
+			.cbs = {
+				.modify = qos_policy_class_rate_percent_modify,
+				.destroy = qos_policy_class_rate_percent_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul/m2/bps",
+			.cbs = {
+				.modify = qos_policy_class_rate_bps_modify,
+				.destroy = qos_policy_class_rate_bps_destroy,
 			}
 		},
 		{
