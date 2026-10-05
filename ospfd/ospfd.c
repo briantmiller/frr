@@ -47,6 +47,7 @@
 #include "ospfd/ospf_ldp_sync.h"
 #include "ospfd/ospf_gr.h"
 #include "ospfd/ospf_apiserver.h"
+#include "ospfd/ospf_mtr.h"
 
 
 DEFINE_QOBJ_TYPE(ospf);
@@ -830,6 +831,9 @@ static void ospf_finish_final(struct ospf *ospf)
 		}
 	}
 	route_table_finish(ospf->maxage_lsa);
+
+	/* RFC 4915: withdraw and free the additional topologies. */
+	ospf_mtr_finish(ospf);
 
 	if (ospf->old_table)
 		ospf_route_table_free(ospf->old_table);

@@ -744,6 +744,7 @@ static void ospf_del_if_params(struct interface *ifp,
 	list_delete(&oip->auth_crypt);
 	XFREE(MTYPE_OSPF_IF_PARAMS, oip->keychain_name);
 	XFREE(MTYPE_OSPF_IF_PARAMS, oip->nbr_filter_name);
+	XFREE(MTYPE_OSPF_IF_PARAMS, oip->mt_cost);
 	ospf_interface_disable_bfd(ifp, oip);
 	ldp_sync_info_free(&(oip->ldp_sync_info));
 	XFREE(MTYPE_OSPF_IF_PARAMS, oip);

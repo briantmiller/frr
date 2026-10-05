@@ -171,6 +171,7 @@ static void ospf_show_vrf_name(struct ospf *ospf, struct vty *vty,
 	}
 }
 
+#include "ospfd/ospf_mtr.h"
 #include "ospfd/ospf_vty_clippy.c"
 
 DEFUN_NOSH (router_ospf,
@@ -4369,6 +4370,7 @@ static void show_ip_ospf_interface_sub(struct vty *vty, struct ospf *ospf,
 					       ospf_network_type_str[oi->type]);
 			json_object_int_add(json_interface_sub, "cost",
 					    oi->output_cost);
+			ospf_mtr_show_if(vty, oi->ifp, json_interface_sub);
 			json_object_int_add(json_interface_sub,
 					    "transmitDelaySecs",
 					    OSPF_IF_PARAM(oi, transmit_delay));
@@ -4393,6 +4395,7 @@ static void show_ip_ospf_interface_sub(struct vty *vty, struct ospf *ospf,
 				&ospf->router_id,
 				ospf_network_type_str[oi->type],
 				oi->output_cost);
+			ospf_mtr_show_if(vty, oi->ifp, NULL);
 
 			vty_out(vty,
 				"  Transmit Delay is %d sec, State %s, Priority %d\n",
@@ -7147,22 +7150,38 @@ static void show_ip_ospf_database_router_links(struct vty *vty,
 					       struct router_lsa *rl,
 					       json_object *json)
 {
-	int len, type;
+	int type;
 	unsigned short i;
 	json_object *json_links = NULL;
 	json_object *json_link = NULL;
-	int metric = 0;
 	char buf[PREFIX_STRLEN];
+	uint8_t *p, *lim;
+	struct router_link *rlnk;
 
 	if (json)
 		json_links = json_object_new_object();
 
-	len = ntohs(rl->header.length) - 4;
-	for (i = 0; i < ntohs(rl->links) && len > 0; len -= 12, i++) {
-		type = rl->link[i].type;
+	/*
+	 * Links are of variable length: each carries `tos` additional
+	 * MT-ID/TOS metrics (RFC 4915 A.4.2), so walk them by length.
+	 */
+	p = (uint8_t *)&rl->link[0];
+	lim = (uint8_t *)rl + ntohs(rl->header.length);
+	for (i = 0; i < ntohs(rl->links) &&
+		    p + OSPF_ROUTER_LSA_LINK_SIZE <= lim;
+	     i++, p = OSPF_ROUTER_LINK_NEXT(rlnk)) {
+		uint8_t *mt;
+		int t;
+
+		rlnk = (struct router_link *)p;
+		type = rlnk->type;
+		if ((size_t)type >= array_size(link_type_desc))
+			type = 0;
+		mt = p + OSPF_ROUTER_LSA_LINK_SIZE;
 
 		if (json) {
 			char link[16];
+			json_object *json_mt = NULL;
 
 			snprintf(link, sizeof(link), "link%u", i);
 			json_link = json_object_new_object();
@@ -7171,34 +7190,79 @@ static void show_ip_ospf_database_router_links(struct vty *vty,
 			json_object_string_add(json_link,
 					       link_id_desc_json[type],
 					       inet_ntop(AF_INET,
-							 &rl->link[i].link_id,
+							 &rlnk->link_id,
 							 buf, sizeof(buf)));
 			json_object_string_add(
 				json_link, link_data_desc_json[type],
-				inet_ntop(AF_INET, &rl->link[i].link_data,
+				inet_ntop(AF_INET, &rlnk->link_data,
 					  buf, sizeof(buf)));
 			json_object_int_add(json_link, "numOfTosMetrics",
-					    metric);
+					    rlnk->tos);
 			json_object_int_add(json_link, "tos0Metric",
-					    ntohs(rl->link[i].metric));
+					    ntohs(rlnk->metric));
+			for (t = 0; t < rlnk->tos &&
+				    mt + OSPF_ROUTER_LSA_TOS_SIZE <= lim;
+			     t++, mt += OSPF_ROUTER_LSA_TOS_SIZE) {
+				char key[8];
+
+				if (!json_mt)
+					json_mt = json_object_new_object();
+				snprintf(key, sizeof(key), "%u", mt[0]);
+				json_object_int_add(json_mt, key,
+						    (mt[2] << 8) | mt[3]);
+			}
+			if (json_mt)
+				json_object_object_add(json_link, "mtIdMetrics",
+						       json_mt);
 			json_object_object_add(json_links, link, json_link);
 		} else {
 			vty_out(vty, "    Link connected to: %s\n",
 				link_type_desc[type]);
 			vty_out(vty, "     (Link ID) %s: %pI4\n",
-				link_id_desc[type],
-				&rl->link[i].link_id);
+				link_id_desc[type], &rlnk->link_id);
 			vty_out(vty, "     (Link Data) %s: %pI4\n",
-				link_data_desc[type],
-				&rl->link[i].link_data);
-			vty_out(vty, "      Number of TOS metrics: 0\n");
+				link_data_desc[type], &rlnk->link_data);
+			vty_out(vty, "      Number of TOS metrics: %u\n",
+				rlnk->tos);
 			vty_out(vty, "       TOS 0 Metric: %d\n",
-				ntohs(rl->link[i].metric));
+				ntohs(rlnk->metric));
+			for (t = 0; t < rlnk->tos &&
+				    mt + OSPF_ROUTER_LSA_TOS_SIZE <= lim;
+			     t++, mt += OSPF_ROUTER_LSA_TOS_SIZE)
+				vty_out(vty, "       MTID %u Metric: %d\n",
+					mt[0], (mt[2] << 8) | mt[3]);
 			vty_out(vty, "\n");
 		}
 	}
 	if (json)
 		json_object_object_add(json, "routerLinks", json_links);
+}
+
+/* Show the MT-ID metrics of a Summary-LSA (RFC 4915 A.4.4). */
+static void show_summary_lsa_mt_metrics(struct vty *vty,
+					struct summary_lsa *sl,
+					json_object *json)
+{
+	uint8_t *p = (uint8_t *)sl + OSPF_LSA_HEADER_SIZE + 8;
+	uint8_t *lim = (uint8_t *)sl + ntohs(sl->header.length);
+	json_object *json_mt = NULL;
+
+	for (; p + 4 <= lim; p += 4) {
+		uint32_t metric = (p[1] << 16) | (p[2] << 8) | p[3];
+
+		if (json) {
+			char key[8];
+
+			if (!json_mt)
+				json_mt = json_object_new_object();
+			snprintf(key, sizeof(key), "%u", p[0]);
+			json_object_int_add(json_mt, key, metric);
+		} else
+			vty_out(vty, "        MTID: %u  Metric: %u\n", p[0],
+				metric);
+	}
+	if (json_mt)
+		json_object_object_add(json, "mtIdMetrics", json_mt);
 }
 
 /* Show router-LSA detail information. */
@@ -7294,12 +7358,14 @@ static int show_summary_lsa_detail(struct vty *vty, struct ospf_lsa *lsa,
 				ip_masklen(sl->mask));
 			vty_out(vty, "        TOS: 0  Metric: %d\n",
 				GET_METRIC(sl->metric));
+			show_summary_lsa_mt_metrics(vty, sl, NULL);
 			vty_out(vty, "\n");
 		} else {
 			json_object_int_add(json, "networkMask",
 					    ip_masklen(sl->mask));
 			json_object_int_add(json, "tos0Metric",
 					    GET_METRIC(sl->metric));
+			show_summary_lsa_mt_metrics(vty, sl, json);
 		}
 	}
 
@@ -7320,12 +7386,14 @@ static int show_summary_asbr_lsa_detail(struct vty *vty, struct ospf_lsa *lsa,
 				ip_masklen(sl->mask));
 			vty_out(vty, "        TOS: 0  Metric: %d\n",
 				GET_METRIC(sl->metric));
+			show_summary_lsa_mt_metrics(vty, sl, NULL);
 			vty_out(vty, "\n");
 		} else {
 			json_object_int_add(json, "networkMask",
 					    ip_masklen(sl->mask));
 			json_object_int_add(json, "tos0Metric",
 					    GET_METRIC(sl->metric));
+			show_summary_lsa_mt_metrics(vty, sl, json);
 		}
 	}
 
@@ -13015,6 +13083,10 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 				vty_out(vty, "\n");
 			}
 
+			/* RFC 4915 MT-ID output costs print. */
+			if (params == IF_DEF_PARAMS(ifp))
+				ospf_mtr_config_write_if(vty, ifp);
+
 			/* Hello Interval print. */
 			if (OSPF_IF_PARAM_CONFIGURED(params, v_hello)
 			    && params->v_hello != OSPF_HELLO_INTERVAL_DEFAULT) {
@@ -13874,6 +13946,9 @@ static int ospf_config_write_one(struct vty *vty, struct ospf *ospf)
 	if (ospf->forwarding_address_self)
 		vty_out(vty, " forwarding-address-self\n");
 
+	/* RFC 4915 Multi-Topology Routing print. */
+	ospf_mtr_config_write_router(vty, ospf);
+
 	/* proactive-arp print. */
 	if (ospf->proactive_arp != OSPF_PROACTIVE_ARP_DEFAULT) {
 		if (ospf->proactive_arp)
@@ -14044,6 +14119,7 @@ static void ospf_vty_if_init(void)
 
 	/* "ip ospf cost" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_cost_cmd);
+	ospf_mtr_vty_if_init();
 	install_element(INTERFACE_NODE, &no_ip_ospf_cost_cmd);
 
 	/* "ip ospf mtu-ignore" commands. */
@@ -14565,6 +14641,9 @@ void ospf_vty_init(void)
 
 
 	install_default(OSPF_NODE);
+
+	/* RFC 4915 Multi-Topology Routing commands. */
+	ospf_mtr_vty_init();
 
 	/* "ospf router-id" commands. */
 	install_element(OSPF_NODE, &ospf_router_id_cmd);

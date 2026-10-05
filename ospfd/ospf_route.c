@@ -371,7 +371,9 @@ void ospf_intra_add_router(struct route_table *rt, struct vertex *v,
 		zlog_debug("%s: LS ID: %pI4", __func__, &lsa->header.id);
 
 	if (!add_only) {
-		if (!OSPF_IS_AREA_BACKBONE(area))
+		/* RFC 4915 3.3: virtual links use the default topology. */
+		if (!OSPF_IS_AREA_BACKBONE(area) &&
+		    area->ospf->mtr_cur_mtid == 0)
 			ospf_vl_up_check(area, lsa->header.id, v);
 
 		if (!CHECK_FLAG(lsa->flags, ROUTER_LSA_SHORTCUT))
@@ -534,7 +536,7 @@ void ospf_intra_add_transit(struct route_table *rt, struct vertex *v,
 /* RFC2328 16.1. second stage. */
 void ospf_intra_add_stub(struct route_table *rt, struct router_lsa_link *link,
 			 struct vertex *v, struct ospf_area *area,
-			 int parent_is_root, int lsa_pos)
+			 int parent_is_root, int lsa_pos, uint16_t metric)
 {
 	uint32_t cost;
 	struct route_node *rn;
@@ -561,11 +563,11 @@ void ospf_intra_add_stub(struct route_table *rt, struct router_lsa_link *link,
 	   equal to the distance from the root to the router vertex
 	   (calculated in stage 1), plus the stub network link's advertised
 	   cost. */
-	cost = v->distance + ntohs(link->m[0].metric);
+	cost = v->distance + metric;
 
 	if (IS_DEBUG_OSPF_EVENT)
 		zlog_debug("%s: calculated cost is %d + %d = %d", __func__,
-			   v->distance, ntohs(link->m[0].metric), cost);
+			   v->distance, metric, cost);
 
 	/* PtP links with /32 masks adds host routes to remote, directly
 	 * connected hosts, see RFC 2328, 12.4.1.1, Option 1.

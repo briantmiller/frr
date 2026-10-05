@@ -35,6 +35,7 @@
 #include "ospfd/ospf_zebra.h"
 #include "ospfd/ospf_dump.h"
 #include "ospfd/ospf_errors.h"
+#include "ospfd/ospf_mtr.h"
 
 static struct ospf_area_range *ospf_area_range_new(struct prefix_ipv4 *p)
 {
@@ -727,7 +728,11 @@ void ospf_abr_announce_network_to_area(struct prefix_ipv4 *p, uint32_t cost,
 			zlog_debug("%s: old metric: %d, new metric: %d",
 				   __func__, GET_METRIC(sl->metric), cost);
 
+		struct ospf_mt_metric mt[OSPF_MTR_MTID_COUNT];
+		int mt_count = ospf_mtr_summary_metrics(area, p, false, mt);
+
 		if ((GET_METRIC(sl->metric) == full_cost)
+		    && ospf_mtr_summary_lsa_mt_same(old->data, mt, mt_count)
 		    && ((old->flags & OSPF_LSA_IN_MAXAGE) == 0)) {
 			/* unchanged. simply reapprove it */
 			if (IS_DEBUG_OSPF_EVENT)
@@ -1099,7 +1104,11 @@ static void ospf_abr_announce_rtr_to_area(struct prefix_ipv4 *p, uint32_t cost,
 				   __func__, GET_METRIC(slsa->metric), cost);
 	}
 
+	struct ospf_mt_metric mt[OSPF_MTR_MTID_COUNT];
+	int mt_count = ospf_mtr_summary_metrics(area, p, true, mt);
+
 	if (old && (GET_METRIC(slsa->metric) == cost)
+	    && ospf_mtr_summary_lsa_mt_same(old->data, mt, mt_count)
 	    && ((old->flags & OSPF_LSA_IN_MAXAGE) == 0)) {
 		if (IS_DEBUG_OSPF_EVENT)
 			zlog_debug("%s: old summary approved", __func__);

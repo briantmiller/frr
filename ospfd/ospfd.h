@@ -441,6 +441,19 @@ struct ospf {
 	/* Force forwarding address to self for external LSAs. */
 	bool forwarding_address_self;
 
+	/* RFC 4915 Multi-Topology Routing. */
+	/* Links without an MT-ID metric inherit the base (TOS 0) metric. */
+	bool mtr_copy_base;
+	/* Kernel table for MT-ID N is mtr_table_offset + N. */
+	uint32_t mtr_table_offset;
+	bool mtr_table_offset_configured;
+	/* Topology the route calculation is currently running for. */
+	uint8_t mtr_cur_mtid;
+	/* Per-topology routing state, indexed by MT-ID (0 unused). */
+	struct ospf_mtr_topo *mtr[256];
+	/* Deferred recalculation of MT external routes. */
+	struct event *t_mtr_ext_calc;
+
 	QOBJ_FIELDS;
 };
 DECLARE_QOBJ_TYPE(ospf);

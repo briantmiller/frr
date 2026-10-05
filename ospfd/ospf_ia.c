@@ -29,6 +29,7 @@
 #include "ospfd/ospf_abr.h"
 #include "ospfd/ospf_ia.h"
 #include "ospfd/ospf_dump.h"
+#include "ospfd/ospf_mtr.h"
 
 static struct ospf_route *ospf_find_abr_route(struct route_table *rtrs,
 					      struct prefix_ipv4 *abr,
@@ -187,7 +188,9 @@ static int process_summary_lsa(struct ospf_area *area, struct route_table *rt,
 	if (IS_DEBUG_OSPF_EVENT)
 		zlog_debug("%s: LS ID: %pI4", __func__, &sl->header.id);
 
-	metric = GET_METRIC(sl->metric);
+	/* RFC 4915: metric of the topology being computed. */
+	if (!ospf_mtr_summary_metric(ospf, lsa->data, &metric))
+		return 0;
 
 	if (metric == OSPF_LS_INFINITY)
 		return 0;
@@ -298,7 +301,9 @@ static void ospf_update_network_route(struct ospf *ospf, struct route_table *rt,
 		return;
 	}
 
-	cost = abr_or->cost + GET_METRIC(lsa->metric);
+	if (!ospf_mtr_summary_metric(ospf, &lsa->header, &cost))
+		return;
+	cost += abr_or->cost;
 
 	rn = route_node_lookup(rt, (struct prefix *)p);
 
@@ -419,7 +424,9 @@ static void ospf_update_router_route(struct ospf *ospf,
 		return;
 	}
 
-	cost = abr_or->cost + GET_METRIC(lsa->metric);
+	if (!ospf_mtr_summary_metric(ospf, &lsa->header, &cost))
+		return;
+	cost += abr_or->cost;
 
 	/* First try to find a backbone path,
 	   because standard ABR can update only BB-associated paths */
@@ -508,7 +515,10 @@ static int process_transit_summary_lsa(struct ospf_area *area,
 
 	if (IS_DEBUG_OSPF_EVENT)
 		zlog_debug("%s: LS ID: %pI4", __func__, &lsa->data->id);
-	metric = GET_METRIC(sl->metric);
+
+	/* RFC 4915: metric of the topology being computed. */
+	if (!ospf_mtr_summary_metric(ospf, lsa->data, &metric))
+		return 0;
 
 	if (metric == OSPF_LS_INFINITY) {
 		if (IS_DEBUG_OSPF_EVENT)

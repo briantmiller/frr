@@ -29,6 +29,7 @@
 #include "ospfd/ospf_ase.h"
 #include "ospfd/ospf_zebra.h"
 #include "ospfd/ospf_dump.h"
+#include "ospfd/ospf_mtr.h"
 
 struct ospf_route *ospf_find_asbr_route(struct ospf *ospf,
 					struct route_table *rtrs,
@@ -142,7 +143,7 @@ static int ospf_ase_forward_address_check(struct ospf *ospf,
 }
 
 static struct ospf_route *
-ospf_ase_calculate_new_route(struct ospf_lsa *lsa,
+ospf_ase_calculate_new_route(struct ospf_lsa *lsa, const struct as_route *er,
 			     struct ospf_route *asbr_route, uint32_t metric)
 {
 	struct as_external_lsa *al;
@@ -157,7 +158,7 @@ ospf_ase_calculate_new_route(struct ospf_lsa *lsa,
 	new->id = al->header.id;
 	new->mask = al->mask;
 
-	if (!IS_EXTERNAL_METRIC(al->e[0].tos)) {
+	if (!IS_EXTERNAL_METRIC(er->tos)) {
 		if (IS_DEBUG_OSPF(lsa, LSA))
 			zlog_debug(
 				"Route[External]: type-1 created, asbr cost:%d  metric:%d.",
@@ -174,7 +175,7 @@ ospf_ase_calculate_new_route(struct ospf_lsa *lsa,
 
 	new->type = OSPF_DESTINATION_NETWORK;
 	new->u.ext.origin = lsa;
-	new->u.ext.tag = ntohl(al->e[0].route_tag);
+	new->u.ext.tag = ntohl(er->route_tag);
 	new->u.ext.asbr = asbr_route;
 
 	assert(new != asbr_route);
@@ -184,18 +185,34 @@ ospf_ase_calculate_new_route(struct ospf_lsa *lsa,
 
 #define OSPF_ASE_CALC_INTERVAL 1
 
-int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
+/*
+ * Calculate the AS external route described by `lsa` (RFC 2328 16.4) using
+ * the given intra/inter-area table, ABR/ASBR table and external table.  The
+ * metric, E-bit, forwarding address and tag are taken from the LSA entry of
+ * the topology being computed (RFC 4915, ospf->mtr_cur_mtid).
+ */
+int ospf_ase_calculate_route_tables(struct ospf *ospf, struct ospf_lsa *lsa,
+				    struct route_table *new_table,
+				    struct route_table *new_rtrs,
+				    struct route_table *ext_table)
 {
 	uint32_t metric;
 	struct as_external_lsa *al;
+	const struct as_route *er;
 	struct ospf_route *asbr_route;
 	struct prefix_ipv4 asbr, p;
 	struct route_node *rn;
 	struct ospf_route *new, * or ;
 	int ret;
+	bool base = (ospf->mtr_cur_mtid == 0);
 
 	assert(lsa);
 	al = (struct as_external_lsa *)lsa->data;
+
+	/* RFC 4915: select the entry of the topology being computed. */
+	er = ospf_mtr_external_entry(ospf, al);
+	if (er == NULL)
+		return 0;
 
 	if (lsa->data->type == OSPF_AS_NSSA_LSA)
 		if (IS_DEBUG_OSPF_NSSA)
@@ -217,7 +234,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 
 	/* (1) If the cost specified by the LSA is LSInfinity, or if the
 	       LSA's LS age is equal to MaxAge, then examine the next LSA. */
-	if ((metric = GET_METRIC(al->e[0].metric)) >= OSPF_LS_INFINITY) {
+	if ((metric = GET_METRIC((uint8_t *)er->metric)) >= OSPF_LS_INFINITY) {
 		if (IS_DEBUG_OSPF(lsa, LSA))
 			zlog_debug(
 				"Route[External]: Metric is OSPF_LS_INFINITY");
@@ -253,7 +270,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 	asbr.prefixlen = IPV4_MAX_BITLEN;
 	apply_mask_ipv4(&asbr);
 
-	asbr_route = ospf_find_asbr_route(ospf, ospf->new_rtrs, &asbr);
+	asbr_route = ospf_find_asbr_route(ospf, new_rtrs, &asbr);
 	if (asbr_route == NULL) {
 		if (IS_DEBUG_OSPF(lsa, LSA))
 			zlog_debug(
@@ -285,7 +302,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 	       external-LSA.  This indicates the IP address to which
 	       packets for the destination should be forwarded. */
 
-	if (al->e[0].fwd_addr.s_addr == INADDR_ANY) {
+	if (er->fwd_addr.s_addr == INADDR_ANY) {
 		/* If the forwarding address is set to 0.0.0.0, packets should
 		   be sent to the ASBR itself. Among the multiple routing table
 		   entries for the ASBR, select the preferred entry as follows.
@@ -305,7 +322,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 		   routing table entry must specify an intra-area or inter-area
 		   path; if no such path exists, do nothing with the LSA and
 		   consider the next in the list. */
-		if (!ospf_ase_forward_address_check(ospf, al->e[0].fwd_addr)) {
+		if (!ospf_ase_forward_address_check(ospf, er->fwd_addr)) {
 			if (IS_DEBUG_OSPF(lsa, LSA))
 				zlog_debug(
 					"Route[External]: Forwarding address is our router address");
@@ -313,10 +330,10 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 		}
 
 		asbr.family = AF_INET;
-		asbr.prefix = al->e[0].fwd_addr;
+		asbr.prefix = er->fwd_addr;
 		asbr.prefixlen = IPV4_MAX_BITLEN;
 
-		rn = route_node_match(ospf->new_table, (struct prefix *)&asbr);
+		rn = route_node_match(new_table, (struct prefix *)&asbr);
 
 		if (rn == NULL || (asbr_route = rn->info) == NULL) {
 			if (IS_DEBUG_OSPF(lsa, LSA))
@@ -345,7 +362,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 	       external metric type is 2, the path-type is set to type 2
 	       external, the link state component of the route's cost is X,
 	       and the type 2 cost is Y. */
-	new = ospf_ase_calculate_new_route(lsa, asbr_route, metric);
+	new = ospf_ase_calculate_new_route(lsa, er, asbr_route, metric);
 
 	/* (6) Compare the AS external path described by the LSA with the
 	       existing paths in N's routing table entry, as follows. If
@@ -361,7 +378,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 
 	/* if there is a Intra/Inter area route to the N
 	   do not install external route */
-	if ((rn = route_node_lookup(ospf->new_table, (struct prefix *)&p))) {
+	if ((rn = route_node_lookup(new_table, (struct prefix *)&p))) {
 		route_unlock_node(rn);
 		if (rn->info == NULL)
 			zlog_info("Route[External]: rn->info NULL");
@@ -371,7 +388,7 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 	}
 	/* Find a route to the same dest */
 	/* If there is no route, create new one. */
-	if ((rn = route_node_lookup(ospf->new_external_route,
+	if ((rn = route_node_lookup(ext_table,
 				    (struct prefix *)&p)))
 		route_unlock_node(rn);
 
@@ -380,10 +397,10 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 			zlog_debug("Route[External]: Adding a new route %pFX with paths %u",
 				   &p, listcount(asbr_route->paths));
 
-		ospf_route_add(ospf->new_external_route, &p, new, asbr_route);
+		ospf_route_add(ext_table, &p, new, asbr_route);
 
-		if (al->e[0].fwd_addr.s_addr != INADDR_ANY)
-			ospf_ase_complete_direct_routes(new, al->e[0].fwd_addr);
+		if (er->fwd_addr.s_addr != INADDR_ANY)
+			ospf_ase_complete_direct_routes(new, er->fwd_addr);
 		return 0;
 	} else {
 		/* (a) Intra-area and inter-area paths are always preferred
@@ -424,9 +441,9 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 				zlog_debug(
 					"Route[External]: New route is better");
 			ospf_route_subst(rn, new, asbr_route);
-			if (al->e[0].fwd_addr.s_addr != INADDR_ANY)
+			if (er->fwd_addr.s_addr != INADDR_ANY)
 				ospf_ase_complete_direct_routes(
-					new, al->e[0].fwd_addr);
+					new, er->fwd_addr);
 			or = new;
 			new = NULL;
 		}
@@ -442,9 +459,9 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 			if (IS_DEBUG_OSPF(lsa, LSA))
 				zlog_debug("Route[External]: Routes are equal");
 			ospf_route_copy_nexthops(or, asbr_route->paths);
-			if (al->e[0].fwd_addr.s_addr != INADDR_ANY)
+			if (er->fwd_addr.s_addr != INADDR_ANY)
 				ospf_ase_complete_direct_routes(
-					or, al->e[0].fwd_addr);
+					or, er->fwd_addr);
 		}
 	}
 	/* Make sure setting newly calculated ASBR route.*/
@@ -452,8 +469,16 @@ int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
 	if (new)
 		ospf_route_free(new);
 
-	lsa->route = or ;
+	if (base)
+		lsa->route = or ;
 	return 0;
+}
+
+int ospf_ase_calculate_route(struct ospf *ospf, struct ospf_lsa *lsa)
+{
+	return ospf_ase_calculate_route_tables(ospf, lsa, ospf->new_table,
+					       ospf->new_rtrs,
+					       ospf->new_external_route);
 }
 
 static int ospf_ase_route_match_same(struct route_table *rt,
@@ -604,6 +629,9 @@ static void ospf_ase_calculate_timer(struct event *t)
 		ospf->old_external_route = ospf->new_external_route;
 		ospf->new_external_route = route_table_init();
 
+		/* RFC 4915: external routes of the other topologies. */
+		ospf_mtr_external_recalculate(ospf);
+
 		monotime(&stop_time);
 
 		if (IS_DEBUG_OSPF_EVENT)
@@ -726,6 +754,9 @@ void ospf_ase_incremental_update(struct ospf *ospf, struct ospf_lsa *lsa)
 	p.prefix = lsa->data->id;
 	p.prefixlen = ip_masklen(al->mask);
 	apply_mask_ipv4(&p);
+
+	/* RFC 4915: (re)compute external routes of the other topologies. */
+	ospf_mtr_external_schedule(ospf);
 
 	/* if new_table is NULL, there was no spf calculation, thus
 	   incremental update is unneeded */

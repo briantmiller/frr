@@ -116,6 +116,12 @@ struct ospf_if_params {
 	/* Prefix-Suppression */
 	DECLARE_IF_PARAM(bool, prefix_suppression);
 
+	/* RFC 4915 MT-ID specific output costs, indexed by MT-ID.
+	 * Only used in the interface default params; allocated on demand,
+	 * 0 means "not configured" for that MT-ID.
+	 */
+	uint16_t *mt_cost;
+
 	/* Authentication data. */
 	uint8_t auth_simple[OSPF_AUTH_SIMPLE_SIZE + 1]; /* Simple password. */
 	uint8_t auth_simple__config : 1;
