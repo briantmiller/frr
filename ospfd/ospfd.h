@@ -449,8 +449,8 @@ struct ospf {
 	bool mtr_table_offset_configured;
 	/* Topology the route calculation is currently running for. */
 	uint8_t mtr_cur_mtid;
-	/* Per-topology routing state, indexed by MT-ID (0 unused). */
-	struct ospf_mtr_topo *mtr[256];
+	/* Per-topology routing state, indexed by MT-ID 1-127 (0 unused). */
+	struct ospf_mtr_topo *mtr[128];
 	/* Deferred recalculation of MT external routes. */
 	struct event *t_mtr_ext_calc;
 

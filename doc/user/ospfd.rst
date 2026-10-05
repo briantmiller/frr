@@ -1024,7 +1024,7 @@ OSPF Multi-Topology Routing
 The formerly unused TOS fields of Router-LSAs, Summary-LSAs and
 AS-external-LSAs carry per topology (MT-ID) metrics. A separate route
 calculation (intra-area SPF, inter-area and AS external routes) is run for
-every topology (MT-ID 1-255) that is configured locally or advertised in the
+every topology (MT-ID 1-127) that is configured locally or advertised in the
 LSDB, and the routes of each topology are installed into a dedicated kernel
 routing table. MT-ID 0 is the default topology, i.e. normal OSPF routing,
 which is left unchanged.
@@ -1041,15 +1041,17 @@ Network-LSAs are shared by all topologies. An Area Border Router includes
 the MT-ID metrics of its per topology routes in the Summary-LSAs it
 originates.
 
-.. clicmd:: ip ospf mt-id (1-255) cost (1-65535)
+.. clicmd:: ip ospf mt-id (1-127) cost (1-65535)
 
    Interface command. Set the output cost of the interface for topology
    MT-ID. The cost is advertised as an MT-ID metric for every link
    describing the interface in the Router-LSA. An interface participates in
    a topology only if it has a cost for it, unless ``mtr copy-base-topology``
-   is configured. Note that :rfc:`4915` reserves MT-ID 1 (multicast), 2
-   (in-band management) and 3-31 (IANA), declares 128-255 invalid, and
-   AS-external-LSAs can only carry MT-IDs 0-127.
+   is configured. As specified by :rfc:`4915`, MT-IDs are limited to 0-127
+   (AS-external-LSAs carry the MT-ID in 7 bits); MT-IDs 128-255 received in
+   LSAs are invalid and ignored. :rfc:`4915` further reserves MT-ID 1
+   (multicast), 2 (in-band management) and 3-31 (IANA assignment); 32-127
+   are for experimental or proprietary use.
 
 .. clicmd:: mtr copy-base-topology
 
@@ -1061,17 +1063,17 @@ originates.
    the MT-ID metrics that differ from the base topology need to be
    configured.
 
-.. clicmd:: mtr-route-table-offset (0-4294967040)
+.. clicmd:: mtr-route-table-offset (0-4294967168)
 
    Set the number the MTR kernel routing tables start from: the routes of
    MT-ID *N* are installed into table *offset + N*. For example with
    ``mtr-route-table-offset 255`` MT-ID 1 is installed into table 256. The
-   default offset is 0. Routes are never installed into tables 0, 253
+   default offset is 0. Routes are never installed into tables 253
    (default), 254 (main) and 255 (local); a warning is logged when an MT-ID
    maps onto one of them. Changing the offset moves the installed routes.
    The kernel tables can be selected with ``ip rule`` or VRF policies.
 
-.. clicmd:: show ip ospf [vrf NAME] mt-topology [(1-255)] [route] [json]
+.. clicmd:: show ip ospf [vrf NAME] mt-topology [(1-127)] [route] [json]
 
    Show the topologies known to the router, the kernel table each one is
    installed into and, with ``route``, the per topology routing table.

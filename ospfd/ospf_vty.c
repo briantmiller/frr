@@ -7229,8 +7229,10 @@ static void show_ip_ospf_database_router_links(struct vty *vty,
 			for (t = 0; t < rlnk->tos &&
 				    mt + OSPF_ROUTER_LSA_TOS_SIZE <= lim;
 			     t++, mt += OSPF_ROUTER_LSA_TOS_SIZE)
-				vty_out(vty, "       MTID %u Metric: %d\n",
-					mt[0], (mt[2] << 8) | mt[3]);
+				vty_out(vty, "       MTID %u Metric: %d%s\n",
+					mt[0], (mt[2] << 8) | mt[3],
+					mt[0] > 127 ? " (invalid MT-ID, ignored)"
+						    : "");
 			vty_out(vty, "\n");
 		}
 	}
@@ -7258,8 +7260,9 @@ static void show_summary_lsa_mt_metrics(struct vty *vty,
 			snprintf(key, sizeof(key), "%u", p[0]);
 			json_object_int_add(json_mt, key, metric);
 		} else
-			vty_out(vty, "        MTID: %u  Metric: %u\n", p[0],
-				metric);
+			vty_out(vty, "        MTID: %u  Metric: %u%s\n", p[0],
+				metric,
+				p[0] > 127 ? " (invalid MT-ID, ignored)" : "");
 	}
 	if (json_mt)
 		json_object_object_add(json, "mtIdMetrics", json_mt);

@@ -30,14 +30,18 @@ struct router_lsa_link;
 struct as_external_lsa;
 struct as_route;
 
-/* MT-ID 0 is the default topology; 1..255 are additional topologies. */
+/*
+ * MT-ID 0 is the default topology; 1..127 are additional topologies.
+ * RFC 4915 3.7: the MT-ID space is 0-127 because AS-external-LSAs carry the
+ * MT-ID in 7 bits; MT-IDs 128-255 are invalid and SHOULD be ignored.
+ */
 #define OSPF_MTR_MTID_DEFAULT 0
 #define OSPF_MTR_MTID_MIN     1
-#define OSPF_MTR_MTID_MAX     255
+#define OSPF_MTR_MTID_MAX     127
 #define OSPF_MTR_MTID_COUNT   (OSPF_MTR_MTID_MAX + 1)
 
-/* AS-external-LSAs carry the MT-ID in 7 bits (the 8th is the E-bit). */
-#define OSPF_MTR_EXT_MTID_MAX 127
+/* Is `mtid` a valid non-default MT-ID (RFC 4915 3.7)? */
+#define OSPF_MTR_MTID_VALID(mtid) ((mtid) >= OSPF_MTR_MTID_MIN && (mtid) <= OSPF_MTR_MTID_MAX)
 
 #define OSPF_MTR_TABLE_OFFSET_DEFAULT 0
 #define OSPF_MTR_TABLE_OFFSET_MAX     (UINT32_MAX - OSPF_MTR_MTID_MAX)

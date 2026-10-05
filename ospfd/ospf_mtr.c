@@ -12,7 +12,7 @@
  *   compatible.
  *
  * - A separate route calculation (intra-area SPF, inter-area and AS
- *   external) is run for every topology (MT-ID 1-255) that appears in the
+ *   external) is run for every topology (MT-ID 1-127) that appears in the
  *   LSDB or is configured locally.  During the calculation only the links
  *   that carry a metric for that MT-ID are used (RFC 4915 3.6).  Network-LSAs
  *   are shared by all topologies.
@@ -58,6 +58,9 @@
 #include "ospfd/ospf_mtr.h"
 
 #include "ospfd/ospf_mtr_clippy.c"
+
+_Static_assert(array_size(((struct ospf *)0)->mtr) == OSPF_MTR_MTID_COUNT,
+	       "struct ospf mtr[] must be indexed by every valid MT-ID");
 
 /* Delay before recomputing MT external routes after an external LSA
  * change (milliseconds); coalesces bursts of updates.
@@ -191,7 +194,7 @@ const struct as_route *ospf_mtr_external_entry(struct ospf *ospf, const struct a
 	 * metric, forwarding address and external route tag (12 octets).
 	 * MT-IDs above 127 cannot be represented here.
 	 */
-	if (mtid <= OSPF_MTR_EXT_MTID_MAX) {
+	if (OSPF_MTR_MTID_VALID(mtid)) {
 		p = (const uint8_t *)&al->e[1];
 		lim = (const uint8_t *)al + ntohs(al->header.length);
 		for (; p + sizeof(struct as_route) <= lim; p += sizeof(struct as_route)) {
@@ -538,7 +541,8 @@ static void mtr_scan_router_lsa(struct ospf_lsa *lsa, bool *seen)
 		mt = p + OSPF_ROUTER_LSA_LINK_SIZE;
 		for (i = 0; i < l->m[0].tos_count && mt + OSPF_ROUTER_LSA_TOS_SIZE <= lim;
 		     i++, mt += OSPF_ROUTER_LSA_TOS_SIZE)
-			seen[mt[0]] = true;
+			if (OSPF_MTR_MTID_VALID(mt[0]))
+				seen[mt[0]] = true;
 		p += OSPF_ROUTER_LSA_LINK_SIZE + l->m[0].tos_count * OSPF_ROUTER_LSA_TOS_SIZE;
 	}
 }
@@ -554,7 +558,8 @@ static void mtr_scan_summary_lsa(struct ospf_lsa *lsa, bool *seen)
 	p = (uint8_t *)lsa->data + OSPF_LSA_HEADER_SIZE + 8;
 	lim = (uint8_t *)lsa->data + ntohs(lsa->data->length);
 	for (; p + 4 <= lim; p += 4)
-		seen[p[0]] = true;
+		if (OSPF_MTR_MTID_VALID(p[0]))
+			seen[p[0]] = true;
 }
 
 static void mtr_scan_external_lsa(struct ospf_lsa *lsa, bool *seen)
@@ -568,7 +573,7 @@ static void mtr_scan_external_lsa(struct ospf_lsa *lsa, bool *seen)
 	p = (uint8_t *)&al->e[1];
 	lim = (uint8_t *)al + ntohs(al->header.length);
 	for (; p + sizeof(struct as_route) <= lim; p += sizeof(struct as_route))
-		seen[((struct as_route *)p)->tos & 0x7f] = true;
+		seen[((struct as_route *)p)->tos & 0x7f] = true; /* 0-127 */
 }
 
 /*
@@ -879,7 +884,7 @@ static void mtr_if_update(struct interface *ifp)
 
 DEFPY (ip_ospf_mt_cost,
        ip_ospf_mt_cost_cmd,
-       "ip ospf mt-id (1-255)$mtid cost (1-65535)$cost",
+       "ip ospf mt-id (1-127)$mtid cost (1-65535)$cost",
        "IP Information\n"
        "OSPF interface commands\n"
        "Multi-topology (RFC 4915)\n"
@@ -905,7 +910,7 @@ DEFPY (ip_ospf_mt_cost,
 
 DEFPY (no_ip_ospf_mt_cost,
        no_ip_ospf_mt_cost_cmd,
-       "no ip ospf mt-id (1-255)$mtid [cost [(1-65535)]]",
+       "no ip ospf mt-id (1-127)$mtid [cost [(1-65535)]]",
        NO_STR
        "IP Information\n"
        "OSPF interface commands\n"
@@ -950,7 +955,7 @@ DEFPY (ospf_mtr_copy_base,
 
 DEFPY (ospf_mtr_table_offset,
        ospf_mtr_table_offset_cmd,
-       "mtr-route-table-offset (0-4294967040)$offset",
+       "mtr-route-table-offset (0-4294967168)$offset",
        "Kernel routing table offset for multi-topology routes (table = offset + MT-ID)\n"
        "Offset\n")
 {
@@ -972,7 +977,7 @@ DEFPY (ospf_mtr_table_offset,
 
 DEFPY (no_ospf_mtr_table_offset,
        no_ospf_mtr_table_offset_cmd,
-       "no mtr-route-table-offset [(0-4294967040)]",
+       "no mtr-route-table-offset [(0-4294967168)]",
        NO_STR
        "Kernel routing table offset for multi-topology routes (table = offset + MT-ID)\n"
        "Offset\n")
@@ -1234,7 +1239,7 @@ static int mtr_show_common(struct vty *vty, struct ospf *ospf, long mtid, bool r
 
 DEFPY (show_ip_ospf_mt,
        show_ip_ospf_mt_cmd,
-       "show ip ospf [vrf NAME$vrf_name] mt-topology [(1-255)$mtid] [route$route] [json$uj]",
+       "show ip ospf [vrf NAME$vrf_name] mt-topology [(1-127)$mtid] [route$route] [json$uj]",
        SHOW_STR
        IP_STR
        "OSPF information\n"
