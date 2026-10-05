@@ -1015,6 +1015,95 @@ a BFD profile to these sessions.
 
    Enable ospf on an interface and set associated area.
 
+.. _ospf-multi-topology:
+
+OSPF Multi-Topology Routing
+===========================
+
+*ospfd* supports Multi-Topology Routing (MTR) as defined in :rfc:`4915`.
+The formerly unused TOS fields of Router-LSAs, Summary-LSAs and
+AS-external-LSAs carry per topology (MT-ID) metrics. A separate route
+calculation (intra-area SPF, inter-area and AS external routes) is run for
+every topology (MT-ID 1-127) that is configured locally or advertised in the
+LSDB, and the routes of each topology are installed into a dedicated kernel
+routing table. MT-ID 0 is the default topology, i.e. normal OSPF routing,
+which is left unchanged.
+
+Routers that do not implement :rfc:`4915` ignore the MT-ID metrics, so MTR
+routers interoperate with them in the default topology. Until MTR is
+configured on a router (an ``ip ospf mt-id`` cost on one of its interfaces,
+``mtr copy-base-topology`` or ``mtr-route-table-offset``), *ospfd* ignores
+the MT-ID metrics advertised by other routers as well.
+
+During the calculation for MT-ID *N* only links that advertise a metric for
+*N* are used (both directions of a link must be part of the topology);
+Network-LSAs are shared by all topologies. An Area Border Router includes
+the MT-ID metrics of its per topology routes in the Summary-LSAs it
+originates.
+
+.. clicmd:: ip ospf mt-id (1-127) cost (1-65535)
+
+   Interface command. Set the output cost of the interface for topology
+   MT-ID. The cost is advertised as an MT-ID metric for every link
+   describing the interface in the Router-LSA. An interface participates in
+   a topology only if it has a cost for it, unless ``mtr copy-base-topology``
+   is configured. As specified by :rfc:`4915`, MT-IDs are limited to 0-127
+   (AS-external-LSAs carry the MT-ID in 7 bits); MT-IDs 128-255 received in
+   LSAs are invalid and ignored. :rfc:`4915` further reserves MT-ID 1
+   (multicast), 2 (in-band management) and 3-31 (IANA assignment); 32-127
+   are for experimental or proprietary use.
+
+.. clicmd:: mtr copy-base-topology
+
+   When computing the routes of a topology, a link, Summary-LSA or
+   AS-external-LSA that does not carry a metric for that MT-ID uses its base
+   (TOS 0, default topology) metric instead of being excluded. This allows a
+   full topology to be built without every link declaring every MT-ID, and
+   lets routers that do not support MTR participate in every topology. Only
+   the MT-ID metrics that differ from the base topology need to be
+   configured.
+
+.. clicmd:: mtr-route-table-offset (0-4294967168)
+
+   Set the number the MTR kernel routing tables start from: the routes of
+   MT-ID *N* are installed into table *offset + N*. For example with
+   ``mtr-route-table-offset 255`` MT-ID 1 is installed into table 256. The
+   default offset is 0. Routes are never installed into tables 253
+   (default), 254 (main) and 255 (local); a warning is logged when an MT-ID
+   maps onto one of them. Changing the offset moves the installed routes.
+   The kernel tables can be selected with ``ip rule`` or VRF policies.
+
+.. clicmd:: show ip ospf [vrf NAME] mt-topology [(1-127)] [route] [json]
+
+   Show the topologies known to the router, the kernel table each one is
+   installed into and, with ``route``, the per topology routing table.
+
+The MT-ID costs of an interface are shown by :clicmd:`show ip ospf interface
+[INTERFACE] [json]`, and the MT-ID metrics of LSAs by :clicmd:`show ip ospf
+database`.
+
+Example: in the configuration below the link towards ``r2`` is expensive in
+topology 10 only, so topology 10 routes avoid it while the default topology
+still uses it. With ``mtr copy-base-topology`` all other links, including
+those of routers not supporting MTR, take part in topology 10 with their
+normal cost. Topology 10 routes are installed into kernel table 265.
+
+.. code-block:: frr
+
+   interface eth-r2
+    ip ospf mt-id 10 cost 100
+   !
+   router ospf
+    mtr copy-base-topology
+    mtr-route-table-offset 255
+   !
+
+The following parts of :rfc:`4915` are not implemented: the
+DefaultExclusionCapability (excluding links from the default topology and
+the associated MT-bit handling in Hello and Database Description packets),
+MT-ID metrics in AS-external-LSAs originated by *ospfd* (received ones are
+used) and per topology area range aggregation and discard routes.
+
 OSPF route-map
 ==============
 

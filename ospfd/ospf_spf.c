@@ -33,6 +33,7 @@
 #include "ospfd/ospf_sr.h"
 #include "ospfd/ospf_ti_lfa.h"
 #include "ospfd/ospf_errors.h"
+#include "ospfd/ospf_mtr.h"
 
 #ifdef SUPPORT_OSPF_API
 #include "ospfd/ospf_apiserver.h"
@@ -41,6 +42,34 @@
 /* Variables to ensure a SPF scheduled log message is printed only once */
 
 static unsigned int spf_reason_flags = 0;
+
+/*
+ * OSPF instance whose SPF is being computed.  Used to look up the topology
+ * (RFC 4915 MT-ID) the calculation runs for; the SPF is not re-entrant.
+ */
+static struct ospf *spf_ospf;
+
+/*
+ * Return true if router-LSA link `l` belongs to the topology currently
+ * being computed and store its metric.  For the default topology this is
+ * always the TOS 0 metric.
+ */
+static bool spf_link_metric(const struct router_lsa_link *l, uint16_t *metric)
+{
+	uint16_t m;
+
+	if (!spf_ospf || spf_ospf->mtr_cur_mtid == OSPF_MTR_MTID_DEFAULT) {
+		if (metric)
+			*metric = ntohs(l->m[0].metric);
+		return true;
+	}
+
+	if (!ospf_mtr_link_metric(spf_ospf, l, spf_ospf->mtr_cur_mtid, &m))
+		return false;
+	if (metric)
+		*metric = m;
+	return true;
+}
 
 /* dummy vertex to flag "in spftree" */
 static const struct vertex vertex_in_spftree = {};
@@ -581,17 +610,20 @@ static int ospf_lsa_has_link(struct lsa_header *w, struct lsa_header *v)
 		rlnk = &(rl->link[0]);
 
 		for (i = 0; i < ntohs(rl->links); i++) {
+			bool in_topo = spf_link_metric(
+				(struct router_lsa_link *)rlnk, NULL);
+
 			switch (rlnk->type) {
 			case LSA_LINK_TYPE_POINTOPOINT:
 			case LSA_LINK_TYPE_VIRTUALLINK:
 				/* Router LSA ID. */
-				if (v->type == OSPF_ROUTER_LSA &&
+				if (in_topo && v->type == OSPF_ROUTER_LSA &&
 				    IPV4_ADDR_SAME(&rlnk->link_id, &v->id))
 					return i;
 				break;
 			case LSA_LINK_TYPE_TRANSIT:
 				/* Network LSA ID. */
-				if (v->type == OSPF_NETWORK_LSA &&
+				if (in_topo && v->type == OSPF_NETWORK_LSA &&
 				    IPV4_ADDR_SAME(&rlnk->link_id, &v->id))
 					return i;
 				break;
@@ -644,6 +676,10 @@ ospf_get_next_link(struct vertex *v, struct vertex *w,
 		      + (l->m[0].tos_count * OSPF_ROUTER_LSA_TOS_SIZE));
 
 		if (l->m[0].type != lsa_type)
+			continue;
+
+		/* RFC 4915: skip links not in the topology being computed. */
+		if (!spf_link_metric(l, NULL))
 			continue;
 
 		if (IPV4_ADDR_SAME(&l->link_id, &w->id))
@@ -1355,6 +1391,13 @@ static void ospf_spf_next(struct vertex *v, struct ospf_area *area,
 				continue;
 
 			/*
+			 * RFC 4915 3.6: only links (and metrics) of the
+			 * topology being computed are considered.
+			 */
+			if (!spf_link_metric(l, &link_distance))
+				continue;
+
+			/*
 			 * Don't process TI-LFA protected resources.
 			 *
 			 * TODO: Replace this by a proper solution, e.g. remove
@@ -1409,8 +1452,7 @@ static void ospf_spf_next(struct vertex *v, struct ospf_area *area,
 			    && area->spf_reversed)
 				link_distance =
 					get_reverse_distance(v, l, w_lsa);
-			else
-				link_distance = ntohs(l->m[0].metric);
+			/* else: link_distance is the topology's metric */
 
 			/* step (d) below */
 			distance = v->distance + link_distance;
@@ -1618,9 +1660,15 @@ static void ospf_spf_process_stubs(struct ospf_area *area, struct vertex *v,
 
 			/* Don't process TI-LFA protected resources */
 			if (l->m[0].type == LSA_LINK_TYPE_STUB
-			    && !ospf_spf_is_protected_resource(area, l, v->lsa))
-				ospf_intra_add_stub(rt, l, v, area,
-						    parent_is_root, lsa_pos);
+			    && !ospf_spf_is_protected_resource(area, l, v->lsa)) {
+				uint16_t metric;
+
+				/* RFC 4915: stub must be in the topology */
+				if (spf_link_metric(l, &metric))
+					ospf_intra_add_stub(rt, l, v, area,
+							    parent_is_root,
+							    lsa_pos, metric);
+			}
 			lsa_pos++;
 		}
 	}
@@ -1715,6 +1763,9 @@ void ospf_spf_calculate(struct ospf_area *area, struct ospf_lsa *root_lsa,
 				__func__, &area->area_id);
 		return;
 	}
+
+	/* Topology (MT-ID) context for link metric lookups. */
+	spf_ospf = area->ospf;
 
 	/* Initialize the algorithm's data structures, see RFC2328 16.1. (1). */
 
@@ -1925,6 +1976,12 @@ static void ospf_spf_calculate_schedule_worker(struct event *event)
 	/* Update ABR/ASBR routing table */
 	ospf->old_rtrs = ospf->new_rtrs;
 	ospf->new_rtrs = new_rtrs;
+
+	/*
+	 * RFC 4915: compute and install the additional topologies.  This is
+	 * done before the ABR task so that Summary-LSAs can carry MT metrics.
+	 */
+	ospf_mtr_calculate(ospf);
 
 	/* ABRs may require additional changes, see RFC 2328 16.7. */
 	monotime(&start_time);

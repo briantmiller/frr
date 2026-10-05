@@ -259,6 +259,17 @@ static void ospf_zebra_append_opaque_attr(struct ospf_route *or,
 void ospf_zebra_add(struct ospf *ospf, struct prefix_ipv4 *p,
 		    struct ospf_route * or)
 {
+	ospf_zebra_add_table(ospf, p, or, 0);
+}
+
+/*
+ * Install an OSPF route.  A non-zero `table_id` installs the route into
+ * that kernel routing table (RFC 4915 multi-topology routes) instead of the
+ * VRF's main table.
+ */
+void ospf_zebra_add_table(struct ospf *ospf, struct prefix_ipv4 *p,
+			  struct ospf_route *or, uint32_t table_id)
+{
 	struct zapi_route api;
 	uint8_t distance;
 	struct ospf_path *path;
@@ -280,6 +291,10 @@ void ospf_zebra_add(struct ospf *ospf, struct prefix_ipv4 *p,
 	api.type = ZEBRA_ROUTE_OSPF;
 	api.instance = ospf->instance;
 	api.safi = SAFI_UNICAST;
+	if (table_id) {
+		SET_FLAG(api.message, ZAPI_MESSAGE_TABLEID);
+		api.tableid = table_id;
+	}
 
 	memcpy(&api.prefix, p, sizeof(*p));
 	SET_FLAG(api.message, ZAPI_MESSAGE_NEXTHOP);
@@ -340,9 +355,9 @@ void ospf_zebra_add(struct ospf *ospf, struct prefix_ipv4 *p,
 
 			ifp = if_lookup_by_index(path->ifindex, ospf->vrf_id);
 
-			zlog_debug("Zebra: Route add %pFX(%s) nexthop %pI4, ifindex=%d %s",
+			zlog_debug("Zebra: Route add %pFX(%s) table %u nexthop %pI4, ifindex=%d %s",
 				   p, ospf_vrf_id_to_name(ospf->vrf_id),
-				   &path->nexthop, path->ifindex,
+				   table_id, &path->nexthop, path->ifindex,
 				   ifp ? ifp->name : " ");
 		}
 	}
@@ -355,6 +370,12 @@ void ospf_zebra_add(struct ospf *ospf, struct prefix_ipv4 *p,
 
 void ospf_zebra_delete(struct ospf *ospf, struct prefix_ipv4 *p,
 		       struct ospf_route * or)
+{
+	ospf_zebra_delete_table(ospf, p, or, 0);
+}
+
+void ospf_zebra_delete_table(struct ospf *ospf, struct prefix_ipv4 *p,
+			     struct ospf_route *or, uint32_t table_id)
 {
 	struct zapi_route api;
 
@@ -370,11 +391,15 @@ void ospf_zebra_delete(struct ospf *ospf, struct prefix_ipv4 *p,
 	api.type = ZEBRA_ROUTE_OSPF;
 	api.instance = ospf->instance;
 	api.safi = SAFI_UNICAST;
+	if (table_id) {
+		SET_FLAG(api.message, ZAPI_MESSAGE_TABLEID);
+		api.tableid = table_id;
+	}
 	memcpy(&api.prefix, p, sizeof(*p));
 
 	if (IS_DEBUG_OSPF(zebra, ZEBRA_REDISTRIBUTE))
-		zlog_debug("Zebra: Route delete %pFX(%s)", p,
-			   ospf_vrf_id_to_name(ospf->vrf_id));
+		zlog_debug("Zebra: Route delete %pFX(%s) table %u", p,
+			   ospf_vrf_id_to_name(ospf->vrf_id), table_id);
 
 	zclient_route_send(ZEBRA_ROUTE_DELETE, ospf_zclient, &api);
 }
