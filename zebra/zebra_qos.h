@@ -33,6 +33,16 @@ struct qos_rate {
 	uint64_t value;
 };
 
+/* HFSC service curve (rt, ls, sc or ul), as configured */
+struct qos_curve {
+	bool set;
+	/* first segment: rate m1 for d microseconds, m1.type NONE when absent */
+	struct qos_rate m1;
+	uint32_t d;
+	/* long term rate */
+	struct qos_rate m2;
+};
+
 /* class-map NAME */
 struct qos_class_map {
 	char name[QOS_NAME_LEN];
@@ -64,6 +74,12 @@ struct qos_policy_class {
 	/* HTB priority 0..7, -1 when not configured */
 	int priority;
 
+	/* HFSC service curves */
+	struct qos_curve rt;
+	struct qos_curve ls;
+	struct qos_curve sc;
+	struct qos_curve ul;
+
 	/* packets, 0 when not configured */
 	uint32_t queue_limit;
 
@@ -74,6 +90,9 @@ struct qos_policy_class {
 /* policy-map NAME */
 struct qos_policy_map {
 	char name[QOS_NAME_LEN];
+
+	/* "policy-map NAME hfsc": HFSC instead of HTB */
+	bool hfsc;
 
 	/* struct qos_policy_class, in evaluation order */
 	struct list *classes;
@@ -92,8 +111,8 @@ struct zebra_if_qos {
 	/* What is currently programmed in the kernel, NULL if nothing */
 	struct qos_hw *installed;
 
-	/* Why the policy is not installed, for show output */
-	const char *reason;
+	/* Why the policy is not installed, for show output, empty if it is */
+	char reason[256];
 };
 
 /* Northbound */

@@ -705,10 +705,11 @@ Class Based QoS
 
 *Zebra* can shape traffic leaving an interface with a class based queueing
 configuration modelled after Cisco class-based weighted fair queueing (CBWFQ).
-On Linux the configuration is programmed as an ``htb`` queueing discipline,
-one HTB class per policy-map class and ``flower`` filters for classification.
-The kernel needs ``sch_htb``, ``cls_flower`` and ``act_gact`` (filter chains
-with ``goto chain`` actions are used).
+On Linux the configuration is programmed as an ``htb`` queueing discipline
+(or ``hfsc``, see :ref:`zebra-qos-hfsc`), one class per policy-map class and
+``flower`` filters for classification. The kernel needs ``sch_htb`` (or
+``sch_hfsc``), ``cls_flower`` and ``act_gact`` (filter chains with ``goto
+chain`` actions are used).
 
 Traffic is classified with *class-maps*, the classes are given bandwidth
 guarantees, ceilings, priorities and queue limits in a *policy-map*, and the
@@ -837,9 +838,13 @@ Class-maps
 Policy-maps
 -----------
 
-.. clicmd:: policy-map NAME
+.. clicmd:: policy-map NAME [hfsc|htb]
 
-   Create a policy-map and enter its configuration node.
+   Create a policy-map and enter its configuration node. A policy-map is an
+   HTB policy-map unless created with ``hfsc``, see :ref:`zebra-qos-hfsc`.
+   Without the keyword an existing policy-map keeps its type. The type of a
+   policy-map can only be changed while its classes have no settings of the
+   other type.
 
 .. clicmd:: class NAME
 
@@ -851,7 +856,7 @@ Policy-maps
 
 .. clicmd:: bandwidth <percent (1-100)|RATE>
 
-   Guaranteed rate of the class (HTB ``rate``). A percentage refers to the
+   HTB only. Guaranteed rate of the class (HTB ``rate``). A percentage refers to the
    rate of the parent, i.e. the interface QoS bandwidth for a top level
    policy or the guaranteed rate of the parent class for a child policy.
    Classes without a bandwidth equally share whatever the other classes of
@@ -859,28 +864,102 @@ Policy-maps
 
 .. clicmd:: max-bandwidth <percent (1-100)|RATE>
 
-   Ceiling of the class (HTB ``ceil``), the most it may use when borrowing
+   HTB only. Ceiling of the class (HTB ``ceil``), the most it may use when borrowing
    unused bandwidth. A percentage refers to the interface QoS bandwidth.
    Defaults to the interface QoS bandwidth.
 
 .. clicmd:: priority (0-7)
 
-   HTB priority of the class, 0 is the highest. Classes with a higher
+   HTB only. HTB priority of the class, 0 is the highest. Classes with a higher
    priority are offered excess bandwidth first and see lower latency.
    Classes without a priority use 7.
 
 .. clicmd:: queue-limit (1-4294967295) [packets]
 
-   Queue length of the class, implemented as a ``pfifo`` below the HTB leaf
+   Queue length of the class, implemented as a ``pfifo`` below the leaf
    class. Without it the kernel default queue (``txqueuelen``) is used.
    Ignored for classes with a child service-policy.
 
 .. clicmd:: service-policy NAME
 
    Apply the policy-map ``NAME`` as a child policy to the traffic of this
-   class (hierarchical QoS). The class becomes an HTB inner class and the
+   class (hierarchical QoS). The class becomes an inner class and the
    classes of the child policy its children. Up to 7 levels are supported,
-   loops are ignored.
+   loops are ignored. The child policy-map must be of the same type (HTB or
+   HFSC) as the parent, otherwise the service-policy is not installed and
+   ``show qos interface`` says why.
+
+.. _zebra-qos-hfsc:
+
+HFSC policy-maps
+^^^^^^^^^^^^^^^^
+
+``policy-map NAME hfsc`` creates a policy-map implemented with the
+Hierarchical Fair Service Curve (``hfsc``) queueing discipline. Instead of
+rates and priorities, its classes are given *service curves*, which can
+decouple delay from bandwidth: a class can be guaranteed a low delay
+without being given a large share of the link.
+
+.. code-block:: frr
+
+   policy-map HPARENT hfsc
+    class VOICE
+     rt m1 4mbps d 10ms m2 2mbps
+     ls m2 percent 20
+     queue-limit 64 packets
+    exit
+    class WEB
+     sc m2 percent 40
+     ul m2 percent 75
+     service-policy HCHILD
+    exit
+    class class-default
+     ls m2 percent 30
+    exit
+   exit
+
+.. clicmd:: rt [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Real-time service curve: the class is guaranteed rate ``m1`` for the
+   first ``DELAY`` of a backlog period, ``m2`` afterwards, independent of
+   link-sharing. With ``m1`` above ``m2`` a burst is sent faster than the
+   long term rate, which bounds its delay. Without ``m1`` and ``d`` the
+   curve is linear. ``DELAY`` takes a ``us``, ``ms`` (default) or ``s``
+   suffix. Only leaf classes are scheduled with real-time curves.
+
+.. clicmd:: ls [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Link-share service curve: how the bandwidth not used by real-time
+   traffic is shared between sibling classes, in proportion to their
+   link-share curves.
+
+.. clicmd:: sc [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Sets the real-time and the link-share curve at once. ``rt`` and ``ls``,
+   when configured, take precedence over it.
+
+.. clicmd:: ul [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Upper-limit service curve: the most link-sharing gives the class. It
+   only applies together with a link-share curve.
+
+In HFSC policy-maps all percentages refer to the interface QoS bandwidth.
+A class without a link-share curve (and without ``sc``) is given one with
+an equal share of what its siblings leave of the parent's link-share rate
+when it has no real-time curve, has a child policy or has an upper limit;
+a leaf class with only a real-time curve is not part of link-sharing and
+cannot borrow. The root class has a link-share and an upper-limit curve
+of the interface QoS bandwidth. Rates are limited to 34 Gbit/s by the
+kernel interface.
+
+``bandwidth``, ``max-bandwidth`` and ``priority`` cannot be used in an
+HFSC policy-map, and the service curves cannot be used in an HTB one.
+``queue-limit`` and ``service-policy`` work for both.
+
+When the interface QoS bandwidth or the values of the curves change, the
+HFSC classes are updated in place. Adding or removing a curve of a class
+re-installs the hierarchy, as the kernel cannot remove a curve from an
+existing class.
 
 Interface commands
 ------------------
@@ -902,9 +981,12 @@ existing HTB classes are updated in place without disturbing traffic.
 
 .. clicmd:: show qos interface [IFNAME] [json]
 
-   Show the QoS bandwidth, service-policy and the HTB classes installed on
-   the interface, followed by the statistics of every class read from the
-   kernel:
+   Show the QoS bandwidth, service-policy and the classes installed on the
+   interface (rate, ceiling and priority for HTB; the ``rt``, ``ls`` and
+   ``ul`` curves as ``m2`` or ``m1/d/m2`` for HFSC), followed by the
+   statistics of every class read from the kernel. A warning is printed
+   when classes zebra installed are missing from the kernel, e.g. because
+   the kernel lacks ``sch_hfsc``. Statistics columns:
 
    ``Current`` / ``Pps``
       Current rate of the class. Zebra creates its classes with a kernel
@@ -912,11 +994,13 @@ existing HTB classes are updated in place without disturbing traffic.
       the value follows changes in the traffic with a few seconds of delay.
 
    ``%Rate``
-      Current rate as a percentage of the guaranteed rate (``bandwidth``).
+      Current rate as a percentage of the guaranteed rate (``bandwidth``;
+      for HFSC the real-time ``m2``, else the link-share ``m2``).
       Above 100% the class is borrowing bandwidth other classes do not use.
 
    ``%Ceil``
-      Current rate as a percentage of the ceiling (``max-bandwidth``). A
+      Current rate as a percentage of the ceiling (``max-bandwidth``; for
+      HFSC the upper-limit ``m2``, else the interface QoS bandwidth). A
       class close to 100% is being shaped.
 
    ``Packets`` / ``Bytes`` / ``Drops`` / ``Backlog``

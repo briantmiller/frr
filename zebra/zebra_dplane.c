@@ -409,6 +409,9 @@ struct dplane_tc_class_info {
 	uint32_t quantum;
 	uint32_t mtu;
 	bool rate_est;
+	struct tc_hfsc_curve rsc;
+	struct tc_hfsc_curve fsc;
+	struct tc_hfsc_curve usc;
 };
 
 struct dplane_tc_filter_info {
@@ -2533,6 +2536,27 @@ uint32_t dplane_ctx_tc_class_get_mtu(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.tc_class.mtu;
 }
 
+const struct tc_hfsc_curve *dplane_ctx_tc_class_get_hfsc_rsc(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tc_class.rsc;
+}
+
+const struct tc_hfsc_curve *dplane_ctx_tc_class_get_hfsc_fsc(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tc_class.fsc;
+}
+
+const struct tc_hfsc_curve *dplane_ctx_tc_class_get_hfsc_usc(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tc_class.usc;
+}
+
 bool dplane_ctx_tc_class_get_rate_est(const struct zebra_dplane_ctx *ctx)
 {
 	DPLANE_CTX_VALID(ctx);
@@ -4410,6 +4434,8 @@ static int dplane_ctx_tc_qdisc_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_qdisc.parent = qdisc->qdisc.parent;
 	if (qdisc->qdisc.kind == TC_QDISC_HTB)
 		ctx->u.tc_qdisc.defcls = qdisc->qdisc.u.htb.defcls;
+	else if (qdisc->qdisc.kind == TC_QDISC_HFSC)
+		ctx->u.tc_qdisc.defcls = qdisc->qdisc.u.hfsc.defcls;
 	else if (qdisc->qdisc.kind == TC_QDISC_PFIFO)
 		ctx->u.tc_qdisc.limit = qdisc->qdisc.u.fifo.limit;
 
@@ -4438,13 +4464,27 @@ static int dplane_ctx_tc_class_init(struct zebra_dplane_ctx *ctx,
 	ctx->u.tc_class.handle = class->class.handle;
 	ctx->u.tc_class.kind = class->class.kind;
 	ctx->u.tc_class.kind_str = tc_qdisc_kind2str(class->class.kind);
-	ctx->u.tc_class.rate = class->class.u.htb.rate;
-	ctx->u.tc_class.ceil = class->class.u.htb.ceil;
 	ctx->u.tc_class.parent = class->class.parent;
-	ctx->u.tc_class.prio = class->class.u.htb.prio;
-	ctx->u.tc_class.quantum = class->class.u.htb.quantum;
-	ctx->u.tc_class.mtu = class->class.u.htb.mtu;
-	ctx->u.tc_class.rate_est = class->class.u.htb.rate_est;
+	ctx->u.tc_class.rate_est = class->class.rate_est;
+
+	switch (class->class.kind) {
+	case TC_QDISC_HFSC:
+		ctx->u.tc_class.rsc = class->class.u.hfsc.rsc;
+		ctx->u.tc_class.fsc = class->class.u.hfsc.fsc;
+		ctx->u.tc_class.usc = class->class.u.hfsc.usc;
+		break;
+	case TC_QDISC_HTB:
+		ctx->u.tc_class.rate = class->class.u.htb.rate;
+		ctx->u.tc_class.ceil = class->class.u.htb.ceil;
+		ctx->u.tc_class.prio = class->class.u.htb.prio;
+		ctx->u.tc_class.quantum = class->class.u.htb.quantum;
+		ctx->u.tc_class.mtu = class->class.u.htb.mtu;
+		break;
+	case TC_QDISC_UNSPEC:
+	case TC_QDISC_NOQUEUE:
+	case TC_QDISC_PFIFO:
+		break;
+	}
 
 	zns = zebra_ns_lookup(NS_DEFAULT);
 

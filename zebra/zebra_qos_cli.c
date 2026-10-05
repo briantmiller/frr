@@ -305,15 +305,25 @@ static void cli_show_class_map_any(struct vty *vty, const struct lyd_node *dnode
 
 DEFPY_YANG_NOSH (policy_map,
 		 policy_map_cmd,
-		 "policy-map QOS_PMAP_NAME$name",
+		 "policy-map QOS_PMAP_NAME$name [<hfsc|htb>$type]",
 		 POLICY_MAP_STR
-		 "Policy-map name\n")
+		 "Policy-map name\n"
+		 "HFSC policy-map: classes are configured with service curves\n"
+		 "HTB policy-map (default): classes are configured with rates\n")
 {
 	char xpath[XPATH_MAXLEN];
 	int ret;
 
 	snprintf(xpath, sizeof(xpath), QOS_POLICY_MAP_XPATH, name);
 	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+
+	/* without a type an existing policy-map keeps its type */
+	if (type) {
+		char txpath[XPATH_MAXLEN + 8];
+
+		snprintf(txpath, sizeof(txpath), "%s/type", xpath);
+		nb_cli_enqueue_change(vty, txpath, NB_OP_MODIFY, type);
+	}
 
 	ret = nb_cli_apply_changes(vty, NULL);
 	if (ret == CMD_SUCCESS)
@@ -324,10 +334,12 @@ DEFPY_YANG_NOSH (policy_map,
 
 DEFPY_YANG (no_policy_map,
 	    no_policy_map_cmd,
-	    "no policy-map QOS_PMAP_NAME$name",
+	    "no policy-map QOS_PMAP_NAME$name [<hfsc|htb>]",
 	    NO_STR
 	    POLICY_MAP_STR
-	    "Policy-map name\n")
+	    "Policy-map name\n"
+	    "HFSC policy-map\n"
+	    "HTB policy-map\n")
 {
 	char xpath[XPATH_MAXLEN];
 
@@ -498,9 +510,192 @@ DEFPY_YANG (policy_class_service_policy,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+/*
+ * Parse a delay such as "10ms", "500us", "1s" or "20" (milliseconds) into
+ * microseconds.
+ */
+static int qos_parse_delay(const char *str, uint32_t *usec)
+{
+	char *end;
+	double value, mult = 1000;
+
+	errno = 0;
+	value = strtod(str, &end);
+	if (end == str || errno || value <= 0)
+		return -1;
+
+	if (*end == '\0' || !strcasecmp(end, "ms") || !strcasecmp(end, "msec"))
+		mult = 1000;
+	else if (!strcasecmp(end, "us") || !strcasecmp(end, "usec"))
+		mult = 1;
+	else if (!strcasecmp(end, "s") || !strcasecmp(end, "sec"))
+		mult = 1000000;
+	else
+		return -1;
+
+	value *= mult;
+	if (value < 1 || value > UINT32_MAX)
+		return -1;
+
+	*usec = (uint32_t)(value + 0.5);
+	return 0;
+}
+
+static const char *qos_delay2str(uint32_t usec, char *buf, size_t len)
+{
+	if (usec % 1000000 == 0)
+		snprintf(buf, len, "%us", usec / 1000000);
+	else if (usec % 1000 == 0)
+		snprintf(buf, len, "%ums", usec / 1000);
+	else
+		snprintf(buf, len, "%uus", usec);
+
+	return buf;
+}
+
+/*
+ * Enqueue m1 or m2 of a service curve: a percentage or a rate.  The change
+ * keeps pointing at @value, which must stay valid until it is applied.
+ */
+static int qos_curve_rate_enqueue(struct vty *vty, const char *base, const char *which,
+				  const char *percent, const char *rate, char *value,
+				  size_t value_len)
+{
+	char xpath[XPATH_MAXLEN];
+	uint64_t bps;
+
+	if (percent) {
+		snprintf(xpath, sizeof(xpath), "%s/%s/percent", base, which);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, percent);
+		return CMD_SUCCESS;
+	}
+
+	if (qos_parse_rate(rate, &bps)) {
+		vty_out(vty, "%% Invalid rate: %s\n", rate);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	snprintf(value, value_len, "%" PRIu64, bps);
+	snprintf(xpath, sizeof(xpath), "%s/%s/bps", base, which);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, value);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY_YANG (policy_class_curve,
+	    policy_class_curve_cmd,
+	    "<rt|ls|sc|ul>$curve [m1 <percent (1-100)$m1_pct|RATE$m1_rate> d DELAY$delay] m2 <percent (1-100)$m2_pct|RATE$m2_rate>",
+	    "HFSC real-time service curve (guaranteed rate and delay)\n"
+	    "HFSC link-share service curve (share of the excess bandwidth)\n"
+	    "HFSC real-time and link-share service curve\n"
+	    "HFSC upper-limit service curve (maximum link-share rate)\n"
+	    "Rate of the first segment of the curve\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR
+	    "Length of the first segment\n"
+	    "Delay, optionally with a us, ms (default) or s suffix\n"
+	    "Rate of the second segment of the curve (long term rate)\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	char base[32], xpath[XPATH_MAXLEN], value[16], m1_value[32], m2_value[32];
+	uint32_t usec;
+	int ret;
+
+	snprintf(base, sizeof(base), "./%s", curve);
+
+	/* replace the whole curve: drop a previous first segment */
+	if (!delay) {
+		snprintf(xpath, sizeof(xpath), "%s/m1", base);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+		snprintf(xpath, sizeof(xpath), "%s/d", base);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+	}
+
+	nb_cli_enqueue_change(vty, base, NB_OP_CREATE, NULL);
+
+	if (delay) {
+		if (qos_parse_delay(delay, &usec)) {
+			vty_out(vty, "%% Invalid delay: %s\n", delay);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		snprintf(value, sizeof(value), "%u", usec);
+		snprintf(xpath, sizeof(xpath), "%s/d", base);
+		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, value);
+
+		ret = qos_curve_rate_enqueue(vty, base, "m1", m1_pct_str, m1_rate, m1_value,
+					     sizeof(m1_value));
+		if (ret != CMD_SUCCESS)
+			return ret;
+	}
+
+	ret = qos_curve_rate_enqueue(vty, base, "m2", m2_pct_str, m2_rate, m2_value,
+				     sizeof(m2_value));
+	if (ret != CMD_SUCCESS)
+		return ret;
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (no_policy_class_curve,
+	    no_policy_class_curve_cmd,
+	    "no <rt|ls|sc|ul>$curve [m1 <percent (1-100)|RATE> d DELAY] [m2 <percent (1-100)|RATE>]",
+	    NO_STR
+	    "HFSC real-time service curve\n"
+	    "HFSC link-share service curve\n"
+	    "HFSC real-time and link-share service curve\n"
+	    "HFSC upper-limit service curve\n"
+	    "Rate of the first segment of the curve\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR
+	    "Length of the first segment\n"
+	    "Delay\n"
+	    "Rate of the second segment of the curve\n"
+	    "Percentage of the interface QoS bandwidth\n"
+	    "Percentage\n"
+	    RATE_STR)
+{
+	char xpath[32];
+
+	snprintf(xpath, sizeof(xpath), "./%s", curve);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+/* "percent N" or "20mbps" for a rate-spec container */
+static const char *qos_rate_spec2str(const struct lyd_node *dnode, char *buf, size_t len)
+{
+	char rate[32];
+
+	if (yang_dnode_exists(dnode, "percent"))
+		snprintf(buf, len, "percent %u", yang_dnode_get_uint8(dnode, "percent"));
+	else
+		snprintf(buf, len, "%s",
+			 qos_rate2str(yang_dnode_get_uint64(dnode, "bps"), rate, sizeof(rate)));
+
+	return buf;
+}
+
+static void cli_show_policy_class_curve(struct vty *vty, const struct lyd_node *dnode,
+					bool show_defaults)
+{
+	char m1[32], m2[32], d[16];
+
+	vty_out(vty, "  %s", dnode->schema->name);
+	if (yang_dnode_exists(dnode, "d"))
+		vty_out(vty, " m1 %s d %s",
+			qos_rate_spec2str(yang_dnode_get(dnode, "m1"), m1, sizeof(m1)),
+			qos_delay2str(yang_dnode_get_uint32(dnode, "d"), d, sizeof(d)));
+	vty_out(vty, " m2 %s\n", qos_rate_spec2str(yang_dnode_get(dnode, "m2"), m2, sizeof(m2)));
+}
+
 static void cli_show_policy_map(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
 {
-	vty_out(vty, "policy-map %s\n", yang_dnode_get_string(dnode, "name"));
+	vty_out(vty, "policy-map %s%s\n", yang_dnode_get_string(dnode, "name"),
+		strcmp(yang_dnode_get_string(dnode, "type"), "hfsc") == 0 ? " hfsc" : "");
 }
 
 static void cli_show_policy_map_end(struct vty *vty, const struct lyd_node *dnode)
@@ -716,6 +911,22 @@ const struct frr_yang_module_info frr_qos_cli_info = {
 			.cbs.cli_show = cli_show_policy_class_priority,
 		},
 		{
+			.xpath = "/frr-qos:qos/policy-map/class/rt",
+			.cbs.cli_show = cli_show_policy_class_curve,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ls",
+			.cbs.cli_show = cli_show_policy_class_curve,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/sc",
+			.cbs.cli_show = cli_show_policy_class_curve,
+		},
+		{
+			.xpath = "/frr-qos:qos/policy-map/class/ul",
+			.cbs.cli_show = cli_show_policy_class_curve,
+		},
+		{
 			.xpath = "/frr-qos:qos/policy-map/class/queue-limit",
 			.cbs.cli_show = cli_show_policy_class_queue_limit,
 		},
@@ -766,6 +977,8 @@ void zebra_qos_cli_init(void)
 	install_element(POLICY_MAP_CLASS_NODE, &policy_class_max_bandwidth_cmd);
 	install_element(POLICY_MAP_CLASS_NODE, &no_policy_class_max_bandwidth_cmd);
 	install_element(POLICY_MAP_CLASS_NODE, &policy_class_priority_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &policy_class_curve_cmd);
+	install_element(POLICY_MAP_CLASS_NODE, &no_policy_class_curve_cmd);
 	install_element(POLICY_MAP_CLASS_NODE, &policy_class_queue_limit_cmd);
 	install_element(POLICY_MAP_CLASS_NODE, &policy_class_service_policy_cmd);
 

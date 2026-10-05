@@ -25,9 +25,15 @@ enum tc_qdisc_kind {
 	TC_QDISC_HTB,
 	TC_QDISC_NOQUEUE,
 	TC_QDISC_PFIFO,
+	TC_QDISC_HFSC,
 };
 
 struct tc_qdisc_htb {
+	/* minor number of the default class, 0 means "no default class" */
+	uint32_t defcls;
+};
+
+struct tc_qdisc_hfsc {
 	/* minor number of the default class, 0 means "no default class" */
 	uint32_t defcls;
 };
@@ -51,6 +57,7 @@ struct tc_qdisc {
 	union {
 		struct tc_qdisc_htb htb;
 		struct tc_qdisc_fifo fifo;
+		struct tc_qdisc_hfsc hfsc;
 	} u;
 };
 
@@ -67,8 +74,24 @@ struct tc_class_htb {
 	uint32_t quantum;
 	/* interface MTU used for burst calculation, 0 means 1500 */
 	uint32_t mtu;
-	/* ask the kernel to maintain a rate estimator for the class */
-	bool rate_est;
+};
+
+/*
+ * HFSC service curve: rate m1 for the first d microseconds of a backlog
+ * period, m2 afterwards.  Rates in bytes per second.  m2 == 0 means the
+ * curve is not set.
+ */
+struct tc_hfsc_curve {
+	uint64_t m1;
+	uint32_t d;
+	uint64_t m2;
+};
+
+struct tc_class_hfsc {
+	/* real-time, link-share (fair) and upper-limit curves */
+	struct tc_hfsc_curve rsc;
+	struct tc_hfsc_curve fsc;
+	struct tc_hfsc_curve usc;
 };
 
 struct tc_class {
@@ -78,9 +101,13 @@ struct tc_class {
 	/* minor number of the parent class, 0 means the root qdisc */
 	uint32_t parent;
 
+	/* ask the kernel to maintain a rate estimator for the class */
+	bool rate_est;
+
 	enum tc_qdisc_kind kind;
 	union {
 		struct tc_class_htb htb;
+		struct tc_class_hfsc hfsc;
 	} u;
 };
 

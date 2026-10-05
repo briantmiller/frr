@@ -98,7 +98,14 @@ DEFINE_MTYPE_STATIC(ZEBRA, QOS_HW, "QoS kernel state");
 /* filter priorities available per chain */
 #define QOS_MAX_FILTER_PRIO 0xfff0
 
-/* One HTB class as it is (to be) programmed */
+/* HFSC service curve as programmed, bits/sec and usec, m2 == 0: not set */
+struct qos_hw_curve {
+	uint64_t m1;
+	uint32_t d;
+	uint64_t m2;
+};
+
+/* One HTB or HFSC class as it is (to be) programmed */
 struct qos_hw_class {
 	uint32_t minor;
 	uint32_t parent;
@@ -109,6 +116,10 @@ struct qos_hw_class {
 	/* pfifo limit below the class, 0 when none */
 	uint32_t queue_limit;
 	bool leaf;
+	/* HFSC: real-time, link-share and upper-limit curves */
+	struct qos_hw_curve rt;
+	struct qos_hw_curve ls;
+	struct qos_hw_curve ul;
 	char name[2 * QOS_NAME_LEN + 1];
 	/* policy-map and class (class-map name or class-default) */
 	char pmap[QOS_NAME_LEN];
@@ -128,6 +139,8 @@ struct qos_hw_filter_info {
 /* Complete kernel state of one interface */
 struct qos_hw {
 	ifindex_t ifindex;
+	/* HFSC instead of HTB */
+	bool hfsc;
 	uint32_t mtu;
 	uint64_t bandwidth;
 	uint32_t defcls;
@@ -363,6 +376,8 @@ struct qos_build {
 	/* class and description recorded for the next filters */
 	uint32_t owner;
 	char origin[QOS_ORIGIN_LEN];
+	/* the policy cannot be installed, why */
+	char error[256];
 };
 
 /* Filter placement state for one policy level */
@@ -771,6 +786,58 @@ static bool qos_on_stack(const struct qos_build *b, const struct qos_policy_map 
 	return false;
 }
 
+/*
+ * Child policy-map of a class, NULL when there is none or it cannot be
+ * used.  Loops and too deep nesting are ignored (with a warning), a child
+ * of the other type (HTB vs HFSC) makes the whole policy uninstallable as
+ * an interface has a single queueing discipline.
+ */
+static const struct qos_policy_map *qos_child_policy(struct qos_build *b,
+						     const struct qos_policy_map *pmap,
+						     const struct qos_policy_class *pclass)
+{
+	const struct qos_policy_map *child;
+
+	if (!pclass->service_policy[0])
+		return NULL;
+
+	child = qos_policy_map_lookup(pclass->service_policy);
+	if (!child)
+		return NULL;
+
+	if (b->depth >= QOS_MAX_DEPTH || qos_on_stack(b, child)) {
+		zlog_warn("QoS policy-map %s class %s: ignoring service-policy %s (loop or nesting too deep)",
+			  pmap->name, pclass->name, child->name);
+		return NULL;
+	}
+
+	if (child->hfsc != b->hw->hfsc) {
+		if (!b->error[0])
+			snprintf(b->error, sizeof(b->error),
+				 "policy-map %s (%s) is used as child policy in %s (%s), types must match",
+				 child->name, child->hfsc ? "hfsc" : "htb", pmap->name,
+				 pmap->hfsc ? "hfsc" : "htb");
+		return NULL;
+	}
+
+	return child;
+}
+
+/* Configured curve to bits/sec; percentages refer to the interface bandwidth */
+static void qos_curve_resolve(const struct qos_curve *c, uint64_t if_bw, struct qos_hw_curve *out)
+{
+	memset(out, 0, sizeof(*out));
+
+	if (!c->set || c->m2.type == QOS_RATE_NONE)
+		return;
+
+	out->m2 = MAX(qos_rate_resolve(&c->m2, if_bw), 1);
+	if (c->d && c->m1.type != QOS_RATE_NONE) {
+		out->m1 = qos_rate_resolve(&c->m1, if_bw);
+		out->d = c->d;
+	}
+}
+
 static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pmap,
 			    uint32_t parent_minor, uint64_t parent_rate)
 {
@@ -786,15 +853,19 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 	struct qos_policy_class implicit_default = {};
 	const struct qos_policy_class *def = NULL, *pclass;
 	const struct qos_policy_class **pcs;
+	const struct qos_policy_map **children;
+	struct qos_hw_curve *rt = NULL, *ls = NULL, *ul = NULL;
 	uint64_t *rates;
 	uint64_t explicit = 0, share = 0;
-	unsigned int n = 0, unset = 0, i;
+	unsigned int n = 0, unset = 0, i, count;
 	struct listnode *node;
 
 	b->stack[b->depth++] = pmap;
 
-	pcs = XCALLOC(MTYPE_TMP, (listcount(pmap->classes) + 1) * sizeof(*pcs));
-	rates = XCALLOC(MTYPE_TMP, (listcount(pmap->classes) + 1) * sizeof(*rates));
+	count = listcount(pmap->classes) + 1;
+	pcs = XCALLOC(MTYPE_TMP, count * sizeof(*pcs));
+	rates = XCALLOC(MTYPE_TMP, count * sizeof(*rates));
+	children = XCALLOC(MTYPE_TMP, count * sizeof(*children));
 
 	/* configured order, class-default always last */
 	for (ALL_LIST_ELEMENTS_RO(pmap->classes, node, pclass)) {
@@ -811,33 +882,74 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 	}
 	pcs[n++] = def;
 
-	/* guaranteed rates; unconfigured classes share what is left */
-	for (i = 0; i < n; i++) {
-		rates[i] = qos_rate_resolve(&pcs[i]->bandwidth, parent_rate);
-		if (rates[i])
-			explicit += rates[i];
-		else
-			unset++;
+	for (i = 0; i < n; i++)
+		children[i] = qos_child_policy(b, pmap, pcs[i]);
+
+	if (!b->hw->hfsc) {
+		/* HTB: guaranteed rates; unconfigured classes share what is left */
+		for (i = 0; i < n; i++) {
+			rates[i] = qos_rate_resolve(&pcs[i]->bandwidth, parent_rate);
+			if (rates[i])
+				explicit += rates[i];
+			else
+				unset++;
+		}
+	} else {
+		/*
+		 * HFSC: rt and ls fall back to sc.  A class needs a link-share
+		 * curve when it has children, an upper limit or no real-time
+		 * curve; those without one get an equal share of what the
+		 * siblings leave of the parent's link-share rate.
+		 */
+		rt = XCALLOC(MTYPE_TMP, count * sizeof(*rt));
+		ls = XCALLOC(MTYPE_TMP, count * sizeof(*ls));
+		ul = XCALLOC(MTYPE_TMP, count * sizeof(*ul));
+
+		for (i = 0; i < n; i++) {
+			pclass = pcs[i];
+			qos_curve_resolve(pclass->rt.set ? &pclass->rt : &pclass->sc, b->if_bw,
+					  &rt[i]);
+			qos_curve_resolve(pclass->ls.set ? &pclass->ls : &pclass->sc, b->if_bw,
+					  &ls[i]);
+			qos_curve_resolve(&pclass->ul, b->if_bw, &ul[i]);
+
+			if (ls[i].m2)
+				explicit += ls[i].m2;
+			else if (!rt[i].m2 || children[i] || ul[i].m2)
+				unset++;
+		}
 	}
 
 	if (explicit > parent_rate)
-		zlog_warn("QoS policy-map %s: guaranteed bandwidth %" PRIu64
+		zlog_warn("QoS policy-map %s: %s bandwidth %" PRIu64
 			  " bps exceeds the available %" PRIu64 " bps",
-			  pmap->name, explicit, parent_rate);
+			  pmap->name, b->hw->hfsc ? "link-share" : "guaranteed", explicit,
+			  parent_rate);
 
 	if (unset && parent_rate > explicit)
 		share = (parent_rate - explicit) / unset;
 
+	if (b->hw->hfsc) {
+		for (i = 0; i < n; i++) {
+			if (!ls[i].m2 && (!rt[i].m2 || children[i] || ul[i].m2))
+				ls[i].m2 = MAX(share, QOS_MIN_RATE);
+			/* children share the parent's link-share rate */
+			rates[i] = ls[i].m2 ? ls[i].m2 : rt[i].m2;
+		}
+	}
+
 	for (i = 0; i < n; i++) {
 		struct qos_hw_class *hc;
-		const struct qos_policy_map *child = NULL;
+		const struct qos_policy_map *child = children[i];
 		uint32_t minor;
 
 		pclass = pcs[i];
 
-		if (!rates[i])
-			rates[i] = share;
-		rates[i] = MAX(rates[i], QOS_MIN_RATE);
+		if (!b->hw->hfsc) {
+			if (!rates[i])
+				rates[i] = share;
+			rates[i] = MAX(rates[i], QOS_MIN_RATE);
+		}
 
 		if (b->next_minor >= QOS_MAX_CLASSES) {
 			b->overflow = true;
@@ -845,29 +957,34 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 		}
 		minor = b->next_minor++;
 
-		if (pclass->service_policy[0]) {
-			child = qos_policy_map_lookup(pclass->service_policy);
-			if (child && (b->depth >= QOS_MAX_DEPTH || qos_on_stack(b, child))) {
-				zlog_warn("QoS policy-map %s class %s: ignoring service-policy %s (loop or nesting too deep)",
-					  pmap->name, pclass->name, child->name);
-				child = NULL;
-			}
-		}
-
 		hc = qos_hw_class_add(b->hw);
 		hc->minor = minor;
 		hc->parent = parent_minor;
-		hc->rate = rates[i];
-		hc->ceil = qos_rate_resolve(&pclass->max_bandwidth, b->if_bw);
-		if (!hc->ceil)
-			hc->ceil = b->if_bw;
-		hc->ceil = MAX(hc->ceil, hc->rate);
-		hc->prio = pclass->priority >= 0 ? (uint32_t)pclass->priority : QOS_DEFAULT_PRIO;
 		hc->leaf = !child;
 		hc->queue_limit = child ? 0 : pclass->queue_limit;
 		snprintf(hc->name, sizeof(hc->name), "%s/%s", pmap->name, pclass->name);
 		strlcpy(hc->pmap, pmap->name, sizeof(hc->pmap));
 		strlcpy(hc->cmap, pclass->name, sizeof(hc->cmap));
+
+		if (!b->hw->hfsc) {
+			hc->rate = rates[i];
+			hc->ceil = qos_rate_resolve(&pclass->max_bandwidth, b->if_bw);
+			if (!hc->ceil)
+				hc->ceil = b->if_bw;
+			hc->ceil = MAX(hc->ceil, hc->rate);
+			hc->prio = pclass->priority >= 0 ? (uint32_t)pclass->priority
+							 : QOS_DEFAULT_PRIO;
+		} else {
+			hc->rt = rt[i];
+			hc->ls = ls[i];
+			hc->ul = ul[i];
+			/*
+			 * For "show": the guaranteed rate (real-time, else
+			 * link-share) and the most the class can get.
+			 */
+			hc->rate = rt[i].m2 ? rt[i].m2 : ls[i].m2;
+			hc->ceil = ul[i].m2 ? ul[i].m2 : b->if_bw;
+		}
 
 		/* hc may move when the child level adds classes */
 		if (child)
@@ -881,7 +998,6 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 
 			snprintf(b->origin, sizeof(b->origin), "class-default: everything else");
 			f = qos_filter_new(b, &lvl, ETH_P_ALL);
-
 			qos_filter_classify(f, minor);
 			if (lvl.parent == 0)
 				b->hw->defcls = minor;
@@ -890,6 +1006,10 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 		}
 	}
 
+	XFREE(MTYPE_TMP, rt);
+	XFREE(MTYPE_TMP, ls);
+	XFREE(MTYPE_TMP, ul);
+	XFREE(MTYPE_TMP, children);
 	XFREE(MTYPE_TMP, rates);
 	XFREE(MTYPE_TMP, pcs);
 
@@ -911,48 +1031,51 @@ static uint64_t qos_if_bandwidth(const struct interface *ifp, const struct zebra
 	return 0;
 }
 
-static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *qos,
-				   const char **reason)
+static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *qos, char *reason,
+				   size_t reason_len)
 {
 	const struct qos_policy_map *pmap;
 	struct qos_build b = {};
 	struct qos_hw_class *root;
 	uint64_t bw;
 
-	*reason = NULL;
+	reason[0] = '\0';
 
 	if (!qos->service_policy[0])
 		return NULL;
 
 	if (!qos_g.startup_done) {
-		*reason = "waiting for zebra startup to complete";
+		strlcpy(reason, "waiting for zebra startup to complete", reason_len);
 		return NULL;
 	}
 
 	if (ifp->ifindex == IFINDEX_INTERNAL) {
-		*reason = "interface does not exist";
+		strlcpy(reason, "interface does not exist", reason_len);
 		return NULL;
 	}
 
 	pmap = qos_policy_map_lookup(qos->service_policy);
 	if (!pmap) {
-		*reason = "policy-map is not configured";
+		strlcpy(reason, "policy-map is not configured", reason_len);
 		return NULL;
 	}
 
 	bw = qos_if_bandwidth(ifp, qos);
 	if (!bw) {
-		*reason = "interface bandwidth unknown, configure \"qos bandwidth\"";
+		strlcpy(reason, "interface bandwidth unknown, configure \"qos bandwidth\"",
+			reason_len);
 		return NULL;
 	}
 
 	b.hw = XCALLOC(MTYPE_QOS_HW, sizeof(*b.hw));
 	b.hw->ifindex = ifp->ifindex;
+	b.hw->hfsc = pmap->hfsc;
 	b.hw->mtu = ifp->mtu;
 	b.hw->bandwidth = bw;
 	b.if_bw = bw;
 	b.next_minor = QOS_FIRST_MINOR;
 
+	/* root class: the whole interface QoS bandwidth, never more */
 	root = qos_hw_class_add(b.hw);
 	root->minor = QOS_ROOT_MINOR;
 	root->parent = 0;
@@ -960,13 +1083,23 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 	root->ceil = bw;
 	root->prio = 0;
 	root->leaf = false;
+	if (b.hw->hfsc) {
+		root->ls.m2 = bw;
+		root->ul.m2 = bw;
+	}
 	snprintf(root->name, sizeof(root->name), "%s", pmap->name);
 	strlcpy(root->pmap, pmap->name, sizeof(root->pmap));
 
 	qos_build_level(&b, pmap, QOS_ROOT_MINOR, bw);
 
+	if (b.error[0]) {
+		strlcpy(reason, b.error, reason_len);
+		qos_hw_free(&b.hw);
+		return NULL;
+	}
+
 	if (b.overflow) {
-		*reason = "policy is too large (classes or filters)";
+		strlcpy(reason, "policy is too large (classes or filters)", reason_len);
 		qos_hw_free(&b.hw);
 		return NULL;
 	}
@@ -999,14 +1132,31 @@ static void qos_tc_class_fill(struct zebra_tc_class *zc, const struct qos_hw *hw
 	zc->class.ifindex = hw->ifindex;
 	zc->class.handle = hc->minor;
 	zc->class.parent = hc->parent;
+	/* lets "show qos interface" report the current rate per class */
+	zc->class.rate_est = true;
+
+	/* the kernel wants bytes per second */
+	if (hw->hfsc) {
+		const struct qos_hw_curve *src[] = { &hc->rt, &hc->ls, &hc->ul };
+		struct tc_hfsc_curve *dst[] = { &zc->class.u.hfsc.rsc, &zc->class.u.hfsc.fsc,
+						&zc->class.u.hfsc.usc };
+
+		zc->class.kind = TC_QDISC_HFSC;
+		for (size_t i = 0; i < array_size(src); i++) {
+			if (!src[i]->m2)
+				continue;
+			dst[i]->m1 = src[i]->m1 / 8;
+			dst[i]->d = src[i]->d;
+			dst[i]->m2 = MAX(src[i]->m2 / 8, 1);
+		}
+		return;
+	}
+
 	zc->class.kind = TC_QDISC_HTB;
-	/* HTB wants bytes per second */
 	zc->class.u.htb.rate = hc->rate / 8;
 	zc->class.u.htb.ceil = hc->ceil / 8;
 	zc->class.u.htb.prio = hc->prio;
 	zc->class.u.htb.mtu = hw->mtu;
-	/* lets "show qos interface" report the current rate per class */
-	zc->class.u.htb.rate_est = true;
 }
 
 static void qos_hw_install(const struct qos_hw *hw)
@@ -1019,8 +1169,13 @@ static void qos_hw_install(const struct qos_hw *hw)
 			   hw->nclasses, hw->nfilters);
 
 	qdisc.qdisc.ifindex = hw->ifindex;
-	qdisc.qdisc.kind = TC_QDISC_HTB;
-	qdisc.qdisc.u.htb.defcls = hw->defcls;
+	if (hw->hfsc) {
+		qdisc.qdisc.kind = TC_QDISC_HFSC;
+		qdisc.qdisc.u.hfsc.defcls = hw->defcls;
+	} else {
+		qdisc.qdisc.kind = TC_QDISC_HTB;
+		qdisc.qdisc.u.htb.defcls = hw->defcls;
+	}
 	(void)dplane_tc_qdisc_install(&qdisc);
 
 	/* parents always precede their children */
@@ -1054,13 +1209,23 @@ static void qos_hw_install(const struct qos_hw *hw)
 	}
 }
 
-/* Same classes, queues and filters; only rates/ceilings/priorities may differ */
+static bool qos_hw_curve_equal(const struct qos_hw_curve *a, const struct qos_hw_curve *b)
+{
+	return a->m1 == b->m1 && a->d == b->d && a->m2 == b->m2;
+}
+
+/*
+ * Same classes, queues and filters; only rates/ceilings/priorities (HTB)
+ * or curve values (HFSC) may differ.  The kernel cannot remove an HFSC
+ * curve from an existing class, so which curves a class has is part of
+ * the shape.
+ */
 static bool qos_hw_same_shape(const struct qos_hw *a, const struct qos_hw *b)
 {
 	unsigned int i;
 
-	if (a->ifindex != b->ifindex || a->defcls != b->defcls || a->nclasses != b->nclasses ||
-	    a->nfilters != b->nfilters)
+	if (a->ifindex != b->ifindex || a->hfsc != b->hfsc || a->defcls != b->defcls ||
+	    a->nclasses != b->nclasses || a->nfilters != b->nfilters)
 		return false;
 
 	for (i = 0; i < a->nclasses; i++) {
@@ -1068,6 +1233,10 @@ static bool qos_hw_same_shape(const struct qos_hw *a, const struct qos_hw *b)
 
 		if (ca->minor != cb->minor || ca->parent != cb->parent || ca->leaf != cb->leaf ||
 		    ca->queue_limit != cb->queue_limit)
+			return false;
+
+		if (!!ca->rt.m2 != !!cb->rt.m2 || !!ca->ls.m2 != !!cb->ls.m2 ||
+		    !!ca->ul.m2 != !!cb->ul.m2)
 			return false;
 	}
 
@@ -1086,7 +1255,8 @@ static void qos_hw_update_rates(const struct qos_hw *old, const struct qos_hw *n
 		struct zebra_tc_class zc;
 
 		if (co->rate == cn->rate && co->ceil == cn->ceil && co->prio == cn->prio &&
-		    old->mtu == new->mtu)
+		    old->mtu == new->mtu &&qos_hw_curve_equal(&co->rt, &cn->rt) &&
+		    qos_hw_curve_equal(&co->ls, &cn->ls) && qos_hw_curve_equal(&co->ul, &cn->ul))
 			continue;
 
 		qos_tc_class_fill(&zc, new, cn);
@@ -1104,7 +1274,6 @@ static void qos_if_apply(struct interface *ifp)
 	struct zebra_if *zif = ifp->info;
 	struct zebra_if_qos *qos;
 	struct qos_hw *hw, *old;
-	const char *reason;
 
 	if (!zif || !zif->qos)
 		return;
@@ -1112,14 +1281,14 @@ static void qos_if_apply(struct interface *ifp)
 	qos = zif->qos;
 	old = qos->installed;
 
-	hw = qos_hw_build(ifp, qos, &reason);
-	qos->reason = reason;
+	hw = qos_hw_build(ifp, qos, qos->reason, sizeof(qos->reason));
 
 	if (!hw) {
 		if (old) {
 			if (IS_ZEBRA_DEBUG_TC)
 				zlog_debug("%s: %s: removing service-policy (%s)", __func__,
-					   ifp->name, reason ? reason : "unconfigured");
+					   ifp->name,
+					   qos->reason[0] ? qos->reason : "unconfigured");
 			if (old->ifindex == ifp->ifindex)
 				qos_hw_uninstall(old->ifindex);
 			qos_hw_free(&qos->installed);
@@ -1272,6 +1441,41 @@ static unsigned int qos_percent(uint64_t part, uint64_t whole)
 	return whole ? (unsigned int)((part * 100 + whole / 2) / whole) : 0;
 }
 
+/* "1.00Mbps" or "2.00Mbps/10ms/1.00Mbps", "-" when the curve is not set */
+static const char *qos_curve2str(const struct qos_hw_curve *c, char *buf, size_t len)
+{
+	char m1[32], m2[32];
+
+	if (!c->m2) {
+		snprintf(buf, len, "-");
+	} else if (c->d) {
+		qos_measured2str(c->m1, m1, sizeof(m1));
+		qos_measured2str(c->m2, m2, sizeof(m2));
+		if (c->d % 1000 == 0)
+			snprintf(buf, len, "%s/%ums/%s", m1, c->d / 1000, m2);
+		else
+			snprintf(buf, len, "%s/%uus/%s", m1, c->d, m2);
+	} else {
+		qos_measured2str(c->m2, buf, len);
+	}
+
+	return buf;
+}
+
+static void qos_curve_json(json_object *jc, const char *name, const struct qos_hw_curve *c)
+{
+	json_object *jcurve;
+
+	if (!c->m2)
+		return;
+
+	jcurve = json_object_new_object();
+	json_object_object_add(jc, name, jcurve);
+	json_object_int_add(jcurve, "m1", c->m1);
+	json_object_int_add(jcurve, "d", c->d);
+	json_object_int_add(jcurve, "m2", c->m2);
+}
+
 static void qos_show_interface(struct vty *vty, struct interface *ifp, json_object *json)
 {
 	struct zebra_if *zif = ifp->info;
@@ -1282,7 +1486,7 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 	char buf1[32], buf2[32], buf3[32], parent[16], defcls[16];
 	bool have_stats = false;
 	uint64_t bw;
-	unsigned int i;
+	unsigned int i, in_kernel = 0;
 
 	if (!qos || (!qos->service_policy[0] && !qos->bandwidth))
 		return;
@@ -1296,6 +1500,8 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		ss.valid = XCALLOC(MTYPE_TMP, hw->nclasses * sizeof(*ss.valid));
 		have_stats = kernel_tc_class_stats(hw->ifindex, qos_show_stats_cb, &ss) == 0;
 		snprintf(defcls, sizeof(defcls), "%x:%x", TC_QDISC_MAJOR_ZEBRA >> 16, hw->defcls);
+		for (i = 0; i < hw->nclasses; i++)
+			in_kernel += ss.valid[i];
 	}
 
 	if (json) {
@@ -1307,13 +1513,16 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 			json_object_string_add(json_if, "servicePolicyOutput", qos->service_policy);
 		json_object_boolean_add(json_if, "installed", !!hw);
 		if (!hw) {
-			if (qos->reason)
+			if (qos->reason[0])
 				json_object_string_add(json_if, "reason", qos->reason);
 			return;
 		}
+		json_object_string_add(json_if, "qdisc", hw->hfsc ? "hfsc" : "htb");
 		json_object_int_add(json_if, "filters", hw->nfilters);
 		json_object_string_add(json_if, "defaultClass", defcls);
 		json_object_boolean_add(json_if, "statistics", have_stats);
+		if (have_stats)
+			json_object_int_add(json_if, "classesInKernel", in_kernel);
 		json_classes = json_object_new_array();
 		json_object_object_add(json_if, "classes", json_classes);
 	} else {
@@ -1326,16 +1535,25 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		if (!hw) {
 			if (qos->service_policy[0])
 				vty_out(vty, "  State: not installed%s%s%s\n",
-					qos->reason ? " (" : "", qos->reason ? qos->reason : "",
-					qos->reason ? ")" : "");
+					qos->reason[0] ? " (" : "", qos->reason,
+					qos->reason[0] ? ")" : "");
 			vty_out(vty, "\n");
 			return;
 		}
 
-		vty_out(vty, "  State: installed, %u classes, %u filters, default class %s\n",
-			hw->nclasses, hw->nfilters, defcls);
-		vty_out(vty, "  %-10s %-10s %-12s %-12s %-4s %-7s %s\n", "Class", "Parent", "Rate",
-			"Ceil", "Prio", "Queue", "Name");
+		vty_out(vty, "  State: installed (%s), %u classes, %u filters, default class %s\n",
+			hw->hfsc ? "hfsc" : "htb", hw->nclasses, hw->nfilters, defcls);
+		if (have_stats && in_kernel < hw->nclasses)
+			vty_out(vty,
+				"  Warning: only %u of %u classes are in the kernel, the installation failed\n"
+				"  (does the kernel support %s? see the zebra log)\n",
+				in_kernel, hw->nclasses, hw->hfsc ? "sch_hfsc" : "sch_htb");
+		if (hw->hfsc)
+			vty_out(vty, "  %-10s %-10s %-26s %-26s %-26s %-7s %s\n", "Class", "Parent",
+				"RT (m1/d/m2)", "LS (m1/d/m2)", "UL (m1/d/m2)", "Queue", "Name");
+		else
+			vty_out(vty, "  %-10s %-10s %-12s %-12s %-4s %-7s %s\n", "Class", "Parent",
+				"Rate", "Ceil", "Prio", "Queue", "Name");
 	}
 
 	for (i = 0; i < hw->nclasses; i++) {
@@ -1359,7 +1577,13 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 			json_object_boolean_add(jc, "leaf", hc->leaf);
 			json_object_int_add(jc, "rate", hc->rate);
 			json_object_int_add(jc, "ceil", hc->ceil);
-			json_object_int_add(jc, "priority", hc->prio);
+			if (hw->hfsc) {
+				qos_curve_json(jc, "rt", &hc->rt);
+				qos_curve_json(jc, "ls", &hc->ls);
+				qos_curve_json(jc, "ul", &hc->ul);
+			} else {
+				json_object_int_add(jc, "priority", hc->prio);
+			}
 			if (hc->queue_limit)
 				json_object_int_add(jc, "queueLimit", hc->queue_limit);
 
@@ -1391,6 +1615,17 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 			snprintf(queue, sizeof(queue), "%u", hc->queue_limit);
 		else
 			snprintf(queue, sizeof(queue), "-");
+
+		if (hw->hfsc) {
+			char rt[96], ls[96], ul[96];
+
+			vty_out(vty, "  %-10s %-10s %-26s %-26s %-26s %-7s %s%s\n", classid,
+				parent, qos_curve2str(&hc->rt, rt, sizeof(rt)),
+				qos_curve2str(&hc->ls, ls, sizeof(ls)),
+				qos_curve2str(&hc->ul, ul, sizeof(ul)), queue, hc->name,
+				hc->leaf ? "" : " (parent)");
+			continue;
+		}
 
 		vty_out(vty, "  %-10s %-10s %-12s %-12s %-4u %-7s %s%s\n", classid, parent,
 			qos_bps2str(hc->rate, buf1, sizeof(buf1)),
@@ -1636,7 +1871,7 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 	if (!hw) {
 		const char *reason = !qos || !qos->service_policy[0]
 					     ? "no service-policy"
-					     : (qos->reason ? qos->reason : "not installed");
+					     : (qos->reason[0] ? qos->reason : "not installed");
 
 		if (json_if)
 			json_object_string_add(json_if, "reason", reason);
@@ -1730,8 +1965,9 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 			json_object_object_add(jc, "filters", jfilters);
 		} else {
 			vty_out(vty, "\n  Class-map %s (%s)\n", hc->cmap, mtype);
-			vty_out(vty, "    Policy-map %s, HTB class %s, parent %s%s\n", hc->pmap,
-				classid, parent, hc->leaf ? "" : ", has a child policy");
+			vty_out(vty, "    Policy-map %s, %s class %s, parent %s%s\n", hc->pmap,
+				hw->hfsc ? "HFSC" : "HTB", classid, parent,
+				hc->leaf ? "" : ", has a child policy");
 			if (cs.valid[i]) {
 				const struct zebra_tc_class_stats *st = &cs.stats[i];
 

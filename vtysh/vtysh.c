@@ -2132,9 +2132,11 @@ DEFUNSH(VTYSH_MGMTD, vtysh_class_map, vtysh_class_map_cmd,
 }
 
 DEFUNSH(VTYSH_MGMTD, vtysh_policy_map, vtysh_policy_map_cmd,
-	"policy-map QOS_PMAP_NAME",
+	"policy-map QOS_PMAP_NAME [<hfsc|htb>]",
 	"Configure a QoS policy-map\n"
-	"Policy-map name\n")
+	"Policy-map name\n"
+	"HFSC policy-map: classes are configured with service curves\n"
+	"HTB policy-map (default): classes are configured with rates\n")
 {
 	vty->node = POLICY_MAP_NODE;
 	return CMD_SUCCESS;
