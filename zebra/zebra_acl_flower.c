@@ -587,7 +587,8 @@ static void desc_port(char *buf, size_t len, const char *kw, const struct aclx_r
 {
 	size_t n = strlen(buf);
 
-	if (op->op == ACLX_OP_NONE || op->op == ACLX_OP_EQ || !pm->set)
+	/* eq and range are expressed as written, only the others expand */
+	if (op->op == ACLX_OP_NONE || op->op == ACLX_OP_EQ || op->op == ACLX_OP_RANGE || !pm->set)
 		return;
 	if (pm->range)
 		snprintf(buf + n, len - n, "%s%s %u-%u", n ? " " : "", kw, pm->lo, pm->hi);

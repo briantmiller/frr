@@ -111,6 +111,10 @@ struct zebra_tc_filter_stats {
 	bool stats_valid;
 	uint64_t bytes;
 	uint64_t packets;
+
+	/* the first action is a gact, with this verdict (e.g. goto chain N) */
+	bool gact_valid;
+	int32_t gact_action;
 };
 
 /*
@@ -121,6 +125,13 @@ struct zebra_tc_filter_stats {
 extern int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
 				  void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg),
 				  void *arg);
+
+/*
+ * Synchronously look up the kind (e.g. "clsact", "ingress") of the qdisc
+ * with handle @handle on @ifindex.  Returns 0 and fills @kind when found,
+ * -1 when there is none or on failure.
+ */
+extern int kernel_tc_qdisc_kind(ifindex_t ifindex, uint32_t handle, char *kind, size_t len);
 
 /*
  * Master-pthread handler for kernel-originated TC qdisc notifications

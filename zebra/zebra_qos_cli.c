@@ -1125,6 +1125,48 @@ DEFPY_YANG (interface_service_policy,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (interface_ip_access_group,
+	    interface_ip_access_group_cmd,
+	    "ip access-group QOS_ACLX_NAME$name <in|out>$dir",
+	    IP_STR
+	    "Apply an extended access-list to the interface\n"
+	    "Access-list name\n"
+	    "Filter traffic received on the interface\n"
+	    "Filter traffic sent on the interface\n")
+{
+	char xpath[64];
+
+	snprintf(xpath, sizeof(xpath), "./frr-qos:access-group/%s", dir);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, name);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (no_interface_ip_access_group,
+	    no_interface_ip_access_group_cmd,
+	    "no ip access-group [QOS_ACLX_NAME$name] <in|out>$dir",
+	    NO_STR
+	    IP_STR
+	    "Apply an extended access-list to the interface\n"
+	    "Access-list name\n"
+	    "Filter traffic received on the interface\n"
+	    "Filter traffic sent on the interface\n")
+{
+	char xpath[64];
+
+	snprintf(xpath, sizeof(xpath), "./frr-qos:access-group/%s", dir);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_interface_access_group(struct vty *vty, const struct lyd_node *dnode,
+					    bool show_defaults)
+{
+	vty_out(vty, " ip access-group %s %s\n", yang_dnode_get_string(dnode, NULL),
+		dnode->schema->name);
+}
+
 static void cli_show_interface_qos_bandwidth(struct vty *vty, const struct lyd_node *dnode,
 					     bool show_defaults)
 {
@@ -1282,6 +1324,14 @@ const struct frr_yang_module_info frr_qos_cli_info = {
 			.cbs.cli_show = cli_show_interface_qos_bandwidth,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:access-group/in",
+			.cbs.cli_show = cli_show_interface_access_group,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:access-group/out",
+			.cbs.cli_show = cli_show_interface_access_group,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-qos:qos/service-policy-output",
 			.cbs.cli_show = cli_show_interface_service_policy,
 		},
@@ -1338,4 +1388,6 @@ void zebra_qos_cli_init(void)
 	install_element(INTERFACE_NODE, &interface_qos_bandwidth_cmd);
 	install_element(INTERFACE_NODE, &no_interface_qos_bandwidth_cmd);
 	install_element(INTERFACE_NODE, &interface_service_policy_cmd);
+	install_element(INTERFACE_NODE, &interface_ip_access_group_cmd);
+	install_element(INTERFACE_NODE, &no_interface_ip_access_group_cmd);
 }

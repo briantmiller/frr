@@ -54,6 +54,7 @@
 #include "zebra/zebra_script.h"
 #include "zebra/zebra_tc.h"
 #include "zebra/zebra_link_cfg_if.h"
+#include "zebra/zebra_acl_group.h"
 
 DEFINE_MGROUP(ZEBRA, "zebra");
 
@@ -5365,6 +5366,8 @@ static void rib_process_dplane_results(struct event *event)
 			case DPLANE_OP_TC_CLASS_DELETE:
 			case DPLANE_OP_TC_CLASS_UPDATE:
 			case DPLANE_OP_TC_FILTER_ADD:
+				zebra_acl_group_dplane_result(ctx);
+				break;
 			case DPLANE_OP_TC_FILTER_DELETE:
 			case DPLANE_OP_TC_FILTER_UPDATE:
 				break;

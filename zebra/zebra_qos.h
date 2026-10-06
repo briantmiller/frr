@@ -44,6 +44,7 @@ struct qos_curve {
 };
 
 struct aclx_rule;
+struct aclg_state;
 
 #define QOS_ACL_NAME_LEN 129
 
@@ -138,6 +139,11 @@ struct zebra_if_qos {
 
 	/* Why the policy is not installed, for show output, empty if it is */
 	char reason[320];
+
+	/* "ip access-group NAME in|out", indexed by enum aclg_dir */
+	char access_group[2][QOS_ACL_NAME_LEN];
+	/* kernel state of the access-groups, see zebra_acl_group.c */
+	struct aclg_state *acl_state[2];
 };
 
 /* Northbound */
@@ -145,6 +151,9 @@ extern const struct frr_yang_module_info frr_qos_info;
 
 /* Configuration helpers used by the northbound callbacks */
 extern struct qos_acl_ext *zebra_qos_acl_ext_get(const char *name);
+extern struct qos_acl_ext *zebra_qos_acl_ext_lookup(const char *name);
+/* the initial kernel state has been read, filters can be programmed */
+extern bool zebra_qos_started(void);
 extern void zebra_qos_acl_ext_del(struct qos_acl_ext *acl);
 extern struct qos_acl_ext_entry *zebra_qos_acl_ext_entry_add(struct qos_acl_ext *acl, uint32_t seq);
 extern void zebra_qos_acl_ext_entry_del(struct qos_acl_ext_entry *entry);

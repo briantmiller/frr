@@ -30,6 +30,11 @@ int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
 	return -1;
 }
 
+int kernel_tc_qdisc_kind(ifindex_t ifindex, uint32_t handle, char *kind, size_t len)
+{
+	return -1;
+}
+
 int kernel_tc_class_stats(ifindex_t ifindex,
 			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
 			  void *arg)

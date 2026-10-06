@@ -114,6 +114,7 @@ zebra_zebra_SOURCES = \
 	zebra/zebra_qos_nb.c \
 	zebra/zebra_acl_ext.c \
 	zebra/zebra_acl_flower.c \
+	zebra/zebra_acl_group.c \
 	zebra/zebra_trace.c \
 	zebra/zebra_vrf.c \
 	zebra/zebra_vty.c \
@@ -140,6 +141,7 @@ clippy_scan += \
 	zebra/zebra_cli.c \
 	zebra/zebra_qos.c \
 	zebra/zebra_qos_cli.c \
+	zebra/zebra_acl_group.c \
 	# end
 
 nobase_pkginclude_HEADERS += \
@@ -201,6 +203,7 @@ nobase_pkginclude_HEADERS += \
 	zebra/zebra_qos.h \
 	zebra/zebra_acl_ext.h \
 	zebra/zebra_acl_flower.h \
+	zebra/zebra_acl_group.h \
 	zebra/zebra_trace.h \
 	zebra/zebra_vrf.h \
 	zebra/zebra_vxlan.h \
