@@ -58,6 +58,8 @@
 #include "zebra/zebra_qos.h"
 #include "zebra/zebra_router.h"
 #include "zebra/zebra_tc.h"
+#include "zebra/zebra_acl_ext.h"
+#include "zebra/zebra_acl_flower.h"
 
 #include "zebra/zebra_qos_clippy.c"
 
@@ -80,6 +82,9 @@ DEFINE_MTYPE_STATIC(ZEBRA, QOS_POLICY_CLASS, "QoS policy-map class");
 DEFINE_MTYPE_STATIC(ZEBRA, QOS_ACL_NAME, "QoS access-group name");
 DEFINE_MTYPE_STATIC(ZEBRA, QOS_IF, "QoS interface");
 DEFINE_MTYPE_STATIC(ZEBRA, QOS_HW, "QoS kernel state");
+DEFINE_MTYPE_STATIC(ZEBRA, QOS_ACL_EXT, "QoS extended access-list");
+DEFINE_MTYPE_STATIC(ZEBRA, QOS_ACL_EXT_ENTRY, "QoS extended access-list entry");
+DEFINE_MTYPE_STATIC(ZEBRA, QOS_ACL_EXT_RULE, "QoS extended access-list rule");
 
 /* minor number of the HTB root class */
 #define QOS_ROOT_MINOR 1
@@ -126,7 +131,8 @@ struct qos_hw_class {
 	char cmap[QOS_NAME_LEN];
 };
 
-#define QOS_ORIGIN_LEN 96
+#define QOS_ORIGIN_LEN 192
+#define QOS_MATCH_LEN  ACLX_TEXT_MAX
 
 /* Bookkeeping kept next to each tc filter, for "show class-map interface" */
 struct qos_hw_filter_info {
@@ -134,6 +140,8 @@ struct qos_hw_filter_info {
 	uint32_t owner;
 	/* what produced it, e.g. "access-list VOICE seq 5 deny" */
 	char origin[QOS_ORIGIN_LEN];
+	/* description of the match keys, when not derived from the filter */
+	char match[QOS_MATCH_LEN];
 };
 
 /* Complete kernel state of one interface */
@@ -161,6 +169,8 @@ static struct {
 	struct list *class_maps;
 	/* struct qos_policy_map */
 	struct list *policy_maps;
+	/* struct qos_acl_ext */
+	struct list *acl_exts;
 
 	struct event *t_apply;
 
@@ -184,6 +194,105 @@ static struct qos_class_map *qos_class_map_lookup(const char *name)
 			return cmap;
 
 	return NULL;
+}
+
+/* ip access-list extended NAME */
+static struct qos_acl_ext *qos_acl_ext_lookup(const char *name)
+{
+	struct qos_acl_ext *acl;
+	struct listnode *node;
+
+	for (ALL_LIST_ELEMENTS_RO(qos_g.acl_exts, node, acl))
+		if (strcmp(acl->name, name) == 0)
+			return acl;
+
+	return NULL;
+}
+
+struct qos_acl_ext *zebra_qos_acl_ext_get(const char *name)
+{
+	struct qos_acl_ext *acl;
+
+	acl = qos_acl_ext_lookup(name);
+	if (acl)
+		return acl;
+
+	acl = XCALLOC(MTYPE_QOS_ACL_EXT, sizeof(*acl));
+	strlcpy(acl->name, name, sizeof(acl->name));
+	acl->entries = list_new();
+	listnode_add(qos_g.acl_exts, acl);
+
+	return acl;
+}
+
+void zebra_qos_acl_ext_del(struct qos_acl_ext *acl)
+{
+	struct qos_acl_ext_entry *entry;
+
+	while ((entry = listnode_head(acl->entries)))
+		zebra_qos_acl_ext_entry_del(entry);
+	list_delete(&acl->entries);
+	listnode_delete(qos_g.acl_exts, acl);
+	XFREE(MTYPE_QOS_ACL_EXT, acl);
+}
+
+struct qos_acl_ext_entry *zebra_qos_acl_ext_entry_add(struct qos_acl_ext *acl, uint32_t seq)
+{
+	struct qos_acl_ext_entry *entry, *cur;
+	struct listnode *node;
+
+	entry = XCALLOC(MTYPE_QOS_ACL_EXT_ENTRY, sizeof(*entry));
+	entry->acl = acl;
+	entry->seq = seq;
+
+	/* keep the entries in sequence order */
+	for (ALL_LIST_ELEMENTS_RO(acl->entries, node, cur)) {
+		if (cur->seq > seq) {
+			listnode_add_before(acl->entries, node, entry);
+			return entry;
+		}
+	}
+	listnode_add(acl->entries, entry);
+
+	return entry;
+}
+
+void zebra_qos_acl_ext_entry_unset_match(struct qos_acl_ext_entry *entry)
+{
+	XFREE(MTYPE_QOS_ACL_EXT_RULE, entry->match);
+	XFREE(MTYPE_QOS_ACL_EXT_RULE, entry->rule);
+}
+
+void zebra_qos_acl_ext_entry_del(struct qos_acl_ext_entry *entry)
+{
+	zebra_qos_acl_ext_entry_unset_match(entry);
+	listnode_delete(entry->acl->entries, entry);
+	XFREE(MTYPE_QOS_ACL_EXT_ENTRY, entry);
+}
+
+int zebra_qos_acl_ext_entry_set_match(struct qos_acl_ext_entry *entry, const char *text, char *err,
+				      size_t errlen)
+{
+	struct aclx_rule *rule = XCALLOC(MTYPE_QOS_ACL_EXT_RULE, sizeof(*rule));
+	char buf[ACLX_TEXT_MAX];
+	const char *canon;
+
+	if (aclx_rule_parse(text, rule, err, errlen) < 0) {
+		XFREE(MTYPE_QOS_ACL_EXT_RULE, rule);
+		return -1;
+	}
+	canon = aclx_rule_print(rule, buf, sizeof(buf));
+	if (!canon) {
+		snprintf(err, errlen, "entry too long in canonical form");
+		XFREE(MTYPE_QOS_ACL_EXT_RULE, rule);
+		return -1;
+	}
+
+	zebra_qos_acl_ext_entry_unset_match(entry);
+	entry->rule = rule;
+	entry->match = XSTRDUP(MTYPE_QOS_ACL_EXT_RULE, canon);
+
+	return 0;
 }
 
 static void qos_acl_name_free(void *arg)
@@ -377,7 +486,7 @@ struct qos_build {
 	uint32_t owner;
 	char origin[QOS_ORIGIN_LEN];
 	/* the policy cannot be installed, why */
-	char error[256];
+	char error[320];
 };
 
 /* Filter placement state for one policy level */
@@ -409,6 +518,7 @@ static struct tc_filter *qos_filter_new(struct qos_build *b, struct qos_level *l
 
 	hw->finfo[hw->nfilters].owner = b->owner;
 	strlcpy(hw->finfo[hw->nfilters].origin, b->origin, sizeof(hw->finfo[0].origin));
+	hw->finfo[hw->nfilters].match[0] = '\0';
 
 	f = &hw->filters[hw->nfilters++];
 	/* zeroed so that whole structures can be compared with memcmp */
@@ -637,6 +747,9 @@ static struct tc_filter *qos_filter_from_rule(struct qos_build *b, struct qos_le
 	return f;
 }
 
+static void qos_segment_acl_ext(struct qos_build *b, struct qos_level *lvl,
+				const struct qos_acl_ext *acl, uint64_t dscp, uint32_t classid);
+
 /*
  * Emit the entries of the IPv4 and IPv6 access-lists called @name into
  * the current segment.  Deny entries leave the segment.  Permit entries
@@ -649,7 +762,14 @@ static bool qos_segment_acl(struct qos_build *b, struct qos_level *lvl, const ch
 			    uint64_t dscp, uint32_t classid)
 {
 	afi_t afis[] = { AFI_IP, AFI_IP6 };
+	const struct qos_acl_ext *ext = qos_acl_ext_lookup(name);
 	bool found = false;
+
+	/* an extended access-list of that name takes precedence */
+	if (ext) {
+		qos_segment_acl_ext(b, lvl, ext, dscp, classid);
+		return true;
+	}
 
 	for (size_t i = 0; i < array_size(afis); i++) {
 		struct access_list *acl = access_list_lookup(afis[i], name);
@@ -694,6 +814,93 @@ static bool qos_segment_acl(struct qos_build *b, struct qos_level *lvl, const ch
 	}
 
 	return found;
+}
+
+/* A filter carrying ready made flower keys from an extended access-list entry */
+static struct tc_filter *qos_filter_from_flower(struct qos_build *b, struct qos_level *lvl,
+						const struct aclx_flower *fl, const char *match,
+						const char *extra)
+{
+	struct tc_filter *f;
+	char desc[sizeof(fl->desc) + 32];
+
+	f = qos_filter_new(b, lvl, fl->eth_proto);
+	if (!f)
+		return NULL;
+
+	f->u.flower.filter_bm |= TC_FLOWER_RAW_KEYS;
+	f->u.flower.raw_len = fl->len;
+	memcpy(f->u.flower.raw, fl->raw, fl->len);
+
+	/* what this filter adds to the entry: expanded operators, class-map DSCP */
+	snprintf(desc, sizeof(desc), "%s%s%s", fl->desc, fl->desc[0] && extra[0] ? " " : "", extra);
+	if (desc[0])
+		snprintf(b->hw->finfo[b->hw->nfilters - 1].match, QOS_MATCH_LEN, "%s {%s}", match,
+			 desc);
+	else
+		strlcpy(b->hw->finfo[b->hw->nfilters - 1].match, match, QOS_MATCH_LEN);
+
+	return f;
+}
+
+/*
+ * Emit the entries of an extended access-list into the current segment,
+ * like qos_segment_acl().  @dscp restricts permit entries to those DSCP
+ * values (match-all): such entries only match IP packets.
+ */
+static void qos_segment_acl_ext(struct qos_build *b, struct qos_level *lvl,
+				const struct qos_acl_ext *acl, uint64_t dscp, uint32_t classid)
+{
+	static struct aclx_flower fl[ACLX_FLOWER_MAX_FILTERS];
+	const struct qos_acl_ext_entry *entry;
+	struct listnode *node;
+	char err[128];
+
+	for (ALL_LIST_ELEMENTS_RO(acl->entries, node, entry)) {
+		if (!entry->rule || !(entry->permit || entry->deny))
+			continue;
+
+		snprintf(b->origin, sizeof(b->origin), "ip access-list extended %s seq %u %s",
+			 acl->name, entry->seq, entry->permit ? "permit" : "deny");
+
+		for (int d = -1; d < 64; d++) {
+			uint8_t tos = 0, tos_mask = 0;
+			char extra[24] = "";
+			int n;
+
+			/* d == -1: no DSCP restriction, otherwise one pass per DSCP */
+			if (entry->permit && dscp) {
+				if (d < 0 || !CHECK_FLAG(dscp, (uint64_t)1 << d))
+					continue;
+				tos = d << 2;
+				tos_mask = 0xfc;
+				snprintf(extra, sizeof(extra), "dscp %s", qos_dscp_name(d));
+			} else if (d >= 0) {
+				break;
+			}
+
+			n = aclx_flower_encode(entry->rule, tos, tos_mask, fl, array_size(fl), err,
+					       sizeof(err));
+			if (n < 0) {
+				/* skipping an entry would change what the list matches */
+				if (!b->error[0])
+					snprintf(b->error, sizeof(b->error),
+						 "ip access-list extended %s seq %u: %s",
+						 acl->name, entry->seq, err);
+				return;
+			}
+
+			for (int i = 0; i < n; i++) {
+				struct tc_filter *f = qos_filter_from_flower(b, lvl, &fl[i],
+									     entry->match, extra);
+
+				if (entry->permit)
+					qos_filter_classify(f, classid);
+				else
+					qos_filter_goto(f, lvl->chain + 1);
+			}
+		}
+	}
 }
 
 static void qos_segment_dscp(struct qos_build *b, struct qos_level *lvl, uint64_t dscp,
@@ -1761,8 +1968,27 @@ static const char *qos_filter_proto2str(uint16_t proto)
 		return "ipv6";
 	case ETH_P_ALL:
 		return "all";
+	case ETH_P_ARP:
+		return "arp";
+	case ETH_P_RARP:
+		return "rarp";
+	case ETH_P_8021Q:
+		return "802.1Q";
+	case ETH_P_8021AD:
+		return "802.1ad";
+	case ETH_P_MPLS_UC:
+		return "mpls";
+	case ETH_P_MPLS_MC:
+		return "mpls-mc";
+	case ETH_P_PPP_SES:
+		return "pppoe";
 	}
-	return "?";
+
+	/* vty output only, from the main thread */
+	static char buf[8];
+
+	snprintf(buf, sizeof(buf), "0x%04x", proto);
+	return buf;
 }
 
 /* Human readable flower keys of a filter zebra generated */
@@ -1987,12 +2213,15 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 
 		for (j = 0; j < hw->nfilters; j++) {
 			const struct tc_filter *f = &hw->filters[j];
-			char match[160], action[32], pkts[24], bytes[24];
+			char match[QOS_MATCH_LEN + 128], action[32], pkts[24], bytes[24];
 
 			if (hw->finfo[j].owner != hc->minor)
 				continue;
 
-			qos_filter_match2str(f, match, sizeof(match));
+			if (hw->finfo[j].match[0])
+				strlcpy(match, hw->finfo[j].match, sizeof(match));
+			else
+				qos_filter_match2str(f, match, sizeof(match));
 			qos_filter_action2str(f, action, sizeof(action));
 
 			if (jfilters) {
@@ -2019,7 +2248,7 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 			if (nfilt++ == 0) {
 				vty_out(vty, "    Filters attached to %s, in evaluation order:\n",
 					attach_str);
-				vty_out(vty, "      %-5s %-4s %-5s %-44s %-13s %-10s %-12s %s\n",
+				vty_out(vty, "      %-5s %-4s %-7s %-44s %-13s %-10s %-12s %s\n",
 					"Chain", "Pref", "Proto", "Match", "Action", "Packets",
 					"Bytes", "Origin");
 			}
@@ -2037,7 +2266,7 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 				snprintf(bytes, sizeof(bytes), "-");
 			}
 
-			vty_out(vty, "      %-5u %-4u %-5s %-44s %-13s %-10s %-12s %s\n", f->chain,
+			vty_out(vty, "      %-5u %-4u %-7s %-44s %-13s %-10s %-12s %s\n", f->chain,
 				f->priority, qos_filter_proto2str(f->protocol), match, action,
 				pkts, bytes, hw->finfo[j].origin);
 		}
@@ -2110,6 +2339,7 @@ void zebra_qos_init(void)
 {
 	qos_g.class_maps = list_new();
 	qos_g.policy_maps = list_new();
+	qos_g.acl_exts = list_new();
 
 	access_list_add_hook(qos_acl_changed);
 	access_list_delete_hook(qos_acl_changed);
@@ -2122,6 +2352,7 @@ void zebra_qos_terminate(void)
 {
 	struct qos_class_map *cmap;
 	struct qos_policy_map *pmap;
+	struct qos_acl_ext *acl;
 
 	event_cancel(&qos_g.t_apply);
 
@@ -2132,4 +2363,7 @@ void zebra_qos_terminate(void)
 
 	list_delete(&qos_g.class_maps);
 	list_delete(&qos_g.policy_maps);
+	while ((acl = listnode_head(qos_g.acl_exts)))
+		zebra_qos_acl_ext_del(acl);
+	list_delete(&qos_g.acl_exts);
 }

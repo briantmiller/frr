@@ -43,6 +43,31 @@ struct qos_curve {
 	struct qos_rate m2;
 };
 
+struct aclx_rule;
+
+#define QOS_ACL_NAME_LEN 129
+
+/* One entry of an extended access-list */
+struct qos_acl_ext_entry {
+	struct qos_acl_ext *acl;
+	uint32_t seq;
+
+	/* rule entries; both false for a remark */
+	bool permit;
+	bool deny;
+
+	/* canonical match text and its parsed form, NULL if not set */
+	char *match;
+	struct aclx_rule *rule;
+};
+
+/* ip access-list extended NAME */
+struct qos_acl_ext {
+	char name[QOS_ACL_NAME_LEN];
+	/* struct qos_acl_ext_entry, ascending sequence numbers */
+	struct list *entries;
+};
+
 /* class-map NAME */
 struct qos_class_map {
 	char name[QOS_NAME_LEN];
@@ -112,13 +137,22 @@ struct zebra_if_qos {
 	struct qos_hw *installed;
 
 	/* Why the policy is not installed, for show output, empty if it is */
-	char reason[256];
+	char reason[320];
 };
 
 /* Northbound */
 extern const struct frr_yang_module_info frr_qos_info;
 
 /* Configuration helpers used by the northbound callbacks */
+extern struct qos_acl_ext *zebra_qos_acl_ext_get(const char *name);
+extern void zebra_qos_acl_ext_del(struct qos_acl_ext *acl);
+extern struct qos_acl_ext_entry *zebra_qos_acl_ext_entry_add(struct qos_acl_ext *acl, uint32_t seq);
+extern void zebra_qos_acl_ext_entry_del(struct qos_acl_ext_entry *entry);
+/* Returns -1 with a message in err if the match does not parse */
+extern int zebra_qos_acl_ext_entry_set_match(struct qos_acl_ext_entry *entry, const char *text,
+					     char *err, size_t errlen);
+extern void zebra_qos_acl_ext_entry_unset_match(struct qos_acl_ext_entry *entry);
+
 extern struct qos_class_map *zebra_qos_class_map_get(const char *name);
 extern void zebra_qos_class_map_del(struct qos_class_map *cmap);
 extern void zebra_qos_class_map_acl_add(struct qos_class_map *cmap, const char *name);

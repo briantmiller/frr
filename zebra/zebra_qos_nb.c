@@ -15,6 +15,164 @@
 
 #include "zebra/interface.h"
 #include "zebra/zebra_qos.h"
+#include "zebra/zebra_acl_ext.h"
+
+/*
+ * ----------------------------------------------------------------------
+ * /frr-qos:qos/extended-access-list
+ * ----------------------------------------------------------------------
+ */
+static int qos_acl_ext_create(struct nb_cb_create_args *args)
+{
+	struct qos_acl_ext *acl;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	acl = zebra_qos_acl_ext_get(yang_dnode_get_string(args->dnode, "name"));
+	nb_running_set_entry(args->dnode, acl);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_acl_ext *acl;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	acl = nb_running_unset_entry(args->dnode);
+	zebra_qos_acl_ext_del(acl);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_create(struct nb_cb_create_args *args)
+{
+	struct qos_acl_ext *acl;
+	struct qos_acl_ext_entry *entry;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	acl = nb_running_get_entry(args->dnode, NULL, true);
+	entry = zebra_qos_acl_ext_entry_add(acl, yang_dnode_get_uint32(args->dnode, "sequence"));
+	nb_running_set_entry(args->dnode, entry);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_acl_ext_entry *entry;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	entry = nb_running_unset_entry(args->dnode);
+	zebra_qos_acl_ext_entry_del(entry);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_action_modify(struct nb_cb_modify_args *args)
+{
+	struct qos_acl_ext_entry *entry;
+	bool deny;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	entry = nb_running_get_entry(args->dnode, NULL, true);
+	/* enum deny has value 1 */
+	deny = yang_dnode_get_enum(args->dnode, NULL) == 1;
+	entry->permit = !deny;
+	entry->deny = deny;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_action_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_acl_ext_entry *entry;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	entry = nb_running_get_entry(args->dnode, NULL, true);
+	entry->permit = entry->deny = false;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_match_modify(struct nb_cb_modify_args *args)
+{
+	struct qos_acl_ext_entry *entry;
+	const char *text = yang_dnode_get_string(args->dnode, NULL);
+
+	switch (args->event) {
+	case NB_EV_VALIDATE: {
+		struct aclx_rule *rule = XCALLOC(MTYPE_TMP, sizeof(*rule));
+		char *buf = XCALLOC(MTYPE_TMP, ACLX_TEXT_MAX);
+		int ret = aclx_rule_parse(text, rule, args->errmsg, args->errmsg_len);
+
+		/* zebra keeps the canonical form, it must fit */
+		if (ret == 0 && !aclx_rule_print(rule, buf, ACLX_TEXT_MAX)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "entry too long in canonical form");
+			ret = -1;
+		}
+		XFREE(MTYPE_TMP, buf);
+		XFREE(MTYPE_TMP, rule);
+		return ret < 0 ? NB_ERR_VALIDATION : NB_OK;
+	}
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_APPLY:
+		break;
+	}
+
+	entry = nb_running_get_entry(args->dnode, NULL, true);
+	if (zebra_qos_acl_ext_entry_set_match(entry, text, args->errmsg, args->errmsg_len) < 0)
+		/* validated above, cannot happen */
+		return NB_ERR_INCONSISTENCY;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_match_destroy(struct nb_cb_destroy_args *args)
+{
+	struct qos_acl_ext_entry *entry;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	entry = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_qos_acl_ext_entry_unset_match(entry);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+/* Remarks are only kept in the configuration */
+static int qos_acl_ext_entry_remark_modify(struct nb_cb_modify_args *args)
+{
+	return NB_OK;
+}
+
+static int qos_acl_ext_entry_remark_destroy(struct nb_cb_destroy_args *args)
+{
+	return NB_OK;
+}
 
 /*
  * ----------------------------------------------------------------------
@@ -593,6 +751,41 @@ static int lib_interface_qos_service_policy_destroy(struct nb_cb_destroy_args *a
 const struct frr_yang_module_info frr_qos_info = {
 	.name = "frr-qos",
 	.nodes = {
+		{
+			.xpath = "/frr-qos:qos/extended-access-list",
+			.cbs = {
+				.create = qos_acl_ext_create,
+				.destroy = qos_acl_ext_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/extended-access-list/entry",
+			.cbs = {
+				.create = qos_acl_ext_entry_create,
+				.destroy = qos_acl_ext_entry_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/extended-access-list/entry/action",
+			.cbs = {
+				.modify = qos_acl_ext_entry_action_modify,
+				.destroy = qos_acl_ext_entry_action_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/extended-access-list/entry/match",
+			.cbs = {
+				.modify = qos_acl_ext_entry_match_modify,
+				.destroy = qos_acl_ext_entry_match_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/extended-access-list/entry/remark",
+			.cbs = {
+				.modify = qos_acl_ext_entry_remark_modify,
+				.destroy = qos_acl_ext_entry_remark_destroy,
+			}
+		},
 		{
 			.xpath = "/frr-qos:qos/class-map",
 			.cbs = {

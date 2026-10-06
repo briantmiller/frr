@@ -130,6 +130,8 @@ struct tc_flow {
 	/* TODO: fill in */
 };
 
+#define TC_FLOWER_RAW_MAX 768
+
 struct tc_flower {
 	uint32_t classid;
 
@@ -154,6 +156,12 @@ struct tc_flower {
  * the result but gives the filter packet/byte counters.
  */
 #define TC_FLOWER_ACT_COUNT (1 << 9)
+/*
+ * raw[] holds further match keys as ready made TCA_FLOWER_KEY_*
+ * netlink attributes (extended access-list entries, see
+ * zebra/zebra_acl_flower.c), appended to the keys above.
+ */
+#define TC_FLOWER_RAW_KEYS (1 << 10)
 
 	uint32_t filter_bm;
 
@@ -175,6 +183,10 @@ struct tc_flower {
 	/* network byte order, 4 bytes used for IPv4, 16 for IPv6 */
 	uint8_t src_mask[16];
 	uint8_t dst_mask[16];
+
+	/* TC_FLOWER_RAW_KEYS */
+	uint16_t raw_len;
+	uint8_t raw[TC_FLOWER_RAW_MAX];
 };
 
 struct tc_u32 {

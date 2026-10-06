@@ -139,6 +139,7 @@ enum node_type {
 	COMMUNITY_LIST_NODE,     /* Community list node. */
 	COMMUNITY_ALIAS_NODE, /* Community alias node. */
 	PBRMAP_NODE,		 /* PBR map node. */
+	ACL_EXT_NODE,		 /* QoS extended access-list node. */
 	CLASS_MAP_NODE,		 /* QoS class-map node. */
 	POLICY_MAP_NODE,	 /* QoS policy-map node. */
 	POLICY_MAP_CLASS_NODE,	 /* QoS policy-map class node. */

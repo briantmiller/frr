@@ -13,6 +13,7 @@
 #include "northbound_cli.h"
 #include "yang.h"
 
+#include "zebra/zebra_acl_ext.h"
 #include "zebra/zebra_qos_cli.h"
 #include "zebra/zebra_qos_cli_clippy.c"
 
@@ -26,6 +27,12 @@
 #define QOS_XPATH	     "/frr-qos:qos"
 #define QOS_CLASS_MAP_XPATH  QOS_XPATH "/class-map[name='%s']"
 #define QOS_POLICY_MAP_XPATH QOS_XPATH "/policy-map[name='%s']"
+#define QOS_ACLX_XPATH	     QOS_XPATH "/extended-access-list[name='%s']"
+
+#define ACLX_STR     "Extended access-list (all tc-flower match keys)\n"
+#define ACLX_SEQ_STR "Sequence number\n"
+#define ACLX_LINE_STR                                                                             \
+	"PROTOCOL SOURCE [PORTS] DESTINATION [PORTS] [OPTIONS], see the documentation\n"
 
 /*
  * ----------------------------------------------------------------------
@@ -141,6 +148,320 @@ static const char *qos_dscp2str(uint8_t dscp, char *buf, size_t len)
 
 	snprintf(buf, len, "%u", dscp);
 	return buf;
+}
+
+/*
+ * ----------------------------------------------------------------------
+ * ip access-list extended
+ * ----------------------------------------------------------------------
+ */
+
+DEFPY_YANG_NOSH (ip_access_list_extended,
+		 ip_access_list_extended_cmd,
+		 "ip access-list extended QOS_ACLX_NAME$name",
+		 IP_STR
+		 "Add an access list entry\n"
+		 ACLX_STR
+		 "Access-list name\n")
+{
+	char xpath[XPATH_MAXLEN];
+	int ret;
+
+	snprintf(xpath, sizeof(xpath), QOS_ACLX_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+
+	ret = nb_cli_apply_changes(vty, NULL);
+	if (ret == CMD_SUCCESS)
+		VTY_PUSH_XPATH(ACL_EXT_NODE, xpath);
+
+	return ret;
+}
+
+DEFPY_YANG (no_ip_access_list_extended,
+	    no_ip_access_list_extended_cmd,
+	    "no ip access-list extended QOS_ACLX_NAME$name",
+	    NO_STR
+	    IP_STR
+	    "Add an access list entry\n"
+	    ACLX_STR
+	    "Access-list name\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), QOS_ACLX_XPATH, name);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes_clear_pending(vty, NULL);
+}
+
+/* Search the candidate entries of the current access-list */
+struct aclx_cli_find {
+	/* in: entry to look for (action NULL: remark) */
+	const char *action;
+	const char *text;
+	uint32_t skip_seq;
+	/* out */
+	uint32_t found_seq;
+	uint32_t max_seq;
+};
+
+static int aclx_cli_find_cb(const struct lyd_node *dnode, void *arg)
+{
+	struct aclx_cli_find *f = arg;
+	uint32_t seq = yang_dnode_get_uint32(dnode, "sequence");
+
+	if (seq > f->max_seq)
+		f->max_seq = seq;
+	if (f->found_seq || seq == f->skip_seq || !f->text)
+		return YANG_ITER_CONTINUE;
+
+	if (f->action) {
+		if (yang_dnode_exists(dnode, "action") &&
+		    strcmp(yang_dnode_get_string(dnode, "action"), f->action) == 0 &&
+		    yang_dnode_exists(dnode, "match") &&
+		    strcmp(yang_dnode_get_string(dnode, "match"), f->text) == 0)
+			f->found_seq = seq;
+	} else if (yang_dnode_exists(dnode, "remark") &&
+		   strcmp(yang_dnode_get_string(dnode, "remark"), f->text) == 0) {
+		f->found_seq = seq;
+	}
+
+	return YANG_ITER_CONTINUE;
+}
+
+static void aclx_cli_find(struct vty *vty, struct aclx_cli_find *f)
+{
+	yang_dnode_iterate(aclx_cli_find_cb, f, vty->candidate_config->dnode, "%s/entry",
+			   VTY_CURR_XPATH);
+}
+
+/* Canonical form of the match text, or NULL after printing the error */
+static const char *aclx_cli_canonical(struct vty *vty, const char *text, char *buf, size_t len)
+{
+	struct aclx_rule *rule = XCALLOC(MTYPE_TMP, sizeof(*rule));
+	char err[256];
+	const char *ret = buf;
+
+	if (aclx_rule_parse(text, rule, err, sizeof(err)) < 0) {
+		vty_out(vty, "%% Invalid access-list entry: %s\n", err);
+		ret = NULL;
+	} else if (!aclx_rule_print(rule, buf, len)) {
+		vty_out(vty, "%% Invalid access-list entry: too long in canonical form\n");
+		ret = NULL;
+	}
+	XFREE(MTYPE_TMP, rule);
+
+	return ret;
+}
+
+/* Sequence number given as the first argument, or the next free one */
+static int64_t aclx_cli_seq(struct vty *vty, struct cmd_token **argv, int *idx)
+{
+	struct aclx_cli_find f = {};
+
+	if (argv[0]->type == RANGE_TKN) {
+		*idx = 1;
+		return strtoul(argv[0]->arg, NULL, 10);
+	}
+
+	*idx = 0;
+	aclx_cli_find(vty, &f);
+	if ((uint64_t)f.max_seq + 10 > UINT32_MAX) {
+		vty_out(vty, "%% No sequence number left, renumber the access-list\n");
+		return -1;
+	}
+	/* like Cisco: 10, 20, 30... */
+	return f.max_seq + 10;
+}
+
+DEFUN_YANG (aclx_entry,
+	    aclx_entry_cmd,
+	    "[(1-4294967295)] <permit|deny> LINE...",
+	    ACLX_SEQ_STR
+	    "Specify packets to forward (select)\n"
+	    "Specify packets to reject (not select)\n"
+	    ACLX_LINE_STR)
+{
+	char xpath[XPATH_MAXLEN], axpath[XPATH_MAXLEN + 16], mxpath[XPATH_MAXLEN + 16];
+	char canon[ACLX_TEXT_MAX];
+	struct aclx_cli_find f = {};
+	const char *action;
+	char *text;
+	int64_t seq;
+	int idx;
+
+	seq = aclx_cli_seq(vty, argv, &idx);
+	if (seq < 0)
+		return CMD_WARNING_CONFIG_FAILED;
+	action = argv[idx]->text;
+
+	text = argv_concat(argv, argc, idx + 1);
+	if (!aclx_cli_canonical(vty, text, canon, sizeof(canon))) {
+		XFREE(MTYPE_TMP, text);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	XFREE(MTYPE_TMP, text);
+
+	f.action = action;
+	f.text = canon;
+	f.skip_seq = seq;
+	aclx_cli_find(vty, &f);
+	if (f.found_seq) {
+		vty_out(vty, "%% Duplicate access-list entry (sequence %u)\n", f.found_seq);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	snprintf(xpath, sizeof(xpath), "./entry[sequence='%" PRId64 "']", seq);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+	snprintf(axpath, sizeof(axpath), "%s/remark", xpath);
+	nb_cli_enqueue_change(vty, axpath, NB_OP_DESTROY, NULL);
+	snprintf(axpath, sizeof(axpath), "%s/action", xpath);
+	nb_cli_enqueue_change(vty, axpath, NB_OP_MODIFY, action);
+	snprintf(mxpath, sizeof(mxpath), "%s/match", xpath);
+	nb_cli_enqueue_change(vty, mxpath, NB_OP_MODIFY, canon);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFUN_YANG (aclx_remark,
+	    aclx_remark_cmd,
+	    "[(1-4294967295)] remark LINE...",
+	    ACLX_SEQ_STR
+	    "Access list entry comment\n"
+	    "Comment up to 100 characters\n")
+{
+	char xpath[XPATH_MAXLEN], axpath[XPATH_MAXLEN + 16], mxpath[XPATH_MAXLEN + 16];
+	char rxpath[XPATH_MAXLEN + 16];
+	char *text;
+	int64_t seq;
+	int idx, ret;
+
+	seq = aclx_cli_seq(vty, argv, &idx);
+	if (seq < 0)
+		return CMD_WARNING_CONFIG_FAILED;
+
+	text = argv_concat(argv, argc, idx + 1);
+	if (strlen(text) > 100) {
+		vty_out(vty, "%% Remark too long (at most 100 characters)\n");
+		XFREE(MTYPE_TMP, text);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	snprintf(xpath, sizeof(xpath), "./entry[sequence='%" PRId64 "']", seq);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+	snprintf(axpath, sizeof(axpath), "%s/action", xpath);
+	nb_cli_enqueue_change(vty, axpath, NB_OP_DESTROY, NULL);
+	snprintf(mxpath, sizeof(mxpath), "%s/match", xpath);
+	nb_cli_enqueue_change(vty, mxpath, NB_OP_DESTROY, NULL);
+	snprintf(rxpath, sizeof(rxpath), "%s/remark", xpath);
+	nb_cli_enqueue_change(vty, rxpath, NB_OP_MODIFY, text);
+
+	ret = nb_cli_apply_changes(vty, NULL);
+	XFREE(MTYPE_TMP, text);
+
+	return ret;
+}
+
+static int aclx_cli_delete_seq(struct vty *vty, const char *seq)
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "./entry[sequence='%s']", seq);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFUN_YANG (no_aclx_seq,
+	    no_aclx_seq_cmd,
+	    "no (1-4294967295)",
+	    NO_STR
+	    ACLX_SEQ_STR)
+{
+	return aclx_cli_delete_seq(vty, argv[1]->arg);
+}
+
+/* "no 10 permit ...", the rest of the entry is not checked */
+DEFUN_YANG (no_aclx_seq_entry,
+	    no_aclx_seq_entry_cmd,
+	    "no (1-4294967295) <permit|deny|remark> LINE...",
+	    NO_STR
+	    ACLX_SEQ_STR
+	    "Specify packets to forward (select)\n"
+	    "Specify packets to reject (not select)\n"
+	    "Access list entry comment\n"
+	    "Ignored\n")
+{
+	return aclx_cli_delete_seq(vty, argv[1]->arg);
+}
+
+DEFUN_YANG (no_aclx_entry,
+	    no_aclx_entry_cmd,
+	    "no <permit|deny|remark> LINE...",
+	    NO_STR
+	    "Specify packets to forward (select)\n"
+	    "Specify packets to reject (not select)\n"
+	    "Access list entry comment\n"
+	    "The entry to remove\n")
+{
+	char xpath[XPATH_MAXLEN];
+	char canon[ACLX_TEXT_MAX];
+	struct aclx_cli_find f = {};
+	bool remark = strcmp(argv[1]->text, "remark") == 0;
+	char *text;
+
+	text = argv_concat(argv, argc, 2);
+	if (remark) {
+		strlcpy(canon, text, sizeof(canon));
+	} else if (!aclx_cli_canonical(vty, text, canon, sizeof(canon))) {
+		XFREE(MTYPE_TMP, text);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	XFREE(MTYPE_TMP, text);
+
+	f.action = remark ? NULL : argv[1]->text;
+	f.text = canon;
+	aclx_cli_find(vty, &f);
+	if (!f.found_seq) {
+		vty_out(vty, "%% No such access-list entry\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	snprintf(xpath, sizeof(xpath), "./entry[sequence='%u']", f.found_seq);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_aclx(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	vty_out(vty, "ip access-list extended %s\n", yang_dnode_get_string(dnode, "name"));
+}
+
+static void cli_show_aclx_end(struct vty *vty, const struct lyd_node *dnode)
+{
+	vty_out(vty, "exit\n");
+	vty_out(vty, "!\n");
+}
+
+/* entries are shown in sequence order */
+static int cli_cmp_aclx_entry(const struct lyd_node *dnode1, const struct lyd_node *dnode2)
+{
+	uint32_t seq1 = yang_dnode_get_uint32(dnode1, "sequence");
+	uint32_t seq2 = yang_dnode_get_uint32(dnode2, "sequence");
+
+	return seq1 < seq2 ? -1 : seq1 > seq2;
+}
+
+static void cli_show_aclx_entry(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	uint32_t seq = yang_dnode_get_uint32(dnode, "sequence");
+
+	if (yang_dnode_exists(dnode, "remark"))
+		vty_out(vty, " %u remark %s\n", seq, yang_dnode_get_string(dnode, "remark"));
+	else if (yang_dnode_exists(dnode, "action") && yang_dnode_exists(dnode, "match"))
+		vty_out(vty, " %u %s %s\n", seq, yang_dnode_get_string(dnode, "action"),
+			yang_dnode_get_string(dnode, "match"));
 }
 
 /*
@@ -850,7 +1171,15 @@ static struct cmd_node policy_map_class_node = {
 	.prompt = "%s(config-pmap-c)# ",
 };
 
+static struct cmd_node acl_ext_node = {
+	.name = "ip access-list extended",
+	.node = ACL_EXT_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-ext-nacl)# ",
+};
+
 static const struct cmd_variable_handler qos_var_handlers[] = {
+	{ .tokenname = "QOS_ACLX_NAME", .xpath = QOS_XPATH "/extended-access-list/name" },
 	{ .tokenname = "QOS_CMAP_NAME", .xpath = QOS_XPATH "/class-map/name" },
 	{ .tokenname = "QOS_PMAP_NAME", .xpath = QOS_XPATH "/policy-map/name" },
 	{ .completions = NULL },
@@ -861,6 +1190,20 @@ const struct frr_yang_module_info frr_qos_cli_info = {
 	.name = "frr-qos",
 	.ignore_cfg_cbs = true,
 	.nodes = {
+		{
+			.xpath = "/frr-qos:qos/extended-access-list",
+			.cbs = {
+				.cli_show = cli_show_aclx,
+				.cli_show_end = cli_show_aclx_end,
+			}
+		},
+		{
+			.xpath = "/frr-qos:qos/extended-access-list/entry",
+			.cbs = {
+				.cli_cmp = cli_cmp_aclx_entry,
+				.cli_show = cli_show_aclx_entry,
+			}
+		},
 		{
 			.xpath = "/frr-qos:qos/class-map",
 			.cbs = {
@@ -953,13 +1296,23 @@ void zebra_qos_cli_init(void)
 {
 	cmd_variable_handler_register(qos_var_handlers);
 
+	install_node(&acl_ext_node);
 	install_node(&class_map_node);
 	install_node(&policy_map_node);
 	install_node(&policy_map_class_node);
 
+	install_default(ACL_EXT_NODE);
 	install_default(CLASS_MAP_NODE);
 	install_default(POLICY_MAP_NODE);
 	install_default(POLICY_MAP_CLASS_NODE);
+
+	install_element(CONFIG_NODE, &ip_access_list_extended_cmd);
+	install_element(CONFIG_NODE, &no_ip_access_list_extended_cmd);
+	install_element(ACL_EXT_NODE, &aclx_entry_cmd);
+	install_element(ACL_EXT_NODE, &aclx_remark_cmd);
+	install_element(ACL_EXT_NODE, &no_aclx_seq_cmd);
+	install_element(ACL_EXT_NODE, &no_aclx_seq_entry_cmd);
+	install_element(ACL_EXT_NODE, &no_aclx_entry_cmd);
 
 	install_element(CONFIG_NODE, &class_map_cmd);
 	install_element(CONFIG_NODE, &no_class_map_cmd);

@@ -660,6 +660,17 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 			return 0;
 	}
 
+	if (filter_bm & TC_FLOWER_RAW_KEYS) {
+		uint16_t raw_len;
+		const uint8_t *raw = dplane_ctx_tc_filter_get_raw(ctx, &raw_len);
+
+		/* pre-built, 4 byte aligned TCA_FLOWER_KEY_* attributes */
+		if (NLMSG_ALIGN(n->nlmsg_len) + raw_len > datalen)
+			return 0;
+		memcpy((uint8_t *)n + NLMSG_ALIGN(n->nlmsg_len), raw, raw_len);
+		n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + raw_len;
+	}
+
 	if (filter_bm & TC_FLOWER_ACT_GOTO_CHAIN) {
 		/*
 		 * gact "goto chain N": carry on classifying in another chain

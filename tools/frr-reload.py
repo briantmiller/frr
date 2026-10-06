@@ -600,6 +600,7 @@ ctx_keywords = {
     "nexthop-group ": {},
     "route-map ": {},
     "pbr-map ": {},
+    "ip access-list extended ": {},
     "class-map ": {},
     "policy-map ": {"class ": {}},
     "rpki": {},
