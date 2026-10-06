@@ -60,6 +60,7 @@
 #include "zebra/zebra_tc.h"
 #include "zebra/zebra_acl_ext.h"
 #include "zebra/zebra_acl_flower.h"
+#include "zebra/zebra_acl_group.h"
 
 #include "zebra/zebra_qos_clippy.c"
 
@@ -207,6 +208,16 @@ static struct qos_acl_ext *qos_acl_ext_lookup(const char *name)
 			return acl;
 
 	return NULL;
+}
+
+struct qos_acl_ext *zebra_qos_acl_ext_lookup(const char *name)
+{
+	return qos_acl_ext_lookup(name);
+}
+
+bool zebra_qos_started(void)
+{
+	return qos_g.startup_done;
 }
 
 struct qos_acl_ext *zebra_qos_acl_ext_get(const char *name)
@@ -1525,8 +1536,12 @@ static void qos_apply_all(struct event *t)
 	struct interface *ifp;
 
 	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name)
-		FOR_ALL_INTERFACES (vrf, ifp)
+		FOR_ALL_INTERFACES (vrf, ifp) {
 			qos_if_apply(ifp);
+			zebra_acl_group_if_apply(ifp);
+		}
+
+	zebra_acl_group_apply_done();
 }
 
 void zebra_qos_config_changed(void)
@@ -1540,6 +1555,7 @@ void zebra_qos_startup_done(void)
 		return;
 
 	qos_g.startup_done = true;
+	zebra_acl_group_startup_done();
 	zebra_qos_config_changed();
 }
 
@@ -1569,6 +1585,7 @@ void zebra_qos_if_removed(struct interface *ifp)
 	/* the kernel removed the qdisc together with the interface */
 	if (zif && zif->qos) {
 		qos_hw_free(&zif->qos->installed);
+		zebra_acl_group_if_removed(ifp);
 		/* refresh the state shown by "show qos interface" */
 		zebra_qos_config_changed();
 	}
@@ -1582,6 +1599,7 @@ void zebra_qos_if_fini(struct interface *ifp)
 		return;
 
 	qos_hw_free(&zif->qos->installed);
+	zebra_acl_group_if_fini(ifp);
 	XFREE(MTYPE_QOS_IF, zif->qos);
 }
 
@@ -2346,6 +2364,8 @@ void zebra_qos_init(void)
 
 	install_element(VIEW_NODE, &show_qos_interface_cmd);
 	install_element(VIEW_NODE, &show_class_map_interface_cmd);
+
+	zebra_acl_group_init();
 }
 
 void zebra_qos_terminate(void)
@@ -2366,4 +2386,6 @@ void zebra_qos_terminate(void)
 	while ((acl = listnode_head(qos_g.acl_exts)))
 		zebra_qos_acl_ext_del(acl);
 	list_delete(&qos_g.acl_exts);
+
+	zebra_acl_group_terminate();
 }

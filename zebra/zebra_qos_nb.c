@@ -16,6 +16,7 @@
 #include "zebra/interface.h"
 #include "zebra/zebra_qos.h"
 #include "zebra/zebra_acl_ext.h"
+#include "zebra/zebra_acl_group.h"
 
 /*
  * ----------------------------------------------------------------------
@@ -682,6 +683,57 @@ static struct zebra_if_qos *qos_nb_if(const struct lyd_node *dnode)
 	return zebra_qos_if_get(ifp);
 }
 
+/*
+ * ----------------------------------------------------------------------
+ * /frr-interface:lib/interface/frr-qos:access-group/{in,out}
+ * ----------------------------------------------------------------------
+ */
+static int qos_access_group_set(const struct lyd_node *dnode, enum aclg_dir dir, const char *name)
+{
+	struct zebra_if_qos *qos = qos_nb_if(dnode);
+
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	strlcpy(qos->access_group[dir], name ? name : "", sizeof(qos->access_group[dir]));
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_access_group_in_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	return qos_access_group_set(args->dnode, ACLG_IN, yang_dnode_get_string(args->dnode, NULL));
+}
+
+static int lib_interface_access_group_in_destroy(struct nb_cb_destroy_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	return qos_access_group_set(args->dnode, ACLG_IN, NULL);
+}
+
+static int lib_interface_access_group_out_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	return qos_access_group_set(args->dnode, ACLG_OUT,
+				    yang_dnode_get_string(args->dnode, NULL));
+}
+
+static int lib_interface_access_group_out_destroy(struct nb_cb_destroy_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	return qos_access_group_set(args->dnode, ACLG_OUT, NULL);
+}
+
 static int lib_interface_qos_bandwidth_modify(struct nb_cb_modify_args *args)
 {
 	struct zebra_if_qos *qos;
@@ -1063,6 +1115,20 @@ const struct frr_yang_module_info frr_qos_info = {
 			.cbs = {
 				.modify = lib_interface_qos_bandwidth_modify,
 				.destroy = lib_interface_qos_bandwidth_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:access-group/in",
+			.cbs = {
+				.modify = lib_interface_access_group_in_modify,
+				.destroy = lib_interface_access_group_in_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:access-group/out",
+			.cbs = {
+				.modify = lib_interface_access_group_out_modify,
+				.destroy = lib_interface_access_group_out_destroy,
 			}
 		},
 		{

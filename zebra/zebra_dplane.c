@@ -4452,6 +4452,7 @@ static int dplane_ctx_tc_class_init(struct zebra_dplane_ctx *ctx,
 	case TC_QDISC_UNSPEC:
 	case TC_QDISC_NOQUEUE:
 	case TC_QDISC_PFIFO:
+	case TC_QDISC_CLSACT:
 		break;
 	}
 

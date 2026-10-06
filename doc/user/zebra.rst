@@ -551,7 +551,8 @@ Extended access-lists follow the syntax of Cisco IOS ``ip access-list
 extended`` and extend it with every match key of the Linux tc flower
 classifier (see ``man tc-flower``), from Ethernet addresses and VLAN tags to
 MPLS label stacks, ARP fields, tunnel metadata and connection tracking
-state. They are used by class-maps (``match access-group name NAME``), each
+state. They are used by class-maps (``match access-group name NAME``) and
+for interface access control (:clicmd:`ip access-group NAME <in|out>`), each
 entry is installed as one or more tc flower filters.
 
 .. clicmd:: ip access-list extended NAME
@@ -712,6 +713,114 @@ braces by :clicmd:`show class-map interface IFNAME [json]`:
 
 An entry needing more than 32 filters prevents the policy from being
 installed; ``show qos interface`` gives the reason.
+
+Interface access control
+------------------------
+
+.. clicmd:: ip access-group NAME <in|out>
+
+   Filter the traffic received (``in``) or sent (``out``) on the interface
+   with the extended access-list ``NAME``. One access-list per direction;
+   configuring another one replaces it.
+
+   The entries are evaluated in sequence order and the first matching entry
+   decides: ``permit`` accepts the packet, which continues to be processed
+   normally (outgoing packets still go through the service-policy), ``deny``
+   drops it. As with a Cisco IPv4 ``ip access-group`` and IPv6
+   ``ipv6 traffic-filter``, the list ends with an implicit deny of the IP
+   families it has entries for:
+
+   - an access-list with IPv4 entries drops the IPv4 packets no entry
+     permits, one with IPv6 entries the IPv6 packets;
+   - traffic of a family the list does not mention, and non IP traffic (ARP,
+     MPLS, ...), is accepted unless an entry denies it. Add
+     ``deny ethertype any`` at the end to drop everything not permitted.
+
+   An access-list that is not configured, or has no permit or deny entries,
+   accepts everything. Changes of the access-list take effect immediately.
+
+   .. code-block:: frr
+
+      ip access-list extended EDGE-IN
+       10 deny ip 10.0.0.0 0.255.255.255 any
+       20 permit tcp any any eq 22
+       30 permit tcp any eq www any established
+       40 permit icmp any any echo
+       50 permit arp
+      exit
+      !
+      ip access-list extended EDGE-OUT
+       10 deny ipv6 2001:db8:bad::/48 any
+       20 permit ipv6 any any
+      exit
+      !
+      interface eth0
+       ip access-group EDGE-IN in
+       ip access-group EDGE-OUT out
+      exit
+
+   EDGE-IN accepts SSH, replies from web servers, pings and ARP, drops
+   other IPv4 and leaves IPv6 alone; EDGE-OUT only filters IPv6.
+
+   The access-lists are installed as tc flower filters with gact ``pass``
+   and ``drop`` actions on the ingress and egress hooks of a ``clsact``
+   qdisc, which zebra creates when needed. The kernel needs ``cls_flower``
+   and ``act_gact``. How zebra keeps the filtering safe:
+
+   - The rules are in chain ``0xbee0001`` or ``0xbee0002``; a filter in
+     chain 0 (preference 1, handle ``0xbeef``) jumps to the active one. A
+     new version of the access-list is written to the other chain, the jump
+     is switched over only once the kernel accepted every filter, and the
+     old chain is emptied only once the kernel confirmed the switch, so
+     packets always see either the complete old or the complete new rules.
+   - If the kernel refuses a filter, or the access-list cannot be turned
+     into filters (e.g. an entry needing more than 32), the previous version
+     stays in force; :clicmd:`show ip access-group [interface IFNAME] [json]`
+     says why and lists the refused version.
+   - When zebra starts, it takes over the filters a previous run left: they
+     stay in force until the configured access-list replaces them. They are
+     removed from interfaces that have no access-group (any more) only 60
+     seconds after startup, when the configuration has arrived. If zebra
+     cannot tell which chain they are in, it keeps them and says so.
+   - When zebra stops, the filters stay in the kernel: the interfaces remain
+     protected. Remove the access-groups first to stop filtering.
+   - If the ``clsact`` qdisc is deleted by someone else, zebra installs the
+     access-groups again. An interface with an ``ingress`` qdisc cannot have
+     access-groups; zebra reports it instead of installing them.
+
+   Zebra takes over the filter hooks of the interface: after the jump of
+   the chain 0 filter the evaluation ends in the access-list's chain (a
+   packet no entry matched is accepted), so filters of other tools at a
+   larger preference on the same hook are not evaluated any more.
+
+.. clicmd:: show ip access-group [interface IFNAME] [json]
+
+   Show the access-groups of all interfaces or of one: the access-list of
+   each direction, whether it is installed (or why not), and its filters in
+   evaluation order with the number of packets and bytes each one matched:
+
+   .. code-block:: frr
+
+      Interface eth0
+        Inbound access-list EDGE-IN: installed
+          clsact ingress hook, chain 0xbee0001, 7 filters, in evaluation order:
+            Seq    Pref Action  Proto   Match                                        Packets    Bytes
+            10     1    deny    ipv4    ip 10.0.0.0 0.255.255.255 any                12         768
+            20     2    permit  ipv4    tcp any any eq 22                            1520       98400
+            30     3    permit  ipv4    tcp any eq 80 any established {tcp-flags 0x10/0x10} 8800 11264000
+            30     4    permit  ipv4    tcp any eq 80 any established {tcp-flags 0x4/0x4} 3 120
+            40     5    permit  ipv4    icmp any any echo                            4          336
+            50     6    permit  arp     arp                                          20         560
+            -      7    deny    ipv4    implicit deny ip                             130        9100
+        Outbound access-list EDGE-OUT: installed
+          ...
+
+   ``missing`` instead of counters means the filter is not in the kernel:
+   the access-list is not enforced. When the kernel refused a version of the
+   access-list, its filters are listed below the active ones, the refused
+   filter marked ``refused``. The ``json`` output has the same information
+   (``installed``, ``state``, ``reason``, ``filters`` with ``packets`` and
+   ``bytes``, and ``refused``).
 
 Policy-maps
 -----------

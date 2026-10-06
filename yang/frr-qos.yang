@@ -50,8 +50,8 @@ module frr-qos {
 
   revision 2026-10-05 {
     description
-      "Add HFSC policy-maps and service curves, and extended
-       access-lists.";
+      "Add HFSC policy-maps and service curves, extended
+       access-lists and interface access-groups.";
     reference "FRRouting";
   }
 
@@ -472,6 +472,36 @@ module frr-qos {
         type qos-map-name;
         description
           "Policy-map applied to traffic leaving the interface.";
+      }
+    }
+
+    container access-group {
+      description
+        "Access control with extended access-lists (\"ip access-group
+         NAME in|out\").  The first matching entry decides: permit
+         accepts, deny drops the packet.  Each list ends with an
+         implicit deny of the IP families (IPv4, IPv6) it has entries
+         for; other traffic matching no entry is accepted.  A list that
+         is not configured or has no entries accepts everything.";
+
+      leaf in {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Extended access-list applied to traffic received on the
+           interface.";
+      }
+
+      leaf out {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Extended access-list applied to traffic sent on the
+           interface.";
       }
     }
   }

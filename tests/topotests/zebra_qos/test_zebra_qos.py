@@ -25,7 +25,8 @@ class) to traffic leaving r1-eth0.  The tests check:
 - that a "qos bandwidth" change only updates the HTB classes in place,
 - that policy-map and access-list changes re-install the hierarchy,
 - removing and re-applying the service-policy,
-- "ip access-list extended" entries with tc-flower keys used by a class-map.
+- "ip access-list extended" entries with tc-flower keys used by a class-map,
+- "ip access-group NAME in|out" access control with those access-lists.
 
 Traffic is generated with a small python UDP sender (setting IP_TOS /
 IPV6_TCLASS and the source address), so the test does not depend on ping.
@@ -1220,6 +1221,155 @@ def test_qos_ip_access_list_extended(tgen):
         functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
         "hierarchy not restored after removing XCLS",
     )
+
+
+AG_CONFIG = """
+configure terminal
+ ip access-list extended AG-IN
+  deny udp host 192.0.2.2 any eq discard
+  permit ip any any
+  permit arp
+ exit
+ ip access-list extended AG-OUT
+  deny udp any host 192.0.2.2 range 9 10
+  permit ipv6 any any
+  permit ip any any
+ exit
+ interface r1-eth0
+  ip access-group AG-IN in
+  ip access-group AG-OUT out
+ exit
+"""
+
+# (sequence or None for implicit, action, protocol, match) per direction
+AG_FILTERS = {
+    "inbound": [
+        (10, "deny", "ipv4", "udp host 192.0.2.2 any eq 9"),
+        (20, "permit", "ipv4", "ip any any"),
+        (30, "permit", "arp", "arp"),
+        (None, "deny", "ipv4", "implicit deny ip"),
+    ],
+    "outbound": [
+        (10, "deny", "ipv4", "udp any host 192.0.2.2 range 9 10"),
+        (20, "permit", "ipv6", "ipv6 any any"),
+        (30, "permit", "ipv4", "ip any any"),
+        (None, "deny", "ipv4", "implicit deny ip"),
+        (None, "deny", "ipv6", "implicit deny ipv6"),
+    ],
+}
+
+
+def show_access_group_json(router, intf=INTF):
+    out = router.vtysh_cmd(
+        "show ip access-group interface {} json".format(intf), isjson=True
+    )
+    return out.get(intf, {})
+
+
+def test_qos_ip_access_group(tgen):
+    "ip access-group in/out: extended access-lists as clsact filters"
+
+    r1 = tgen.gears["r1"]
+    r2 = tgen.gears["r2"]
+
+    out = r1.vtysh_cmd(AG_CONFIG)
+    assert "Invalid" not in out and "failed" not in out, out
+
+    running = r1.vtysh_cmd("show running-config")
+    for line in (" ip access-group AG-IN in", " ip access-group AG-OUT out"):
+        assert line in running, "missing {!r}:\n{}".format(line, running)
+
+    flower = kernel_supports_flower(tgen)
+
+    def _installed():
+        data = show_access_group_json(r1)
+        for direction, want in AG_FILTERS.items():
+            d = data.get(direction, {})
+            if flower:
+                # in force: the kernel accepted every filter
+                if not d.get("installed"):
+                    return "{} not installed: {}".format(direction, d)
+                filters = d["filters"]
+            else:
+                # the kernel refuses flower filters: nothing is switched on,
+                # the refused version and the reason are shown
+                if d.get("installed") or "refused" not in d.get("reason", ""):
+                    return "{} not refused: {}".format(direction, d)
+                filters = d.get("refused", {}).get("filters", [])
+            have = [
+                (f.get("sequence"), f["action"], f["protocol"], f["match"])
+                for f in filters
+            ]
+            if have != want:
+                return "{} filters {} != {}".format(direction, have, want)
+        return None
+
+    try:
+        wait_for(_installed, "access-groups not installed")
+
+        # the clsact qdisc is there, next to the HTB root of the service-policy
+        out = r1.cmd("tc qdisc show dev {}".format(INTF))
+        assert "clsact" in out and "htb beef:" in out, out
+        assert check_classes(r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS) is None
+
+        # an access-list that does not exist permits everything
+        r1.vtysh_cmd(
+            "configure terminal\n interface {}\n  ip access-group AG-NONE out\n".format(
+                INTF
+            )
+        )
+
+        def _undefined():
+            d = show_access_group_json(r1).get("outbound", {})
+            if d.get("installed") or "not configured" not in d.get("reason", ""):
+                return "outbound: {}".format(d)
+            return None
+
+        wait_for(_undefined, "undefined access-list not reported")
+        r1.vtysh_cmd(
+            "configure terminal\n interface {}\n  ip access-group AG-OUT out\n".format(
+                INTF
+            )
+        )
+        wait_for(_installed, "AG-OUT not re-installed")
+
+        if flower:
+            out = r1.cmd("tc filter show dev {} ingress".format(INTF))
+            assert "goto chain" in out and "dst_port 9" in out, out
+
+            def _counted(direction, seq, count):
+                for f in show_access_group_json(r1)[direction]["filters"]:
+                    if f.get("sequence") == seq:
+                        return f.get("packets", 0) >= count
+                return False
+
+            # egress: r1 -> r2 port 9 is dropped by AG-OUT seq 10
+            send_udp(r1, "192.0.2.1", "192.0.2.2", TOS["default"], 30)
+            assert _counted("outbound", 10, 30), show_access_group_json(r1)
+            # ingress: r2 -> r1 port 9 is dropped by AG-IN seq 10
+            send_udp(r2, "192.0.2.2", "192.0.2.1", TOS["default"], 30)
+            assert _counted("inbound", 10, 30), show_access_group_json(r1)
+        else:
+            logger.info("kernel lacks cls_flower/act_gact: enforcement not checked")
+    finally:
+        r1.vtysh_cmd("""
+            configure terminal
+             interface r1-eth0
+              no ip access-group in
+              no ip access-group out
+             exit
+             no ip access-list extended AG-IN
+             no ip access-list extended AG-OUT
+            """)
+
+    def _removed():
+        out = r1.vtysh_cmd("show ip access-group interface {}".format(INTF))
+        if "AG-" in out:
+            return out
+        return None
+
+    wait_for(_removed, "access-groups not removed")
+    assert check_classes(r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS) is None
 
 
 # HPARENT/HCHILD from r1/frr.conf at 20mbps: (parent, rt, ls, ul) with

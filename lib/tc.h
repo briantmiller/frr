@@ -26,6 +26,8 @@ enum tc_qdisc_kind {
 	TC_QDISC_NOQUEUE,
 	TC_QDISC_PFIFO,
 	TC_QDISC_HFSC,
+	/* ingress and egress filter hooks, no queueing (handle ffff:) */
+	TC_QDISC_CLSACT,
 };
 
 struct tc_qdisc_htb {
@@ -162,6 +164,13 @@ struct tc_flower {
  * zebra/zebra_acl_flower.c), appended to the keys above.
  */
 #define TC_FLOWER_RAW_KEYS (1 << 10)
+/*
+ * Access control (clsact ingress/egress filters): instead of selecting a
+ * class, drop the packet (gact "drop") or accept it (gact "pass", which
+ * also ends the classification).
+ */
+#define TC_FLOWER_ACT_DROP (1 << 11)
+#define TC_FLOWER_ACT_PASS (1 << 12)
 
 	uint32_t filter_bm;
 
@@ -196,7 +205,11 @@ struct tc_u32 {
 struct tc_filter {
 	ifindex_t ifindex;
 	uint32_t handle;
-	/* minor number of the class the filter is attached to, 0 = root */
+	/*
+	 * minor number of the class the filter is attached to, 0 = root of
+	 * the zebra qdisc; a value with a major part is a full handle
+	 * (e.g. clsact ingress ffff:fff2 or egress ffff:fff3).
+	 */
 	uint32_t parent;
 	/* filter chain index */
 	uint32_t chain;

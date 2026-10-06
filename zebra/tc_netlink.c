@@ -300,6 +300,9 @@ static ssize_t netlink_qdisc_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 				return 0;
 			break;
 		}
+		case TC_QDISC_CLSACT:
+			/* no options: replacing an existing clsact is then a no-op */
+			break;
 		case TC_QDISC_NOQUEUE:
 		case TC_QDISC_UNSPEC:
 			nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
@@ -681,6 +684,12 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 						      (dplane_ctx_tc_filter_get_goto_chain(ctx) &
 						       TC_ACT_EXT_VAL_MASK)))
 			return 0;
+	} else if (filter_bm & TC_FLOWER_ACT_DROP) {
+		if (!netlink_tfilter_put_gact(n, datalen, TC_ACT_SHOT))
+			return 0;
+	} else if (filter_bm & TC_FLOWER_ACT_PASS) {
+		if (!netlink_tfilter_put_gact(n, datalen, TC_ACT_OK))
+			return 0;
 	} else {
 		classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
 				    dplane_ctx_tc_filter_get_classid(ctx));
@@ -753,8 +762,12 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 	req->t.tcm_info = TC_H_MAKE(priority << 16, protocol);
 	req->t.tcm_handle = dplane_ctx_tc_filter_get_handle(ctx);
-	req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
-				      dplane_ctx_tc_filter_get_parent(ctx));
+	/* a minor of the zebra qdisc, or a full handle (clsact hooks) */
+	if (TC_H_MAJ(dplane_ctx_tc_filter_get_parent(ctx)))
+		req->t.tcm_parent = dplane_ctx_tc_filter_get_parent(ctx);
+	else
+		req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
+					      dplane_ctx_tc_filter_get_parent(ctx));
 
 	if (dplane_ctx_tc_filter_get_chain(ctx) &&
 	    !nl_attr_put32(&req->n, datalen, TCA_CHAIN, dplane_ctx_tc_filter_get_chain(ctx)))
@@ -1228,6 +1241,33 @@ struct tc_filter_stats_args {
 	void *arg;
 };
 
+/* Verdict of a gact first action: TCA_*_ACT { 1 { "gact", OPTIONS { PARMS } } } */
+static bool tc_action_gact_parse(struct rtattr *acts, int32_t *action)
+{
+	struct rtattr *prio[TCA_ACT_MAX_PRIO + 1];
+	struct rtattr *act[TCA_ACT_MAX + 1];
+	struct rtattr *opt[TCA_GACT_MAX + 1];
+	struct tc_gact parms;
+
+	netlink_parse_rtattr_nested(prio, TCA_ACT_MAX_PRIO, acts);
+	if (!prio[1])
+		return false;
+
+	netlink_parse_rtattr_nested(act, TCA_ACT_MAX, prio[1]);
+	if (!act[TCA_ACT_KIND] || strcmp(RTA_DATA(act[TCA_ACT_KIND]), "gact") ||
+	    !act[TCA_ACT_OPTIONS])
+		return false;
+
+	netlink_parse_rtattr_nested(opt, TCA_GACT_MAX, act[TCA_ACT_OPTIONS]);
+	if (!opt[TCA_GACT_PARMS] || RTA_PAYLOAD(opt[TCA_GACT_PARMS]) < sizeof(parms))
+		return false;
+
+	memcpy(&parms, RTA_DATA(opt[TCA_GACT_PARMS]), sizeof(parms));
+	*action = parms.action;
+
+	return true;
+}
+
 static void tc_filter_stats_msg(struct nlmsghdr *h, void *arg)
 {
 	struct tc_filter_stats_args *a = arg;
@@ -1258,9 +1298,12 @@ static void tc_filter_stats_msg(struct nlmsghdr *h, void *arg)
 		struct rtattr *opt[TCA_FLOWER_MAX + 1];
 
 		netlink_parse_rtattr_nested(opt, TCA_FLOWER_MAX, tb[TCA_OPTIONS]);
-		if (opt[TCA_FLOWER_ACT])
+		if (opt[TCA_FLOWER_ACT]) {
 			stats.stats_valid = tc_action_stats_parse(opt[TCA_FLOWER_ACT],
 								  &stats.bytes, &stats.packets);
+			stats.gact_valid = tc_action_gact_parse(opt[TCA_FLOWER_ACT],
+								&stats.gact_action);
+		}
 	}
 
 	a->cb(&stats, a->arg);
@@ -1273,6 +1316,48 @@ int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
 	struct tc_filter_stats_args a = { .ifindex = ifindex, .cb = cb, .arg = arg };
 
 	return tc_dump(RTM_GETTFILTER, ifindex, parent, tc_filter_stats_msg, &a);
+}
+
+struct tc_qdisc_kind_args {
+	ifindex_t ifindex;
+	uint32_t handle;
+	char *kind;
+	size_t len;
+	bool found;
+};
+
+static void tc_qdisc_kind_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_qdisc_kind_args *a = arg;
+	struct rtattr *tb[TCA_MAX + 1];
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWQDISC || len < 0 || tcm->tcm_ifindex != a->ifindex ||
+	    tcm->tcm_handle != a->handle)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+	if (!tb[TCA_KIND])
+		return;
+
+	strlcpy(a->kind, RTA_DATA(tb[TCA_KIND]), a->len);
+	a->found = true;
+}
+
+int kernel_tc_qdisc_kind(ifindex_t ifindex, uint32_t handle, char *kind, size_t len)
+{
+	struct tc_qdisc_kind_args a = {
+		.ifindex = ifindex,
+		.handle = handle,
+		.kind = kind,
+		.len = len,
+	};
+
+	if (tc_dump(RTM_GETQDISC, ifindex, 0, tc_qdisc_kind_msg, &a) < 0 || !a.found)
+		return -1;
+
+	return 0;
 }
 
 void kernel_read_tc_qdisc(struct zebra_dplane_ctx *ctx)

@@ -16,17 +16,15 @@
 #include "zebra/zebra_dplane.h"
 #include "zebra/zebra_tc.h"
 #include "zebra/debug.h"
+#include "zebra/zebra_acl_group.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, TC_QDISC, "TC queue discipline");
 DEFINE_MTYPE_STATIC(ZEBRA, TC_CLASS, "TC class");
 DEFINE_MTYPE_STATIC(ZEBRA, TC_FILTER, "TC filter");
 
 const struct message tc_qdisc_kinds[] = {
-	{TC_QDISC_HTB, "htb"},
-	{TC_QDISC_NOQUEUE, "noqueue"},
-	{TC_QDISC_PFIFO, "pfifo"},
-	{TC_QDISC_HFSC, "hfsc"},
-	{0},
+	{ TC_QDISC_HTB, "htb" },   { TC_QDISC_NOQUEUE, "noqueue" }, { TC_QDISC_PFIFO, "pfifo" },
+	{ TC_QDISC_HFSC, "hfsc" }, { TC_QDISC_CLSACT, "clsact" },   { 0 },
 };
 
 const struct message tc_filter_kinds[] = {
@@ -476,6 +474,18 @@ void zebra_tc_qdisc_handle_notify(struct zebra_dplane_ctx *ctx)
 	 * else (other major handles, deletes, post-startup
 	 * notifications) is informational only.
 	 */
+	/*
+	 * clsact, used by access-groups: at startup it may hold filters a
+	 * previous zebra left, later its deletion removes ours.
+	 */
+	if (kind == TC_QDISC_CLSACT) {
+		if (notify_type == DPLANE_TC_QDISC_NOTIFY_NEW && startup)
+			zebra_acl_group_startup_clsact(ifindex);
+		else if (notify_type == DPLANE_TC_QDISC_NOTIFY_DEL)
+			zebra_acl_group_clsact_deleted(ifindex);
+		return;
+	}
+
 	if (notify_type != DPLANE_TC_QDISC_NOTIFY_NEW || !startup || major != TC_QDISC_MAJOR_ZEBRA)
 		return;
 
