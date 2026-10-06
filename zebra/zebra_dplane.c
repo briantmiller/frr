@@ -436,6 +436,8 @@ struct dplane_tc_filter_info {
 	uint32_t goto_chain;
 	uint8_t src_mask[16];
 	uint8_t dst_mask[16];
+	uint16_t raw_len;
+	uint8_t raw[TC_FLOWER_RAW_MAX];
 };
 
 /*
@@ -2471,6 +2473,14 @@ const uint8_t *dplane_ctx_tc_filter_get_src_mask(const struct zebra_dplane_ctx *
 	DPLANE_CTX_VALID(ctx);
 
 	return ctx->u.tc_filter.src_mask;
+}
+
+const uint8_t *dplane_ctx_tc_filter_get_raw(const struct zebra_dplane_ctx *ctx, uint16_t *len)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	*len = ctx->u.tc_filter.raw_len;
+	return ctx->u.tc_filter.raw;
 }
 
 const uint8_t *dplane_ctx_tc_filter_get_dst_mask(const struct zebra_dplane_ctx *ctx)
@@ -4530,6 +4540,12 @@ static int dplane_ctx_tc_filter_init(struct zebra_dplane_ctx *ctx,
 	       sizeof(ctx->u.tc_filter.src_mask));
 	memcpy(ctx->u.tc_filter.dst_mask, filter->filter.u.flower.dst_mask,
 	       sizeof(ctx->u.tc_filter.dst_mask));
+	ctx->u.tc_filter.raw_len = 0;
+	if (filter->filter.u.flower.filter_bm & TC_FLOWER_RAW_KEYS) {
+		ctx->u.tc_filter.raw_len = MIN(filter->filter.u.flower.raw_len,
+					       sizeof(ctx->u.tc_filter.raw));
+		memcpy(ctx->u.tc_filter.raw, filter->filter.u.flower.raw, ctx->u.tc_filter.raw_len);
+	}
 
 	ctx->u.tc_filter.priority = filter->filter.priority;
 	ctx->u.tc_filter.handle = filter->filter.handle;

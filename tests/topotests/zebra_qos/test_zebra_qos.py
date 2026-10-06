@@ -24,7 +24,8 @@ class) to traffic leaving r1-eth0.  The tests check:
   act_gact in the kernel, skipped otherwise),
 - that a "qos bandwidth" change only updates the HTB classes in place,
 - that policy-map and access-list changes re-install the hierarchy,
-- removing and re-applying the service-policy.
+- removing and re-applying the service-policy,
+- "ip access-list extended" entries with tc-flower keys used by a class-map.
 
 Traffic is generated with a small python UDP sender (setting IP_TOS /
 IPV6_TCLASS and the source address), so the test does not depend on ping.
@@ -1048,6 +1049,176 @@ def test_qos_extended_acl(tgen):
     wait_for(
         functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
         "hierarchy not restored after removing EXT",
+    )
+
+
+XACL_CONFIG = """
+configure terminal
+ ip access-list extended XACL
+  remark keys from several layers
+  deny udp any any eq 7 ttl lt 2
+  permit udp host 10.1.1.1 any eq discard
+  permit tcp any any eq 22 established
+  permit arp arp-op request
+  permit ip any any vlan-id 10 vlan-prio 5
+  permit mpls mpls-label 100
+ exit
+ class-map match-any XCLS
+  match access-group name XACL
+ exit
+ policy-map PARENT
+  class XCLS
+   bandwidth percent 10
+  exit
+"""
+
+# running-config: sequence numbers assigned 10, 20... and canonical text
+XACL_LINES = [
+    "ip access-list extended XACL",
+    " 10 remark keys from several layers",
+    " 20 deny udp any any eq 7 ttl lt 2",
+    " 30 permit udp host 10.1.1.1 any eq 9",
+    " 40 permit tcp any any eq 22 established",
+    " 50 permit arp arp-op request",
+    " 60 permit ip any any vlan-id 10 vlan-prio 5",
+    " 70 permit mpls mpls-label 100",
+]
+
+# (protocol, match, action) of the filters of XCLS, in evaluation order:
+# "ttl lt 2" becomes a masked TTL, "established" one filter per flag
+XACL_FILTERS = [
+    ("ipv4", "udp any any eq 7 ttl lt 2 {ttl 0/0xfe}", "goto"),
+    ("ipv4", "udp host 10.1.1.1 any eq 9", "classify"),
+    ("ipv4", "tcp any any eq 22 established {tcp-flags 0x10/0x10}", "classify"),
+    ("ipv4", "tcp any any eq 22 established {tcp-flags 0x4/0x4}", "classify"),
+    ("arp", "arp arp-op request", "classify"),
+    ("802.1Q", "ip any any vlan-id 10 vlan-prio 5", "classify"),
+    ("mpls", "mpls mpls-label 100", "classify"),
+    ("all", "any", "goto"),
+]
+
+# flower keys tc shows for them, when the kernel has cls_flower (prefixes,
+# the mask format differs between iproute2 versions)
+XACL_TC_KEYS = [
+    "ip_ttl 0",
+    "src_ip 10.1.1.1",
+    "dst_port 9",
+    "tcp_flags 0x10",
+    "tcp_flags 0x4",
+    "arp_op request",
+    "vlan_id 10",
+    "vlan_prio 5",
+    "vlan_ethtype ip",
+    "mpls_label 100",
+]
+
+
+def test_qos_ip_access_list_extended(tgen):
+    'class-map using an "ip access-list extended" with tc-flower keys'
+
+    r1 = tgen.gears["r1"]
+
+    # rejected entries, the access-list is not created by them
+    for bad, why in (
+        ("permit udp any any eq 99999", "invalid port"),
+        ("permit ip any any vlan-id 5000", "invalid vlan-id"),
+        ("permit ip any any log", "log is not supported"),
+        ("permit arp any any", "unknown keyword"),
+        ("permit ip host 10.0.0.1 host 2001:db8::1", "same address family"),
+    ):
+        out = r1.vtysh_cmd(
+            "configure terminal\n ip access-list extended XBAD\n  {}\n".format(bad)
+        )
+        assert why in out, "{!r} not rejected with {!r}: {}".format(bad, why, out)
+    r1.vtysh_cmd("configure terminal\n no ip access-list extended XBAD\n")
+
+    filters_before = show_qos_json(r1)["filters"]
+
+    out = r1.vtysh_cmd(XACL_CONFIG)
+    assert "Invalid" not in out and "failed" not in out, out
+
+    running = r1.vtysh_cmd("show running-config")
+    assert "\n".join(XACL_LINES) + "\nexit" in running, running
+
+    expected = dict(EXPECTED_CLASSES_20M)
+    expected["beef:7"] = dict(
+        parent="beef:1", rate=2000000, ceil=20000000, prio=7, leaf=True
+    )
+    expected["beef:8"] = dict(EXPECTED_CLASSES_20M["beef:7"])
+
+    def _installed():
+        error = check_classes(r1, expected, EXPECTED_FIFOS)
+        if error:
+            return error
+        filters = show_qos_json(r1)["filters"]
+        if filters != filters_before + len(XACL_FILTERS):
+            return "{} filters, expected {}".format(
+                filters, filters_before + len(XACL_FILTERS)
+            )
+        cmaps = show_class_map_json(r1).get("classMaps", [])
+        xcls = [c for c in cmaps if c["classMap"] == "XCLS"]
+        if not xcls:
+            return "XCLS not shown"
+        have = [
+            (f["protocol"], f["match"], f["action"].split()[0])
+            for f in xcls[0]["filters"]
+        ]
+        if have != XACL_FILTERS:
+            return "XCLS filters {} != {}".format(have, XACL_FILTERS)
+        origins = [f["origin"] for f in xcls[0]["filters"]]
+        if origins[1] != "ip access-list extended XACL seq 30 permit":
+            return "unexpected origin {}".format(origins[1])
+        return None
+
+    try:
+        wait_for(_installed, "XCLS not installed")
+
+        # an entry flower cannot express in few filters refuses the policy
+        r1.vtysh_cmd(
+            "configure terminal\n ip access-list extended XACL\n"
+            "  80 permit tcp any neq 1 any neq 2 ttl range 1 254 established\n"
+        )
+
+        def _refused():
+            reason = show_qos_json(r1).get("reason", "")
+            if "XACL seq 80" not in reason or "filters" not in reason:
+                return "not refused: {}".format(show_qos_json(r1))
+            return None
+
+        wait_for(_refused, "oversized entry accepted")
+        r1.vtysh_cmd("configure terminal\n ip access-list extended XACL\n  no 80\n")
+        wait_for(_installed, "XCLS not re-installed")
+
+        if kernel_supports_flower(tgen):
+            out = r1.cmd("tc filter show dev {}".format(INTF))
+            for key in XACL_TC_KEYS:
+                assert key in out, "{!r} not in tc filters:\n{}".format(key, out)
+
+            for desc, src, want in (
+                ("udp from 10.1.1.1 to port 9", "10.1.1.1", "beef:7"),
+                ("other source", "192.0.2.1", "beef:8"),
+            ):
+                send_udp(r1, src, "192.0.2.2", TOS["default"], 1)
+                before = tc_classes(r1)
+                send_udp(r1, src, "192.0.2.2", TOS["default"], 30)
+                after = tc_classes(r1)
+                delta = after[want]["packets"] - before[want]["packets"]
+                assert delta >= 30, "{}: {} got {} packets".format(desc, want, delta)
+        else:
+            logger.info("kernel lacks cls_flower/act_gact: classification not checked")
+    finally:
+        r1.vtysh_cmd("""
+            configure terminal
+             policy-map PARENT
+              no class XCLS
+             exit
+             no class-map XCLS
+             no ip access-list extended XACL
+            """)
+
+    wait_for(
+        functools.partial(check_classes, r1, EXPECTED_CLASSES_20M, EXPECTED_FIFOS),
+        "hierarchy not restored after removing XCLS",
     )
 
 

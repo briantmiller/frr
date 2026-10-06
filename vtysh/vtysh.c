@@ -1624,6 +1624,13 @@ static struct cmd_node ldp_pseudowire_node = {
 	.prompt = "%s(config-l2vpn-pw)# ",
 };
 
+static struct cmd_node acl_ext_node = {
+	.name = "ip access-list extended",
+	.node = ACL_EXT_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-ext-nacl)# ",
+};
+
 static struct cmd_node class_map_node = {
 	.name = "class-map",
 	.node = CLASS_MAP_NODE,
@@ -2119,6 +2126,17 @@ DEFUNSH(VTYSH_BGPD, exit_vrf_policy, exit_vrf_policy_cmd, "exit-vrf-policy",
 }
 #endif
 #endif /* HAVE_BGPD */
+
+DEFUNSH(VTYSH_MGMTD, vtysh_ip_access_list_extended, vtysh_ip_access_list_extended_cmd,
+	"ip access-list extended QOS_ACLX_NAME",
+	IP_STR
+	"Add an access list entry\n"
+	"Extended access-list (all tc-flower match keys)\n"
+	"Access-list name\n")
+{
+	vty->node = ACL_EXT_NODE;
+	return CMD_SUCCESS;
+}
 
 DEFUNSH(VTYSH_MGMTD, vtysh_class_map, vtysh_class_map_cmd,
 	"class-map [<match-any|match-all>] QOS_CMAP_NAME",
@@ -5449,6 +5467,7 @@ void vtysh_init_vty(void)
 	install_node(&pcep_pcc_node);
 	install_node(&pcep_pce_node);
 	install_node(&pcep_pce_config_node);
+	install_node(&acl_ext_node);
 	install_node(&class_map_node);
 	install_node(&policy_map_node);
 	install_node(&policy_map_class_node);
@@ -5823,6 +5842,10 @@ void vtysh_init_vty(void)
 
 	/* keychain */
 	install_element(CONFIG_NODE, &key_chain_cmd);
+	install_element(CONFIG_NODE, &vtysh_ip_access_list_extended_cmd);
+	install_element(ACL_EXT_NODE, &vtysh_exit_qos_cmd);
+	install_element(ACL_EXT_NODE, &vtysh_quit_qos_cmd);
+	install_element(ACL_EXT_NODE, &vtysh_end_all_cmd);
 	install_element(CONFIG_NODE, &vtysh_class_map_cmd);
 	install_element(CLASS_MAP_NODE, &vtysh_exit_qos_cmd);
 	install_element(CLASS_MAP_NODE, &vtysh_quit_qos_cmd);

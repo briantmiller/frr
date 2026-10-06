@@ -635,6 +635,8 @@ uint32_t dplane_ctx_tc_filter_get_chain(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_filter_get_goto_chain(const struct zebra_dplane_ctx *ctx);
 const uint8_t *dplane_ctx_tc_filter_get_src_mask(const struct zebra_dplane_ctx *ctx);
 const uint8_t *dplane_ctx_tc_filter_get_dst_mask(const struct zebra_dplane_ctx *ctx);
+/* extra flower match keys as netlink attributes (TC_FLOWER_RAW_KEYS) */
+const uint8_t *dplane_ctx_tc_filter_get_raw(const struct zebra_dplane_ctx *ctx, uint16_t *len);
 uint32_t dplane_ctx_tc_qdisc_get_handle(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_qdisc_get_parent(const struct zebra_dplane_ctx *ctx);
 uint32_t dplane_ctx_tc_qdisc_get_defcls(const struct zebra_dplane_ctx *ctx);

@@ -783,8 +783,10 @@ Class-maps
 
 .. clicmd:: match access-group name ACCESSLIST
 
-   Match packets permitted by the IPv4 and/or IPv6 access-list of that name.
-   An IPv4 and an IPv6 access-list may share the name, the class then
+   Match packets permitted by the access-list of that name. An extended
+   access-list (:clicmd:`ip access-list extended NAME`) of that name takes
+   precedence; otherwise the IPv4 and/or IPv6 access-lists of that name are
+   used. An IPv4 and an IPv6 access-list may share the name, the class then
    matches both families. Access-lists are evaluated with first-match
    semantics, so ``deny`` entries exclude packets. A ``match-all`` class-map
    can reference at most one access-list. A class referencing an access-list
@@ -820,8 +822,9 @@ Class-maps
        match access-group name EXT
       exit
 
-   Only addresses are matched, access-lists have no protocol or port
-   fields.
+   Only addresses are matched by these access-lists. To match protocols,
+   ports, TCP flags, VLAN tags, MPLS labels and other header fields, use an
+   extended access-list.
 
 .. clicmd:: match ip dscp DSCP...
 
@@ -834,6 +837,175 @@ Class-maps
 .. clicmd:: match any
 
    Match every packet.
+
+Extended access-lists
+---------------------
+
+Extended access-lists follow the syntax of Cisco IOS ``ip access-list
+extended`` and extend it with every match key of the Linux tc flower
+classifier (see ``man tc-flower``), from Ethernet addresses and VLAN tags to
+MPLS label stacks, ARP fields, tunnel metadata and connection tracking
+state. They are used by class-maps (``match access-group name NAME``), each
+entry is installed as one or more tc flower filters.
+
+.. clicmd:: ip access-list extended NAME
+
+   Create the access-list and enter its configuration node.
+
+.. clicmd:: [SEQ] <permit|deny> PROTOCOL ...
+
+   Add an entry. Without a sequence number the entry is appended with the
+   highest sequence number plus 10. Entries are evaluated in sequence order
+   and the first matching entry decides: ``permit`` selects the packet for
+   the class, ``deny`` excludes it (the evaluation continues with the next
+   match statement of the class-map). The entry is checked when it is
+   entered and stored in a canonical form (port and protocol names become
+   numbers, options are put in a fixed order), which ``show running-config``
+   displays.
+
+.. clicmd:: [SEQ] remark LINE
+
+   Add a comment.
+
+.. clicmd:: no SEQ
+
+.. clicmd:: no <permit|deny|remark> LINE
+
+   Remove an entry by sequence number or by its text.
+
+An entry is ``permit`` or ``deny`` followed by::
+
+   PROTOCOL SOURCE [PORTS] DESTINATION [PORTS] [ICMP-MESSAGE] [OPTION...]
+   arp|rarp|mpls|mpls-multicast|pppoe|cfm [OPTION...]
+   ethertype <any|0xHHHH|NAME> [OPTION...]
+
+``PROTOCOL`` is ``ip`` (any IPv4 packet), ``ipv6``, an IP protocol name
+(``tcp``, ``udp``, ``sctp``, ``icmp``, ``icmpv6``, ``igmp``, ``gre``, ``esp``,
+``ahp``, ``ospf``, ``pim``, ``l2tp``...) or number. The address family of an
+IP protocol follows from the addresses; with ``any`` on both sides it is
+IPv4, ``::/0`` selects IPv6 (``tcp ::/0 any eq 80``). ``SOURCE`` and ``DESTINATION`` are
+``any``, ``host ADDRESS``, ``PREFIX/LEN`` or ``ADDRESS WILDCARD`` (bits set in
+the wildcard are ignored and may be non-contiguous). For ``tcp``, ``udp`` and
+``sctp`` each address may be followed by ``eq PORT``, ``neq PORT``, ``lt
+PORT``, ``gt PORT`` or ``range PORT PORT``; ports are numbers or the usual
+names (``www``, ``domain``, ``bgp``...). For ``icmp`` and ``icmpv6`` the
+destination may be followed by a message name (``echo``, ``echo-reply``,
+``unreachable``, ``packet-too-big``...) or a type and optional code.
+
+The non IP protocols select the ethertype: ``arp``, ``rarp``, ``mpls``
+(unicast), ``mpls-multicast``, ``pppoe`` (session stage), ``cfm`` (802.1ag)
+or any other ``ethertype``; ``ethertype any`` matches every frame.
+
+Options, in any order (masked values are ``VALUE/MASK``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 30 35
+
+   * - Option
+     - tc flower key
+     - Notes
+   * - ``dscp DSCP``, ``precedence PREC``, ``ecn ECN``, ``ip-tos TOS[/MASK]``
+     - ``ip_tos``
+     - IP only; may be combined when they do not overlap
+   * - ``ttl OP VALUE``, ``hop-limit OP VALUE``
+     - ``ip_ttl``
+     - ``eq``, ``neq``, ``lt``, ``gt``, ``range``
+   * - ``fragments``, ``ip-flags [no]frag/[no]firstfrag``
+     - ``ip_flags``
+     - ``fragments``: non-initial fragments, like Cisco
+   * - ``established``, ``syn``, ``ack``, ``fin``, ``rst``, ``psh``, ``urg``,
+       ``ece``, ``cwr``, ``ns``, ``match-all +FLAG -FLAG...``,
+       ``tcp-flags VALUE/MASK``
+     - ``tcp_flags``
+     - ``established``: ACK or RST set
+   * - ``icmp-type TYPE[/MASK]``, ``icmp-code CODE[/MASK]``
+     - ``type``, ``code``
+     -
+   * - ``spi SPI``
+     - ``spi``
+     - ``esp`` or ``ahp``
+   * - ``l2tpv3-sid SID``
+     - ``l2tpv3_sid``
+     - ``l2tp``
+   * - ``src-mac MAC[/MASK]``, ``dst-mac MAC[/MASK]``
+     - ``src_mac``, ``dst_mac``
+     -
+   * - ``vlan-id ID``, ``vlan-prio PRIO``, ``vlan-tpid 802.1q|802.1ad``
+     - ``vlan_id``, ``vlan_prio``, ``vlan_ethtype``
+     - the outer tag; the filter protocol becomes the TPID
+   * - ``cvlan-id ID``, ``cvlan-prio PRIO``
+     - ``cvlan_id``, ``cvlan_prio``, ``cvlan_ethtype``
+     - the inner tag of 802.1ad (QinQ) frames
+   * - ``num-of-vlans N``
+     - ``num_of_vlans``
+     -
+   * - ``mpls-label``, ``mpls-tc``, ``mpls-bos``, ``mpls-ttl``
+     - ``mpls_label``, ``mpls_tc``, ``mpls_bos``, ``mpls_ttl``
+     - the top label stack entry
+   * - ``lse depth N [label L] [tc T] [bos B] [ttl T]``
+     - ``mpls lse``
+     - any label stack entry, may be repeated
+   * - ``pppoe-sid SID``, ``ppp-proto PROTO``
+     - ``pppoe_sid``, ``ppp_proto``
+     - ``pppoe``
+   * - ``arp-op request|reply|OP``, ``arp-sip PREFIX``, ``arp-tip PREFIX``,
+       ``arp-sha MAC[/MASK]``, ``arp-tha MAC[/MASK]``
+     - ``arp_op``, ``arp_sip``, ``arp_tip``, ``arp_sha``, ``arp_tha``
+     - ``arp`` and ``rarp``
+   * - ``cfm-mdl LEVEL``, ``cfm-op OPCODE``
+     - ``cfm mdl``, ``cfm op``
+     - ``cfm``
+   * - ``enc-key-id``, ``enc-src-ip``, ``enc-dst-ip``, ``enc-dst-port``,
+       ``enc-tos``, ``enc-ttl``, ``enc-flags``
+     - ``enc_key_id``, ``enc_src_ip``, ``enc_dst_ip``, ``enc_dst_port``,
+       ``enc_tos``, ``enc_ttl``, ``enc_flags``
+     - tunnel metadata of decapsulated packets
+   * - ``geneve-opts``, ``vxlan-opts``, ``erspan-opts``, ``gtp-opts``,
+       ``pfcp-opts``
+     - same names with ``_``
+     - same syntax as tc, one kind per entry
+   * - ``ct-state +trk+est...``, ``ct-zone``, ``ct-mark``, ``ct-label``
+     - ``ct_state``, ``ct_zone``, ``ct_mark``, ``ct_label``
+     - ``+FLAG`` needs ``+trk``; ``ct-label`` takes 32 hex digits
+   * - ``indev IFNAME``, ``l2-miss 0|1``
+     - ``indev``, ``l2_miss``
+     -
+
+``log``, ``log-input`` and ``time-range`` are not supported.
+
+.. code-block:: frr
+
+   ip access-list extended VOICE
+    10 remark SIP and RTP from the phones, not from the lab
+    20 deny ip 10.9.0.0 0.0.255.255 any
+    30 permit udp 10.1.0.0 0.0.255.255 any range 16384 32767
+    40 permit tcp any any eq 5060 established
+    50 permit ip any any vlan-id 20 vlan-prio 5
+   exit
+   !
+   ip access-list extended L2
+    10 permit arp arp-op request
+    20 permit mpls lse depth 1 label 100 lse depth 2 tc 5
+    30 permit ipv6 2001:db8::/32 any dscp ef hop-limit gt 1
+   exit
+   !
+   class-map match-any VOICE
+    match access-group name VOICE
+   exit
+
+A flower filter matches one value (under a mask) or one range per key, so
+some entries become several filters, shown with the part they add in
+braces by :clicmd:`show class-map interface IFNAME [json]`:
+
+- ``neq``, ``lt`` and ``gt`` on ports become one or two port ranges,
+- ``ttl``/``hop-limit`` other than ``eq`` becomes masked TTL values,
+- ``established`` becomes one filter for ACK and one for RST,
+- in a ``match-all`` class-map with ``match ip dscp``, every ``permit``
+  entry is repeated for each DSCP value. Non IP entries never match then.
+
+An entry needing more than 32 filters prevents the policy from being
+installed; ``show qos interface`` gives the reason.
 
 Policy-maps
 -----------
@@ -974,10 +1146,11 @@ Interface commands
 
    Apply the policy-map ``NAME`` to traffic leaving the interface.
 
-When a policy-map, class-map or access-list used by an interface changes, the
-HTB qdisc of the interface is deleted and installed again. When only rates,
-ceilings or priorities change, e.g. after ``qos bandwidth`` was modified, the
-existing HTB classes are updated in place without disturbing traffic.
+When a policy-map, class-map or access-list (standard or extended) used by
+an interface changes, the HTB qdisc of the interface is deleted and installed
+again. When only rates, ceilings or priorities change, e.g. after ``qos
+bandwidth`` was modified, the existing HTB classes are updated in place
+without disturbing traffic.
 
 .. clicmd:: show qos interface [IFNAME] [json]
 
@@ -1041,14 +1214,14 @@ existing HTB classes are updated in place without disturbing traffic.
           Policy-map PARENT, HTB class beef:2, parent beef:1
           Class: 1250 packets, 312500 bytes, 0 drops, 0 overlimits, current 1.20Mbps
           Filters attached to beef:, in evaluation order:
-            Chain Pref Proto Match                Action        Packets    Bytes        Origin
-            0     1    ipv4  src 10.1.1.0/24      goto chain 1  15         3600         access-list VOICE seq 5 deny
-            0     2    ipv4  src 10.0.0.0/8       classify      1210       302500       access-list VOICE seq 10 permit
-            0     3    ipv6  src 2001:db8::/32    classify      0          0            ipv6 access-list VOICE seq 5 permit
-            0     4    all   any                  goto chain 1  40         10000        no match: next statement
-            1     1    ipv4  dscp ef              classify      40         10000        match ip dscp ef
-            1     2    ipv6  dscp ef              classify      0          0            match ip dscp ef
-            1     3    all   any                  goto chain 2  0          0            no match: next statement
+            Chain Pref Proto   Match                Action        Packets    Bytes        Origin
+            0     1    ipv4    src 10.1.1.0/24      goto chain 1  15         3600         access-list VOICE seq 5 deny
+            0     2    ipv4    src 10.0.0.0/8       classify      1210       302500       access-list VOICE seq 10 permit
+            0     3    ipv6    src 2001:db8::/32    classify      0          0            ipv6 access-list VOICE seq 5 permit
+            0     4    all     any                  goto chain 1  40         10000        no match: next statement
+            1     1    ipv4    dscp ef              classify      40         10000        match ip dscp ef
+            1     2    ipv6    dscp ef              classify      0          0            match ip dscp ef
+            1     3    all     any                  goto chain 2  0          0            no match: next statement
 
    ``Chain`` / ``Pref``
       Position of the filter: the kernel starts with chain 0 and evaluates
@@ -1064,6 +1237,15 @@ existing HTB classes are updated in place without disturbing traffic.
       in the kernel (its installation failed, e.g. because the kernel lacks
       ``cls_flower`` or ``act_gact``); a warning is printed below the
       output in that case.
+
+   ``Proto``
+      The filter protocol: the ethertype, or the VLAN TPID (``802.1Q``,
+      ``802.1ad``) for entries matching VLAN tags.
+
+   ``Match``
+      The keys of the filter. For extended access-lists this is the entry,
+      followed in braces by what the filter adds when the entry was
+      expanded into several filters.
 
    ``Origin``
       The access-list entry or match statement the filter was generated

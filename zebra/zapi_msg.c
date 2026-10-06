@@ -3562,6 +3562,8 @@ static inline void zread_tc_filter(ZAPI_HANDLER_ARGS)
 		switch (filter.filter.kind) {
 		case TC_FILTER_FLOWER: {
 			STREAM_GETL(s, filter.filter.u.flower.filter_bm);
+			/* raw keys are only built by zebra itself (QoS) */
+			UNSET_FLAG(filter.filter.u.flower.filter_bm, TC_FLOWER_RAW_KEYS);
 			uint32_t filter_bm = filter.filter.u.flower.filter_bm;
 
 			if (filter_bm & TC_FLOWER_IP_PROTOCOL)

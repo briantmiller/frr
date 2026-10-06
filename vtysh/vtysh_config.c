@@ -410,6 +410,9 @@ void vtysh_config_parse_line(void *arg, const char *line)
 			config = config_get(RMAP_NODE, line);
 		else if (strncmp(line, "pbr-map", strlen("pbr-map")) == 0)
 			config = config_get(PBRMAP_NODE, line);
+		else if (strncmp(line, "ip access-list extended ",
+				 strlen("ip access-list extended ")) == 0)
+			config = config_get(ACL_EXT_NODE, line);
 		else if (strncmp(line, "class-map ", strlen("class-map ")) == 0)
 			config = config_get(CLASS_MAP_NODE, line);
 		else if (strncmp(line, "policy-map ", strlen("policy-map ")) == 0)

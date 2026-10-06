@@ -112,6 +112,8 @@ zebra_zebra_SOURCES = \
 	zebra/zebra_tc.c \
 	zebra/zebra_qos.c \
 	zebra/zebra_qos_nb.c \
+	zebra/zebra_acl_ext.c \
+	zebra/zebra_acl_flower.c \
 	zebra/zebra_trace.c \
 	zebra/zebra_vrf.c \
 	zebra/zebra_vty.c \
@@ -197,6 +199,8 @@ nobase_pkginclude_HEADERS += \
 	zebra/zebra_srte.h \
 	zebra/zebra_tc.h \
 	zebra/zebra_qos.h \
+	zebra/zebra_acl_ext.h \
+	zebra/zebra_acl_flower.h \
 	zebra/zebra_trace.h \
 	zebra/zebra_vrf.h \
 	zebra/zebra_vxlan.h \

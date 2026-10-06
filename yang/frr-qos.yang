@@ -50,7 +50,8 @@ module frr-qos {
 
   revision 2026-10-05 {
     description
-      "Add HFSC policy-maps and service curves.";
+      "Add HFSC policy-maps and service curves, and extended
+       access-lists.";
     reference "FRRouting";
   }
 
@@ -146,6 +147,85 @@ module frr-qos {
     description
       "Class-based QoS configuration.";
 
+    list extended-access-list {
+      key "name";
+      description
+        "Cisco style extended access-list (\"ip access-list extended
+         NAME\").  Besides the IP header fields of Cisco extended
+         access-lists, entries can match every tc-flower key: Ethernet,
+         VLAN, MPLS, PPPoE, ARP, CFM, tunnel metadata and connection
+         tracking state.  Referenced by class-maps, which install them as
+         tc-flower filters.";
+
+      leaf name {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Access-list name.";
+      }
+
+      list entry {
+        key "sequence";
+        description
+          "Access-list entry, evaluated in sequence order; the first
+           matching entry decides.";
+
+        leaf sequence {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Sequence number.";
+        }
+
+        choice value {
+          mandatory true;
+          description
+            "A permit/deny rule or a remark.";
+          case rule {
+            leaf action {
+              type enumeration {
+                enum permit {
+                  value 0;
+                  description
+                    "Matching packets are permitted (selected).";
+                }
+                enum deny {
+                  value 1;
+                  description
+                    "Matching packets are denied (not selected).";
+                }
+              }
+              mandatory true;
+              description
+                "What happens to matching packets.";
+            }
+            leaf match {
+              type string {
+                length "1..1023";
+              }
+              mandatory true;
+              description
+                "Match specification, everything after permit/deny, e.g.
+                 \"tcp 10.0.0.0 0.0.0.255 any eq 80 dscp ef vlan-id 10\".
+                 Stored in canonical form.";
+            }
+          }
+          case remark {
+            leaf remark {
+              type string {
+                length "1..100";
+              }
+              description
+                "Comment.";
+            }
+          }
+        }
+      }
+    }
+
     list class-map {
       key "name";
       description
@@ -188,10 +268,13 @@ module frr-qos {
           length "1..128";
         }
         description
-          "Match packets permitted by the named IPv4 and/or IPv6
-           access-list.  Standard (zebra style) access-list entries are
-           applied to the source address, Cisco style extended entries
-           are applied to source and destination address.";
+          "Match packets permitted by the named access-list.  An
+           extended access-list (ip access-list extended) of that name
+           takes precedence; otherwise the IPv4 and/or IPv6 access-lists
+           of that name are used.  Standard (zebra style) access-list
+           entries are applied to the source address, Cisco style
+           extended entries are applied to source and destination
+           address.";
       }
 
       leaf-list dscp {
