@@ -53,6 +53,7 @@
 #include "zebra/zebra_neigh.h"
 #include "zebra/zebra_script.h"
 #include "zebra/zebra_tc.h"
+#include "zebra/zebra_nat.h"
 
 DEFINE_MGROUP(ZEBRA, "zebra");
 
@@ -5325,6 +5326,11 @@ static void rib_process_dplane_results(struct event *event)
 			case DPLANE_OP_NH_FDB_INSTALL:
 			case DPLANE_OP_NH_FDB_DELETE:
 				zebra_evpn_l2_nh_dplane_result(ctx);
+				break;
+
+			case DPLANE_OP_NAT_TC_INSTALL:
+			case DPLANE_OP_NAT_TC_DELETE:
+				zebra_nat_dplane_result(ctx);
 				break;
 
 			case DPLANE_OP_RULE_ADD:

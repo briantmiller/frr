@@ -404,6 +404,183 @@ outgoing interface
 
    Resolve PBR nexthop via ip neigh tracking
 
+.. _zebra-nat:
+
+Stateful NAT
+============
+
+On Linux, zebra can perform stateful IPv4 network address and port
+translation (NAPT, sometimes called "masquerading") between private-facing
+*inside* interfaces and a public-facing *outside* interface. Traffic received
+on an inside interface and routed out of an outside interface in the same VRF
+leaves with the outside interface's primary IPv4 address as its source;
+replies are translated back before they are routed to the inside host.
+
+The translation is done entirely in the kernel with traffic control: zebra
+attaches a ``clsact`` qdisc to every outside interface and installs
+``flower`` filters whose actions are connection tracking (``act_ct``). No
+iptables or nftables rules are used, and the translations are ordinary
+conntrack entries, which the show commands below read back from the kernel.
+
+.. clicmd:: ip nat inside
+
+   Mark the interface as private-facing. Packets received on it are
+   translated when they are forwarded out of an outside interface of the same
+   VRF.
+
+.. clicmd:: ip nat outside
+
+   Mark the interface as public-facing. The interface's primary IPv4 address
+   is used as the translated source address; if the address changes, the
+   filters are updated and translations to the old address are removed. The
+   outside interface is only programmed once it exists and has an IPv4
+   address.
+
+.. code-block:: frr
+
+   interface eth0
+    ip nat outside
+   exit
+   !
+   interface eth1
+    ip nat inside
+   exit
+   !
+   interface eth2
+    ip nat inside
+   exit
+
+Each outside interface uses its own conntrack zone, 32768 plus the interface
+index (modulo 32768), so translations survive a restart of zebra. On each
+outside interface zebra installs the following filters (all with protocol
+``ip``, ``skip_hw``, and with priorities and a chain number of its own,
+0xbee0-0xbee2):
+
+* egress, one filter per inside interface: ``indev <inside>``, action
+  ``ct zone Z nat`` and continue in a second chain, where new connections are
+  committed with ``ct commit zone Z nat src addr <outside address>`` and
+  packets conntrack considers invalid are dropped, so that untranslated
+  inside addresses do not leak;
+* egress: ``src_ip <outside address>``, action ``ct commit zone Z``. The
+  router's own connections are tracked in the zone so that port translation
+  never picks a port the router itself is using;
+* ingress: ``dst_ip <outside address>``, action ``ct zone Z nat``, which
+  translates replies back to the inside host before the routing decision.
+
+The ``clsact`` qdisc is shared with other users of tc and is not removed when
+NAT is unconfigured; only zebra's own filters are. Filters other applications
+install at a lower priority value run first and can bypass translation. The
+filters are left in place when zebra stops, so that forwarding continues
+across a restart; at start-up zebra removes any filters a previous run left
+behind and installs those still configured.
+
+Only traffic leaving the outside interface is translated, so connections
+opened from the outside towards (routable) inside addresses are not
+supported: their replies are translated as well. Connections from the outside
+reach inside hosts only through static translations (see below).
+
+The kernel needs ``CONFIG_NET_CLS_FLOWER``, ``CONFIG_NET_ACT_CT``,
+``CONFIG_NET_ACT_GACT`` and ``CONFIG_NF_NAT`` (Linux 5.12 or later is
+recommended for the conntrack state matches used). Per-translation packet and
+byte counters are only reported when ``net.netfilter.nf_conntrack_acct`` is
+enabled.
+
+.. clicmd:: show ip nat translations [vrf <NAME|all>] [verbose] [json]
+
+   Show the current translations, read from the kernel conntrack table, in
+   the usual *inside global*, *inside local*, *outside local*, *outside
+   global* layout. For ICMP the port column holds the echo identifier.
+   ``verbose`` adds the outside interface, conntrack zone and id, remaining
+   timeout, TCP state, flags and counters. Established connections that
+   ``act_ct`` moved to its software flow table are flagged ``offloaded`` and
+   have no conntrack timeout.
+
+   ::
+
+      Pro   Inside global           Inside local            Outside local           Outside global
+      tcp   203.0.113.1:49732       10.0.1.2:49732          203.0.113.2:8080        203.0.113.2:8080
+      udp   203.0.113.1:42907       10.0.1.2:42907          203.0.113.2:5353        203.0.113.2:5353
+      icmp  203.0.113.1:4420        10.0.1.2:4420           203.0.113.2:4420        203.0.113.2:4420
+      Total number of translations: 3
+
+   Static translations are listed first, with ``---`` for the outside
+   columns; connections opened from the outside through them are flagged
+   ``inbound`` (``"inbound": true`` in JSON).
+
+.. clicmd:: show ip nat statistics [vrf <NAME|all>] [json]
+
+   Show the NAT interfaces with their translation address, conntrack zone,
+   number of translations and the state of their tc objects, the static
+   translations with their state (or the reason they are inactive), followed
+   by the kernel's conntrack statistics (summed over all CPUs).
+
+.. clicmd:: clear ip nat translation [vrf <NAME|all>] *
+
+   Delete every translation (conntrack entry in the NAT zones). Static
+   translations stay configured; only their current connections are removed.
+
+Static translations
+-------------------
+
+Static translations make inside hosts reachable from the outside. They are
+configured globally (or with the ``vrf`` option, or inside a ``vrf`` block)
+and apply to the outside interfaces of that VRF.
+
+.. clicmd:: ip nat inside source static <tcp|udp> A.B.C.D (1-65535) <interface IFNAME|A.B.C.D> (1-65535) [vrf NAME]
+
+   Port forwarding: new connections to the global address and port are
+   translated to the inside local address and port. With ``interface`` the
+   global address is the primary address of that NAT outside interface and
+   follows its changes; otherwise the global address must be configured on a
+   NAT outside interface of the VRF (for instance as a secondary address), so
+   that the router answers ARP for it.
+
+.. clicmd:: ip nat inside source static A.B.C.D A.B.C.D [vrf NAME]
+
+   One-to-one translation: all connections to the global address are
+   translated to the inside local address, and connections the inside host
+   opens leave with the global address instead of the outside interface's
+   address. The global address must be configured on a NAT outside interface
+   and is owned entirely by this translation.
+
+.. code-block:: frr
+
+   ip nat inside source static tcp 10.0.1.10 80 interface eth0 8080
+   ip nat inside source static udp 10.0.1.20 51820 203.0.113.5 51820
+   ip nat inside source static 10.0.1.30 203.0.113.6
+   !
+   vrf CUST-A
+    ip nat inside source static tcp 10.0.1.10 22 interface eth3 2222
+   exit-vrf
+
+A global address and port can only be used by one translation, and a
+one-to-one translation cannot share its global address with port forwards.
+The CLI refuses to forward a TCP or UDP port that a service on the router is
+listening on (on all addresses, or on the global address), since that
+service would no longer be reachable from the outside; a service started
+afterwards is reported as a warning by ``show ip nat statistics``. Only the
+default VRF's sockets are checked.
+
+The inside local host must be reached through an ``ip nat inside``
+interface: replies are translated back by the inside interface filters.
+
+Static translations are implemented with a second ingress chain on the
+outside interface: the ingress filters for the outside address (and for every
+other global address) continue in it, where new connections matching a
+translation are committed with ``ct commit zone Z nat dst addr <local> port
+<local port>``. One-to-one translations add an egress filter that commits new
+connections from the local address with ``nat src addr <global>``.
+
+Limitations:
+
+* Hairpinning is not supported: an inside host connecting to a global
+  address and port does not cross the outside interface, so its traffic is
+  delivered to the router itself rather than to the forwarded host.
+* Traffic the router itself sends to a global address is not forwarded
+  either, for the same reason.
+* Protocols that need connection tracking helpers (FTP, SIP, PPTP, ...) are
+  not handled.
+
 .. _administrative-distance:
 
 Administrative Distance

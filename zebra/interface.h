@@ -110,6 +110,9 @@ struct zebra_if {
 	/* MPLS configuration */
 	uint8_t mpls_config;
 
+	/* Stateful NAT role (enum zebra_nat_role) */
+	uint8_t nat_role;
+
 	/* Linkdown status */
 	bool linkdown, linkdownv6;
 

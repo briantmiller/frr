@@ -38,7 +38,6 @@
 #include "zebra/if_netlink.h"
 #include "zebra/rule_netlink.h"
 #include "zebra/tc_netlink.h"
-#include "zebra/nat_netlink.h"
 #include "zebra/netconf_netlink.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/ge_netlink.h"
@@ -1492,10 +1491,6 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 	case DPLANE_OP_NH_FDB_INSTALL:
 	case DPLANE_OP_NH_FDB_DELETE:
 		return netlink_put_nh_fdb_update_msg(bth, ctx);
-
-	case DPLANE_OP_NAT_TC_INSTALL:
-	case DPLANE_OP_NAT_TC_DELETE:
-		return netlink_put_nat_tc_update_msg(bth, ctx);
 
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:

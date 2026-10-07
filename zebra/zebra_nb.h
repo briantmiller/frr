@@ -120,6 +120,8 @@ int lib_interface_zebra_bandwidth_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_bandwidth_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_mpls_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_mpls_destroy(struct nb_cb_destroy_args *args);
+int lib_interface_zebra_ip_nat_modify(struct nb_cb_modify_args *args);
+int lib_interface_zebra_ip_nat_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_link_params_create(struct nb_cb_create_args *args);
 int lib_interface_zebra_link_params_destroy(struct nb_cb_destroy_args *args);
 void lib_interface_zebra_link_params_apply_finish(
@@ -336,6 +338,11 @@ int lib_vrf_zebra_netns_table_range_create(struct nb_cb_create_args *args);
 int lib_vrf_zebra_netns_table_range_destroy(struct nb_cb_destroy_args *args);
 int lib_vrf_zebra_netns_table_range_start_modify(struct nb_cb_modify_args *args);
 int lib_vrf_zebra_netns_table_range_end_modify(struct nb_cb_modify_args *args);
+int lib_vrf_zebra_nat_static_create(struct nb_cb_create_args *args);
+int lib_vrf_zebra_nat_static_destroy(struct nb_cb_destroy_args *args);
+void lib_vrf_zebra_nat_static_apply_finish(struct nb_cb_apply_finish_args *args);
+int lib_vrf_zebra_nat_static_global_modify(struct nb_cb_modify_args *args);
+int lib_vrf_zebra_nat_static_global_destroy(struct nb_cb_destroy_args *args);
 int lib_vrf_zebra_mpls_fec_nexthop_resolution_modify(
 	struct nb_cb_modify_args *args);
 int lib_vrf_zebra_mpls_fec_nexthop_resolution_destroy(

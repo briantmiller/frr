@@ -230,6 +230,10 @@ enum dplane_op_e {
 	/* EVPN-MH FDB (L2) nexthop update */
 	DPLANE_OP_NH_FDB_INSTALL,
 	DPLANE_OP_NH_FDB_DELETE,
+
+	/* Stateful NAT: traffic control (clsact/flower/ct) objects */
+	DPLANE_OP_NAT_TC_INSTALL,
+	DPLANE_OP_NAT_TC_DELETE,
 };
 
 /* Operational status of Bridge Ports */
@@ -1053,6 +1057,97 @@ enum zebra_dplane_result
 dplane_tc_filter_delete(struct zebra_tc_filter *filter);
 enum zebra_dplane_result
 dplane_tc_filter_update(struct zebra_tc_filter *filter);
+
+/*
+ * Stateful NAT dataplane objects.
+ *
+ * Zebra's NAT support is expressed as a small set of traffic control
+ * objects attached to the "outside" interface: a clsact qdisc plus flower
+ * filters whose actions are conntrack (act_ct) or drop. Each object is
+ * programmed through its own dplane context so that every kernel request
+ * has its own result.
+ */
+enum dplane_nat_tc_obj {
+	DPLANE_NAT_TC_QDISC = 0, /* clsact qdisc */
+	DPLANE_NAT_TC_FILTER,	 /* flower filter */
+};
+
+enum dplane_nat_tc_action {
+	DPLANE_NAT_TC_ACT_NONE = 0,
+	DPLANE_NAT_TC_ACT_CT,	/* conntrack (optionally commit / nat) */
+	DPLANE_NAT_TC_ACT_DROP, /* drop the packet */
+};
+
+/* Match fields present in a NAT filter */
+#define DPLANE_NAT_TC_MATCH_INDEV    0x01
+#define DPLANE_NAT_TC_MATCH_SRC_IP   0x02
+#define DPLANE_NAT_TC_MATCH_DST_IP   0x04
+#define DPLANE_NAT_TC_MATCH_CT_STATE 0x08
+#define DPLANE_NAT_TC_MATCH_IP_PROTO 0x10
+#define DPLANE_NAT_TC_MATCH_DST_PORT 0x20 /* needs IP_PROTO tcp/udp */
+
+/* Conntrack state bits, used for both the state and the mask */
+#define DPLANE_NAT_CT_STATE_NEW 0x01
+#define DPLANE_NAT_CT_STATE_EST 0x02
+#define DPLANE_NAT_CT_STATE_REL 0x04
+#define DPLANE_NAT_CT_STATE_TRK 0x08
+#define DPLANE_NAT_CT_STATE_INV 0x10
+#define DPLANE_NAT_CT_STATE_RPL 0x20
+
+/* Conntrack action flags */
+#define DPLANE_NAT_CT_COMMIT  0x01 /* commit the connection */
+#define DPLANE_NAT_CT_NAT     0x02 /* apply (existing) NAT */
+#define DPLANE_NAT_CT_NAT_SRC 0x04 /* set up source NAT to nat_addr */
+#define DPLANE_NAT_CT_NAT_DST 0x08 /* set up destination NAT to nat_addr[:nat_port] */
+
+struct dplane_nat_tc {
+	enum dplane_nat_tc_obj obj;
+
+	/* Interface the object is attached to */
+	ifindex_t ifindex;
+	char ifname[IFNAMSIZ];
+
+	/* clsact hook: egress if true, ingress otherwise */
+	bool egress;
+
+	/* Filter location; a handle of 0 on delete means "the whole prio" */
+	uint32_t chain;
+	uint16_t prio;
+	uint32_t handle;
+
+	/* Match */
+	uint32_t match;
+	char indev[IFNAMSIZ];
+	struct in_addr src_ip; /* host match */
+	struct in_addr dst_ip; /* host match */
+	uint8_t ct_state;
+	uint8_t ct_state_mask;
+	uint8_t ip_proto;
+	uint16_t dst_port; /* host order */
+
+	/* Action */
+	enum dplane_nat_tc_action action;
+	uint8_t ct_flags;
+	uint16_t ct_zone;
+	struct in_addr nat_addr;
+	uint16_t nat_port; /* host order, 0 keeps the port */
+
+	/* Control after the action: pass, or continue in another chain */
+	bool goto_chain;
+	uint32_t goto_chain_index;
+};
+
+enum zebra_dplane_result dplane_nat_tc_install(struct zebra_ns *zns,
+					       const struct dplane_nat_tc *tc);
+/*
+ * Delete a NAT tc object. If 'ignore_errors' is set the kernel's answer is
+ * not reported (used for best-effort cleanup of objects that may not exist).
+ */
+enum zebra_dplane_result dplane_nat_tc_delete(struct zebra_ns *zns, const struct dplane_nat_tc *tc,
+					      bool ignore_errors);
+
+const struct dplane_nat_tc *dplane_ctx_get_nat_tc(const struct zebra_dplane_ctx *ctx);
+bool dplane_ctx_nat_tc_ignore_errors(const struct zebra_dplane_ctx *ctx);
 
 /*
  * Enqueue a kernel TC qdisc notification from the dplane thread to

@@ -51,6 +51,7 @@ zebra_zebra_SOURCES = \
 	zebra/kernel_socket.c \
 	zebra/label_manager.c \
 	zebra/main.c \
+	zebra/nat_netlink.c \
 	zebra/netconf_netlink.c \
 	zebra/redistribute.c \
 	zebra/router-id.c \
@@ -85,6 +86,7 @@ zebra_zebra_SOURCES = \
 	zebra/zebra_srv6.c \
 	zebra/zebra_srv6_vty.c \
 	zebra/zebra_mroute.c \
+	zebra/zebra_nat.c \
 	zebra/zebra_nb.c \
 	zebra/zebra_nb_config.c \
 	zebra/zebra_nb_rpcs.c \
@@ -131,6 +133,7 @@ clippy_scan += \
 	zebra/dpdk/zebra_dplane_dpdk_vty.c \
 	zebra/label_manager.c \
 	zebra/zebra_cli.c \
+	zebra/zebra_nat.c \
 	# end
 
 nobase_pkginclude_HEADERS += \
@@ -143,6 +146,7 @@ nobase_pkginclude_HEADERS += \
 	zebra/kernel_netlink.h \
 	zebra/kernel_socket.h \
 	zebra/label_manager.h \
+	zebra/nat_netlink.h \
 	zebra/netconf_netlink.h \
 	zebra/redistribute.h \
 	zebra/rib.h \
@@ -171,6 +175,7 @@ nobase_pkginclude_HEADERS += \
 	zebra/zebra_srv6.h \
 	zebra/zebra_srv6_vty.h \
 	zebra/zebra_mroute.h \
+	zebra/zebra_nat.h \
 	zebra/zebra_nb.h \
 	zebra/zebra_netns_id.h \
 	zebra/zebra_netns_notify.h \

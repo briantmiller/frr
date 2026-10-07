@@ -28,6 +28,7 @@
 #include "zebra/router-id.h"
 #include "zebra/zapi_msg.h"
 #include "zebra/zebra_vxlan.h"
+#include "zebra/zebra_nat.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/zebra_neigh.h"
 
@@ -636,6 +637,9 @@ void zebra_interface_address_add_update(struct interface *ifp,
 						client, ifp, ifc);
 		}
 	}
+
+	if (ifc->address->family == AF_INET)
+		zebra_nat_if_addr_update(ifp);
 }
 
 /* Interface address deletion. */
@@ -665,6 +669,9 @@ void zebra_interface_address_delete_update(struct interface *ifp,
 						client, ifp, ifc);
 		}
 	}
+
+	if (ifc->address->family == AF_INET)
+		zebra_nat_if_addr_update(ifp);
 }
 
 /* Interface VRF change. May need to delete from clients not interested in

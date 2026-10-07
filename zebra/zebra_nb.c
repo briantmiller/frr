@@ -427,6 +427,13 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ip-nat",
+			.cbs = {
+				.modify = lib_interface_zebra_ip_nat_modify,
+				.destroy = lib_interface_zebra_ip_nat_destroy,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-params",
 			.cbs = {
 				.create = lib_interface_zebra_link_params_create,
@@ -952,6 +959,35 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.cbs = {
 				.modify = lib_vrf_zebra_mpls_fec_nexthop_resolution_modify,
 				.destroy = lib_vrf_zebra_mpls_fec_nexthop_resolution_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/nat/static",
+			.cbs = {
+				.create = lib_vrf_zebra_nat_static_create,
+				.destroy = lib_vrf_zebra_nat_static_destroy,
+				.apply_finish = lib_vrf_zebra_nat_static_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/nat/static/global-address",
+			.cbs = {
+				.modify = lib_vrf_zebra_nat_static_global_modify,
+				.destroy = lib_vrf_zebra_nat_static_global_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/nat/static/global-interface",
+			.cbs = {
+				.modify = lib_vrf_zebra_nat_static_global_modify,
+				.destroy = lib_vrf_zebra_nat_static_global_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/nat/static/global-port",
+			.cbs = {
+				.modify = lib_vrf_zebra_nat_static_global_modify,
+				.destroy = lib_vrf_zebra_nat_static_global_destroy,
 			}
 		},
 		{
