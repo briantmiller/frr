@@ -7547,7 +7547,7 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 		break;
 
 	case DPLANE_OP_NAT_TC_INSTALL:
-	case DPLANE_OP_NAT_TC_DELETE: {
+	case DPLANE_OP_NAT_TC_DELETE: 
 		const struct dplane_nat_tc *tc = &ctx->u.nat_tc.tc;
 
 		zlog_debug("Dplane nat tc %s %s ifidx %u %s chain %u prio %u handle %u",
@@ -7555,7 +7555,6 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 			   tc->obj == DPLANE_NAT_TC_QDISC ? "qdisc" : "filter", tc->ifindex,
 			   tc->egress ? "egress" : "ingress", tc->chain, tc->prio, tc->handle);
 		break;
-	}
 
 	case DPLANE_OP_LSP_INSTALL:
 	case DPLANE_OP_LSP_UPDATE:
