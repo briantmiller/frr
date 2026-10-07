@@ -682,6 +682,11 @@ void ospf_terminate(void)
 	prefix_list_delete_hook(NULL);
 	prefix_list_reset();
 
+	/* reverse access_list_init */
+	access_list_add_hook(NULL);
+	access_list_delete_hook(NULL);
+	access_list_reset();
+
 	/* Cleanup vrf info */
 	ospf_vrf_terminate();
 

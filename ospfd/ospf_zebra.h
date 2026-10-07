@@ -16,9 +16,18 @@
 #define DEFAULT_ROUTE		    ZEBRA_ROUTE_MAX
 #define DEFAULT_ROUTE_TYPE(T) ((T) == DEFAULT_ROUTE)
 
-/* OSPF distance. */
+/*
+ * Per-neighbor OSPF administrative distance:
+ *   distance (1-255) A.B.C.D A.B.C.D [ACCESSLIST4_NAME]
+ *
+ * Entries are stored in ospf->distance_table keyed by the neighbor
+ * router-id prefix derived from <router-id> and the inverse <wildcard-mask>.
+ * A route matches when the router-id of the router that originated the LSA
+ * behind it falls within that prefix (and, if an access-list is given, the
+ * route's prefix is permitted by it).
+ */
 struct ospf_distance {
-	/* Distance value for the IP source prefix. */
+	/* Distance value for routes from matching neighbor router-ids. */
 	uint8_t distance;
 
 	/* Name of the access-list to be matched. */
@@ -43,6 +52,12 @@ extern void ospf_distribute_list_update(struct ospf *ospf, int type, unsigned sh
 
 extern int ospf_is_type_redistributed(struct ospf *ospf, int type, unsigned short instance);
 extern void ospf_distance_reset(struct ospf *ospf);
+extern int ospf_distance_set(struct vty *vty, struct ospf *ospf, uint8_t distance,
+			     struct in_addr router_id, struct in_addr wildcard,
+			     const char *access_list);
+extern int ospf_distance_unset(struct vty *vty, struct ospf *ospf, struct in_addr router_id,
+			       struct in_addr wildcard);
+extern bool ospf_distance_uses_access_list(struct ospf *ospf, const char *name);
 extern uint8_t ospf_distance_apply(struct ospf *ospf, struct prefix_ipv4 *p,
 				   struct ospf_route *or);
 extern struct ospf_external *ospf_external_lookup(struct ospf *ospf, uint8_t type,

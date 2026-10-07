@@ -3305,6 +3305,50 @@ static void show_ip_ospf_area(struct vty *vty, struct ospf_area *area,
 		vty_out(vty, "\n");
 }
 
+static void show_ospf_distance_neighbor(struct vty *vty, struct ospf *ospf, json_object *json_vrf)
+{
+	struct route_node *rn;
+	struct ospf_distance *odistance;
+	json_object *json_arr = NULL;
+	bool header = false;
+
+	for (rn = route_top(ospf->distance_table); rn; rn = route_next(rn)) {
+		struct in_addr mask, wildcard;
+
+		odistance = rn->info;
+		if (!odistance)
+			continue;
+
+		masklen2ip(rn->p.prefixlen, &mask);
+		wildcard.s_addr = ~mask.s_addr;
+
+		if (json_vrf) {
+			json_object *json_entry = json_object_new_object();
+
+			if (!json_arr)
+				json_arr = json_object_new_array();
+			json_object_int_add(json_entry, "distance", odistance->distance);
+			json_object_string_addf(json_entry, "routerId", "%pI4", &rn->p.u.prefix4);
+			json_object_string_addf(json_entry, "wildcardMask", "%pI4", &wildcard);
+			if (odistance->access_list)
+				json_object_string_add(json_entry, "accessList",
+						       odistance->access_list);
+			json_object_array_add(json_arr, json_entry);
+		} else {
+			if (!header) {
+				vty_out(vty, " Per-neighbor administrative distance:\n");
+				header = true;
+			}
+			vty_out(vty, "   %pI4 %pI4 distance %u%s%s\n", &rn->p.u.prefix4, &wildcard,
+				odistance->distance, odistance->access_list ? " access-list " : "",
+				odistance->access_list ? odistance->access_list : "");
+		}
+	}
+
+	if (json_arr)
+		json_object_object_add(json_vrf, "distanceNeighbor", json_arr);
+}
+
 static int show_ip_ospf_common(struct vty *vty, struct ospf *ospf,
 			       json_object *json, uint8_t use_vrf)
 {
@@ -3502,6 +3546,7 @@ static int show_ip_ospf_common(struct vty *vty, struct ospf *ospf,
 				    ospf->distance_all
 					    ? ospf->distance_all
 					    : ZEBRA_OSPF_DISTANCE_DEFAULT);
+		show_ospf_distance_neighbor(vty, ospf, json_vrf);
 
 		json_object_boolean_add(json_vrf, "forwardingAddressSelf",
 					ospf->forwarding_address_self);
@@ -3535,6 +3580,7 @@ static int show_ip_ospf_common(struct vty *vty, struct ospf *ospf,
 		vty_out(vty, " Administrative distance %u\n",
 			ospf->distance_all ? ospf->distance_all
 					   : ZEBRA_OSPF_DISTANCE_DEFAULT);
+		show_ospf_distance_neighbor(vty, ospf, NULL);
 	}
 
 	if (ospf->fr_configured) {
@@ -10491,6 +10537,35 @@ DEFUN (ospf_distance_ospf,
 	return CMD_SUCCESS;
 }
 
+DEFPY (ospf_distance_source,
+       ospf_distance_source_cmd,
+       "distance (1-255)$distance A.B.C.D$router_id A.B.C.D$wildcard [ACCESSLIST4_NAME$acl]",
+       DISTANCE_STR
+       "Administrative distance\n"
+       "Neighbor router-id (originator of the LSA)\n"
+       "Wildcard mask (0.0.0.0 matches the router-id exactly)\n"
+       "Standard access-list selecting the prefixes from that neighbor\n")
+{
+	VTY_DECLVAR_INSTANCE_CONTEXT(ospf, ospf);
+
+	return ospf_distance_set(vty, ospf, distance, router_id, wildcard, acl);
+}
+
+DEFPY (no_ospf_distance_source,
+       no_ospf_distance_source_cmd,
+       "no distance (1-255) A.B.C.D$router_id A.B.C.D$wildcard [ACCESSLIST4_NAME]",
+       NO_STR
+       DISTANCE_STR
+       "Administrative distance\n"
+       "Neighbor router-id (originator of the LSA)\n"
+       "Wildcard mask (0.0.0.0 matches the router-id exactly)\n"
+       "Standard access-list selecting the prefixes from that neighbor\n")
+{
+	VTY_DECLVAR_INSTANCE_CONTEXT(ospf, ospf);
+
+	return ospf_distance_unset(vty, ospf, router_id, wildcard);
+}
+
 DEFUN (ip_ospf_mtu_ignore,
        ip_ospf_mtu_ignore_addr_cmd,
        "ip ospf mtu-ignore [A.B.C.D]",
@@ -13822,13 +13897,21 @@ static int config_write_ospf_distance(struct vty *vty, struct ospf *ospf)
 		vty_out(vty, "\n");
 	}
 
-	for (rn = route_top(ospf->distance_table); rn; rn = route_next(rn))
-		if ((odistance = rn->info) != NULL) {
-			vty_out(vty, " distance %d %pFX %s\n",
-				odistance->distance, &rn->p,
-				odistance->access_list ? odistance->access_list
-						       : "");
-		}
+	for (rn = route_top(ospf->distance_table); rn; rn = route_next(rn)) {
+		struct in_addr mask, wildcard;
+
+		odistance = rn->info;
+		if (!odistance)
+			continue;
+
+		masklen2ip(rn->p.prefixlen, &mask);
+		wildcard.s_addr = ~mask.s_addr;
+		vty_out(vty, " distance %u %pI4 %pI4", odistance->distance, &rn->p.u.prefix4,
+			&wildcard);
+		if (odistance->access_list)
+			vty_out(vty, " %s", odistance->access_list);
+		vty_out(vty, "\n");
+	}
 	return 0;
 }
 
@@ -14249,6 +14332,8 @@ static void ospf_vty_zebra_init(void)
 	install_element(OSPF_NODE, &no_ospf_distance_cmd);
 	install_element(OSPF_NODE, &no_ospf_distance_ospf_cmd);
 	install_element(OSPF_NODE, &ospf_distance_ospf_cmd);
+	install_element(OSPF_NODE, &ospf_distance_source_cmd);
+	install_element(OSPF_NODE, &no_ospf_distance_source_cmd);
 
 	/*Ospf garcefull restart helper configurations */
 	install_element(OSPF_NODE, &ospf_gr_helper_enable_cmd);

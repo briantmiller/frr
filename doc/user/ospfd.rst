@@ -1179,6 +1179,38 @@ Redistribution
 .. clicmd:: distance ospf (intra-area|inter-area|external) (1-255)
 
 
+.. clicmd:: distance (1-255) A.B.C.D A.B.C.D [ACCESSLIST4_NAME]
+
+   Set the administrative distance for routes learned from a specific
+   neighbor. The first ``A.B.C.D`` is the router-id of the router that
+   originated the LSA a route is computed from: the router-LSA or network-LSA
+   originator for intra-area routes, the ABR for inter-area routes and the
+   ASBR for external (type-5 and type-7) routes.
+
+   The second ``A.B.C.D`` is a wildcard (inverse) mask applied to the
+   router-id. Use ``0.0.0.0`` to match one router-id exactly, or
+   ``255.255.255.255`` to match every router. The wildcard mask must be
+   contiguous.
+
+   If a standard access-list is given, only prefixes permitted by it receive
+   the distance. When the access-list does not permit a route (or does not
+   exist), the next less specific matching entry is tried, and if none
+   applies the route falls back to the global distance settings.
+
+   A matching per-neighbor distance takes precedence over
+   :clicmd:`distance ospf (intra-area|inter-area|external) (1-255)` and
+   :clicmd:`distance (1-255)`. Changing an entry, or the access-list it
+   references, triggers an SPF recalculation.
+
+   .. code-block:: frr
+
+      access-list FROM-R2 seq 5 permit 192.168.0.0/16
+      !
+      router ospf
+       distance 200 2.2.2.2 0.0.0.0 FROM-R2
+       distance 150 10.0.0.0 0.0.0.255
+
+
 
 Graceful Restart
 ================
