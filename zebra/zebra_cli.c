@@ -13,6 +13,7 @@
 #include "vrf.h"
 
 #include "zebra/rtadv.h"
+#include "zebra/nat_port.h"
 #include "zebra_cli.h"
 #include "zebra/zebra_cli_clippy.c"
 
@@ -460,6 +461,40 @@ static void lib_interface_zebra_mpls_cli_write(struct vty *vty,
 		vty_out(vty, " mpls enable\n");
 	else
 		vty_out(vty, " mpls disable\n");
+}
+
+DEFPY_YANG (ip_nat,
+	ip_nat_cmd,
+	"[no] ip nat <inside$inside|outside$outside>",
+	NO_STR
+	IP_STR
+	"NAT interface commands\n"
+	"Inside (private-facing) interface for address translation\n"
+	"Outside (public-facing) interface for address translation\n")
+{
+	const char *role = inside ? "inside" : "outside";
+
+	if (!no) {
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ip-nat", NB_OP_MODIFY, role);
+	} else {
+		const struct lyd_node *dnode;
+
+		/* "no ip nat inside" must not remove "ip nat outside" */
+		dnode = yang_dnode_getf(vty->candidate_config->dnode, "%s/frr-zebra:zebra/ip-nat",
+					VTY_CURR_XPATH);
+		if (!dnode || strcmp(yang_dnode_get_string(dnode, NULL), role))
+			return CMD_SUCCESS;
+
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ip-nat", NB_OP_DESTROY, NULL);
+	}
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_ip_nat_cli_write(struct vty *vty, const struct lyd_node *dnode,
+						 bool show_defaults)
+{
+	vty_out(vty, " ip nat %s\n", yang_dnode_get_string(dnode, NULL));
 }
 
 DEFPY_YANG (linkdetect,
@@ -3329,6 +3364,235 @@ static void lib_vrf_zebra_ipv6_resolve_via_default_cli_write(
 	}
 }
 
+#define NAT_STATIC_XPATH                                                                          \
+	"./frr-zebra:zebra/nat/static[protocol='%s'][local-address='%s'][local-port='%u']"
+
+/* The VRF a static translation command applies to */
+static int nat_static_vrf_xpath(struct vty *vty, const char *vrf_name, char *buf, size_t len)
+{
+	if (vty->node == VRF_NODE) {
+		if (vrf_name) {
+			vty_out(vty, "%% The vrf option is not allowed inside a vrf block\n");
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		strlcpy(buf, VTY_CURR_XPATH, len);
+	} else {
+		snprintf(buf, len, "/frr-vrf:lib/vrf[name='%s']",
+			 vrf_name ? vrf_name : VRF_DEFAULT_NAME);
+	}
+
+	return CMD_SUCCESS;
+}
+
+struct nat_static_check {
+	/* The translation being configured */
+	const char *proto;
+	const char *local;
+	unsigned int local_port;
+	const char *global_addr;
+	const char *global_if;
+	unsigned int global_port;
+
+	/* Result */
+	char conflict[128];
+};
+
+static int nat_static_check_cb(const struct lyd_node *dnode, void *arg)
+{
+	struct nat_static_check *chk = arg;
+	const char *proto = yang_dnode_get_string(dnode, "protocol");
+	const char *local = yang_dnode_get_string(dnode, "local-address");
+	unsigned int local_port = yang_dnode_get_uint16(dnode, "local-port");
+	const char *gaddr = NULL, *gif = NULL;
+	unsigned int gport = 0;
+	bool same_global;
+
+	/* The entry being replaced */
+	if (!strcmp(proto, chk->proto) && !strcmp(local, chk->local) &&
+	    local_port == chk->local_port)
+		return YANG_ITER_CONTINUE;
+
+	if (yang_dnode_exists(dnode, "global-address"))
+		gaddr = yang_dnode_get_string(dnode, "global-address");
+	if (yang_dnode_exists(dnode, "global-interface"))
+		gif = yang_dnode_get_string(dnode, "global-interface");
+	if (yang_dnode_exists(dnode, "global-port"))
+		gport = yang_dnode_get_uint16(dnode, "global-port");
+
+	same_global = (gaddr && chk->global_addr && !strcmp(gaddr, chk->global_addr)) ||
+		      (gif && chk->global_if && !strcmp(gif, chk->global_if));
+	if (!same_global)
+		return YANG_ITER_CONTINUE;
+
+	/* A one-to-one translation owns the whole global address */
+	if (strcmp(proto, "any") && strcmp(chk->proto, "any") &&
+	    (strcmp(proto, chk->proto) || gport != chk->global_port))
+		return YANG_ITER_CONTINUE;
+
+	if (strcmp(proto, "any"))
+		snprintf(chk->conflict, sizeof(chk->conflict), "%s %s %u", proto, local,
+			 local_port);
+	else
+		snprintf(chk->conflict, sizeof(chk->conflict), "%s", local);
+
+	return YANG_ITER_STOP;
+}
+
+static int nat_static_apply(struct vty *vty, bool no, const char *proto, const char *local,
+			    unsigned int local_port, const char *global_addr,
+			    const char *global_if, unsigned int global_port, const char *vrf_name)
+{
+	char vrf_xpath[XPATH_MAXLEN];
+	char key[XPATH_MAXLEN];
+	char leaf[XPATH_MAXLEN + 32];
+	struct nat_static_check chk = {};
+	int ret;
+
+	ret = nat_static_vrf_xpath(vty, vrf_name, vrf_xpath, sizeof(vrf_xpath));
+	if (ret != CMD_SUCCESS)
+		return ret;
+
+	snprintf(key, sizeof(key), NAT_STATIC_XPATH, proto, local, local_port);
+
+	if (no) {
+		if (!yang_dnode_existsf(vty->candidate_config->dnode, "%s/%s", vrf_xpath, key + 2)) {
+			vty_out(vty, "%% Static translation not found\n");
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		nb_cli_enqueue_change(vty, key, NB_OP_DESTROY, NULL);
+		return nb_cli_apply_changes(vty, "%s", vrf_xpath);
+	}
+
+	/* The global side may only be used once */
+	chk.proto = proto;
+	chk.local = local;
+	chk.local_port = local_port;
+	chk.global_addr = global_addr;
+	chk.global_if = global_if;
+	chk.global_port = global_port;
+	yang_dnode_iterate(nat_static_check_cb, &chk, vty->candidate_config->dnode,
+			   "%s/frr-zebra:zebra/nat/static", vrf_xpath);
+	if (chk.conflict[0]) {
+		vty_out(vty, "%% The global address%s is already used by static translation %s\n",
+			strcmp(proto, "any") ? "/port" : "", chk.conflict);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	/*
+	 * Do not forward a port a service on the router itself uses: its
+	 * traffic would silently go to the inside host. Only the default VRF's
+	 * sockets are visible here.
+	 */
+	if (strcmp(proto, "any") && vty->node != VRF_NODE &&
+	    (!vrf_name || !strcmp(vrf_name, VRF_DEFAULT_NAME))) {
+		struct in_addr addr;
+		bool have_addr = global_addr && inet_pton(AF_INET, global_addr, &addr) == 1;
+
+		if (nat_local_port_in_use(!strcmp(proto, "tcp") ? IPPROTO_TCP : IPPROTO_UDP,
+					  have_addr ? &addr : NULL, global_port)) {
+			vty_out(vty,
+				"%% A service on this router uses %s port %u; refusing to forward it\n",
+				proto, global_port);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+	}
+
+	nb_cli_enqueue_change(vty, key, NB_OP_CREATE, NULL);
+
+	if (global_addr) {
+		snprintf(leaf, sizeof(leaf), "%s/global-address", key);
+		nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, global_addr);
+		if (yang_dnode_existsf(vty->candidate_config->dnode, "%s/%s/global-interface",
+				       vrf_xpath, key + 2)) {
+			snprintf(leaf, sizeof(leaf), "%s/global-interface", key);
+			nb_cli_enqueue_change(vty, leaf, NB_OP_DESTROY, NULL);
+		}
+	} else {
+		snprintf(leaf, sizeof(leaf), "%s/global-interface", key);
+		nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, global_if);
+		if (yang_dnode_existsf(vty->candidate_config->dnode, "%s/%s/global-address",
+				       vrf_xpath, key + 2)) {
+			snprintf(leaf, sizeof(leaf), "%s/global-address", key);
+			nb_cli_enqueue_change(vty, leaf, NB_OP_DESTROY, NULL);
+		}
+	}
+
+	if (global_port) {
+		char port[16];
+
+		snprintf(port, sizeof(port), "%u", global_port);
+		snprintf(leaf, sizeof(leaf), "%s/global-port", key);
+		nb_cli_enqueue_change(vty, leaf, NB_OP_MODIFY, port);
+	}
+
+	return nb_cli_apply_changes(vty, "%s", vrf_xpath);
+}
+
+DEFPY_YANG (ip_nat_static_port,
+	ip_nat_static_port_cmd,
+	"[no] ip nat inside source static <tcp|udp>$proto A.B.C.D$local (1-65535)$lport <interface IFNAME$gif|A.B.C.D$gaddr> (1-65535)$gport [vrf NAME$vrf_name]",
+	NO_STR
+	IP_STR
+	"NAT configuration\n"
+	"Inside address translation\n"
+	"Source address translation\n"
+	"Static translation\n"
+	"TCP port forwarding\n"
+	"UDP port forwarding\n"
+	"Inside local address\n"
+	"Inside local port\n"
+	"Use the address of a NAT outside interface as the inside global address\n"
+	"Outside interface name\n"
+	"Inside global address\n"
+	"Inside global port\n"
+	VRF_CMD_HELP_STR)
+{
+	return nat_static_apply(vty, !!no, proto, local_str, lport, gaddr_str, gif, gport,
+				vrf_name);
+}
+
+DEFPY_YANG (ip_nat_static_addr,
+	ip_nat_static_addr_cmd,
+	"[no] ip nat inside source static A.B.C.D$local A.B.C.D$gaddr [vrf NAME$vrf_name]",
+	NO_STR
+	IP_STR
+	"NAT configuration\n"
+	"Inside address translation\n"
+	"Source address translation\n"
+	"Static translation\n"
+	"Inside local address\n"
+	"Inside global address\n"
+	VRF_CMD_HELP_STR)
+{
+	return nat_static_apply(vty, !!no, "any", local_str, 0, gaddr_str, NULL, 0, vrf_name);
+}
+
+static void lib_vrf_zebra_nat_static_cli_write(struct vty *vty, const struct lyd_node *dnode,
+					       bool show_defaults)
+{
+	const char *proto = yang_dnode_get_string(dnode, "protocol");
+	bool any = !strcmp(proto, "any");
+
+	zebra_vrf_indent_cli_write(vty, dnode);
+
+	vty_out(vty, "ip nat inside source static ");
+	if (!any)
+		vty_out(vty, "%s %s %u ", proto, yang_dnode_get_string(dnode, "local-address"),
+			yang_dnode_get_uint16(dnode, "local-port"));
+	else
+		vty_out(vty, "%s ", yang_dnode_get_string(dnode, "local-address"));
+
+	if (yang_dnode_exists(dnode, "global-interface"))
+		vty_out(vty, "interface %s", yang_dnode_get_string(dnode, "global-interface"));
+	else
+		vty_out(vty, "%s", yang_dnode_get_string(dnode, "global-address"));
+
+	if (!any)
+		vty_out(vty, " %u", yang_dnode_get_uint16(dnode, "global-port"));
+
+	vty_out(vty, "\n");
+}
+
 DEFPY_YANG (mpls_fec_nexthop_resolution, mpls_fec_nexthop_resolution_cmd,
       "[no$no] mpls fec nexthop-resolution",
       NO_STR
@@ -3899,6 +4163,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_mpls_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ip-nat",
+			.cbs.cli_show = lib_interface_zebra_ip_nat_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-params",
 			.cbs.cli_show = lib_interface_zebra_link_params_cli_write,
 			.cbs.cli_show_end = lib_interface_zebra_link_params_cli_write_end,
@@ -4102,6 +4370,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_vrf_mpls_fec_nexthop_resolution_cli_write,
 		},
 		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/nat/static",
+			.cbs.cli_show = lib_vrf_zebra_nat_static_cli_write,
+		},
+		{
 			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/l3vni-id",
 			.cbs.cli_show = lib_vrf_zebra_l3vni_id_cli_write,
 		},
@@ -4125,6 +4397,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &multicast_new_cmd);
 	install_element(INTERFACE_NODE, &multicast_cmd);
 	install_element(INTERFACE_NODE, &mpls_cmd);
+	install_element(INTERFACE_NODE, &ip_nat_cmd);
 	install_element(INTERFACE_NODE, &linkdetect_cmd);
 	install_element(INTERFACE_NODE, &shutdown_if_cmd);
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
@@ -4240,6 +4513,11 @@ void zebra_cli_init(void)
 
 	install_element(CONFIG_NODE, &mpls_fec_nexthop_resolution_cmd);
 	install_element(VRF_NODE, &mpls_fec_nexthop_resolution_cmd);
+
+	install_element(CONFIG_NODE, &ip_nat_static_port_cmd);
+	install_element(VRF_NODE, &ip_nat_static_port_cmd);
+	install_element(CONFIG_NODE, &ip_nat_static_addr_cmd);
+	install_element(VRF_NODE, &ip_nat_static_addr_cmd);
 
 	install_element(CONFIG_NODE, &vni_mapping_cmd);
 	install_element(VRF_NODE, &vni_mapping_cmd);

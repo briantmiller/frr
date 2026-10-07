@@ -562,6 +562,10 @@ struct zebra_dplane_ctx {
 		struct dplane_macfdb_read_info macfdb_read;
 		struct dplane_neigh_read_info neigh_read;
 		struct dplane_tc_qdisc_notify_info tc_qdisc_notify;
+		struct {
+			struct dplane_nat_tc tc;
+			bool ignore_errors;
+		} nat_tc;
 	} u;
 
 	/* Namespace info, used especially for netlink kernel communication */
@@ -994,6 +998,8 @@ static void dplane_ctx_free_internal(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_BRPORT_SET:
 	case DPLANE_OP_LINK_OPTS_SET:
 	case DPLANE_OP_LINK_MTU_SET:
+	case DPLANE_OP_NAT_TC_INSTALL:
+	case DPLANE_OP_NAT_TC_DELETE:
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:
 	case DPLANE_OP_NEIGH_DELETE:
@@ -1256,6 +1262,10 @@ const char *dplane_op2str(enum dplane_op_e op)
 		return "LINK_OPTS_SET";
 	case DPLANE_OP_LINK_MTU_SET:
 		return "LINK_MTU_SET";
+	case DPLANE_OP_NAT_TC_INSTALL:
+		return "NAT_TC_INSTALL";
+	case DPLANE_OP_NAT_TC_DELETE:
+		return "NAT_TC_DELETE";
 
 	case DPLANE_OP_LSP_INSTALL:
 		return "LSP_INSTALL";
@@ -2288,6 +2298,20 @@ const char *dplane_ctx_tc_qdisc_get_kind_str(const struct zebra_dplane_ctx *ctx)
 	DPLANE_CTX_VALID(ctx);
 
 	return ctx->u.tc_qdisc.kind_str;
+}
+
+const struct dplane_nat_tc *dplane_ctx_get_nat_tc(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.nat_tc.tc;
+}
+
+bool dplane_ctx_nat_tc_ignore_errors(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.nat_tc.ignore_errors;
 }
 
 uint32_t dplane_ctx_tc_class_get_handle(const struct zebra_dplane_ctx *ctx)
@@ -5307,6 +5331,60 @@ tc_filter_update_internal(enum dplane_op_e op, struct zebra_tc_filter *filter)
 	return result;
 }
 
+/*
+ * Common helper for NAT traffic control objects.
+ */
+static enum zebra_dplane_result nat_tc_update_internal(enum dplane_op_e op, struct zebra_ns *zns,
+						       const struct dplane_nat_tc *tc,
+						       bool ignore_errors)
+{
+	enum zebra_dplane_result result = ZEBRA_DPLANE_REQUEST_FAILURE;
+	struct zebra_dplane_ctx *ctx;
+	int ret;
+
+	if (zns == NULL)
+		return result;
+
+	ctx = dplane_ctx_alloc();
+
+	ctx->zd_op = op;
+	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
+	ctx->zd_ifindex = tc->ifindex;
+	strlcpy(ctx->zd_ifname, tc->ifname, sizeof(ctx->zd_ifname));
+	ctx->u.nat_tc.tc = *tc;
+	ctx->u.nat_tc.ignore_errors = ignore_errors;
+
+	/*
+	 * Each context carries exactly one kernel request. Requests whose
+	 * answer must be ignored use the second ("update") sequence number,
+	 * which the netlink batch code does not report back.
+	 */
+	dplane_ctx_ns_init(ctx, zns, ignore_errors);
+
+	ret = dplane_update_enqueue(ctx);
+
+	atomic_fetch_add_explicit(&zdplane_info.dg_tcs_in, 1, memory_order_relaxed);
+	if (ret == AOK) {
+		result = ZEBRA_DPLANE_REQUEST_QUEUED;
+	} else {
+		atomic_fetch_add_explicit(&zdplane_info.dg_tcs_errors, 1, memory_order_relaxed);
+		dplane_ctx_free(&ctx);
+	}
+
+	return result;
+}
+
+enum zebra_dplane_result dplane_nat_tc_install(struct zebra_ns *zns, const struct dplane_nat_tc *tc)
+{
+	return nat_tc_update_internal(DPLANE_OP_NAT_TC_INSTALL, zns, tc, false);
+}
+
+enum zebra_dplane_result dplane_nat_tc_delete(struct zebra_ns *zns, const struct dplane_nat_tc *tc,
+					      bool ignore_errors)
+{
+	return nat_tc_update_internal(DPLANE_OP_NAT_TC_DELETE, zns, tc, ignore_errors);
+}
+
 enum zebra_dplane_result dplane_tc_qdisc_install(struct zebra_tc_qdisc *qdisc)
 {
 	return tc_qdisc_update_internal(DPLANE_OP_TC_QDISC_INSTALL, qdisc);
@@ -7880,6 +7958,17 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 			   dplane_ctx_get_fdb_nh_grp_count(ctx));
 		break;
 
+	case DPLANE_OP_NAT_TC_INSTALL:
+	case DPLANE_OP_NAT_TC_DELETE: {
+		const struct dplane_nat_tc *tc = &ctx->u.nat_tc.tc;
+
+		zlog_debug("Dplane nat tc %s %s ifidx %u %s chain %u prio %u handle %u",
+			   dplane_op2str(dplane_ctx_get_op(ctx)),
+			   tc->obj == DPLANE_NAT_TC_QDISC ? "qdisc" : "filter", tc->ifindex,
+			   tc->egress ? "egress" : "ingress", tc->chain, tc->prio, tc->handle);
+		break;
+	}
+
 	case DPLANE_OP_LSP_INSTALL:
 	case DPLANE_OP_LSP_UPDATE:
 	case DPLANE_OP_LSP_DELETE:
@@ -8128,6 +8217,10 @@ static void kernel_dplane_handle_result(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_MTU_SET:
 		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
 			atomic_fetch_add_explicit(&zdplane_info.dg_link_errors, 1,
+	case DPLANE_OP_NAT_TC_INSTALL:
+	case DPLANE_OP_NAT_TC_DELETE:
+		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
+			atomic_fetch_add_explicit(&zdplane_info.dg_tcs_errors, 1,
 						  memory_order_relaxed);
 		break;
 

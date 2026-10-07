@@ -26,6 +26,7 @@
 #include "table_manager.h"
 #include "zebra_errors.h"
 #include "zebra_dplane.h"
+#include "zebra_nat.h"
 
 extern struct zebra_privs_t zserv_privs;
 
@@ -339,6 +340,7 @@ void zebra_ns_startup_continue(struct zebra_dplane_ctx *ctx)
 		rib_add_finished_startup();
 		if (zns->ns_id == NS_DEFAULT)
 			zebra_qos_startup_done();
+		zebra_nat_startup_complete(zns);
 		break;
 	}
 }

@@ -38,7 +38,6 @@
 #include "zebra/if_netlink.h"
 #include "zebra/rule_netlink.h"
 #include "zebra/tc_netlink.h"
-#include "zebra/nat_netlink.h"
 #include "zebra/netconf_netlink.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/ge_netlink.h"
@@ -912,14 +911,7 @@ static int netlink_parse_error(const struct nlsock *nl, struct nlmsghdr *h,
 	      (-errnum == ENOENT || -errnum == ESRCH)) ||
 	     ((msg_type == RTM_NEWTUNNEL || msg_type == RTM_DELTUNNEL ||
 	       msg_type == RTM_GETTUNNEL) &&
-	      (-errnum == EOPNOTSUPP)) ||
-	     /*
-	      * Link create is requested with NLM_F_EXCL so an existing link is
-	      * never modified; the link already being there is the desired
-	      * state.  A link that is already gone on delete is likewise fine.
-	      */
-	     (msg_type == RTM_NEWLINK && -errnum == EEXIST) ||
-	     (msg_type == RTM_DELLINK && (-errnum == ENODEV || -errnum == ENOENT)))) {
+	      (-errnum == EOPNOTSUPP)))) {
 		if (IS_ZEBRA_DEBUG_KERNEL)
 			zlog_debug("%s: error: %s type=%s(%u), seq=%u, pid=%u", nl->name,
 				   safe_strerror(-errnum),
@@ -1500,10 +1492,6 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 	case DPLANE_OP_NH_FDB_DELETE:
 		return netlink_put_nh_fdb_update_msg(bth, ctx);
 
-	case DPLANE_OP_NAT_TC_INSTALL:
-	case DPLANE_OP_NAT_TC_DELETE:
-		return netlink_put_nat_tc_update_msg(bth, ctx);
-
 	case DPLANE_OP_NEIGH_INSTALL:
 	case DPLANE_OP_NEIGH_UPDATE:
 	case DPLANE_OP_NEIGH_DELETE:
@@ -1544,14 +1532,6 @@ static enum netlink_msg_status nl_put_msg(struct nl_batch *bth,
 
 	case DPLANE_OP_GRE_SET:
 		return netlink_put_gre_set_msg(bth, ctx);
-
-	case DPLANE_OP_LINK_CREATE:
-	case DPLANE_OP_LINK_DELETE:
-	case DPLANE_OP_LINK_MASTER_SET:
-	case DPLANE_OP_LINK_BRPORT_SET:
-	case DPLANE_OP_LINK_OPTS_SET:
-	case DPLANE_OP_LINK_MTU_SET:
-		return netlink_put_link_msg(bth, ctx);
 
 	case DPLANE_OP_INTF_ADDR_ADD:
 	case DPLANE_OP_INTF_ADDR_DEL:

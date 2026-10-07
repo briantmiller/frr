@@ -55,6 +55,7 @@
 #include "zebra/zebra_tc.h"
 #include "zebra/zebra_link_cfg_if.h"
 #include "zebra/zebra_acl_group.h"
+#include "zebra/zebra_nat.h"
 
 DEFINE_MGROUP(ZEBRA, "zebra");
 
@@ -5337,6 +5338,9 @@ static void rib_process_dplane_results(struct event *event)
 			case DPLANE_OP_LINK_OPTS_SET:
 			case DPLANE_OP_LINK_MTU_SET:
 				zebra_link_cfg_dplane_result(ctx);
+			case DPLANE_OP_NAT_TC_INSTALL:
+			case DPLANE_OP_NAT_TC_DELETE:
+				zebra_nat_dplane_result(ctx);
 				break;
 
 			case DPLANE_OP_RULE_ADD:

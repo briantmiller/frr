@@ -35,6 +35,7 @@
 #include "zebra/zebra_link_cfg_if.h"
 #include "zebra/zebra_link_netlink.h"
 #include "zebra/zebra_dhcp.h"
+#include "zebra/zebra_nat.h"
 
 /*
  * XPath: /frr-zebra:zebra/ip-forwarding
@@ -1382,6 +1383,35 @@ int lib_interface_zebra_mpls_destroy(struct nb_cb_destroy_args *args)
 	zif->mpls_config = IF_ZEBRA_DATA_UNSPEC;
 
 	/* keep the state as it is */
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/ip-nat
+ */
+int lib_interface_zebra_ip_nat_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_nat_if_set_role(ifp, yang_dnode_get_enum(args->dnode, NULL));
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_ip_nat_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_nat_if_set_role(ifp, ZEBRA_NAT_ROLE_NONE);
 
 	return NB_OK;
 }
@@ -4444,6 +4474,79 @@ int lib_vrf_zebra_netns_table_range_end_modify(struct nb_cb_modify_args *args)
 
 	table_manager_range(true, vrf->info, start, end);
 
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-vrf:lib/vrf/frr-zebra:zebra/nat/static
+ */
+int lib_vrf_zebra_nat_static_create(struct nb_cb_create_args *args)
+{
+	const struct lyd_node *vrf_dnode;
+	struct zebra_nat_static *st;
+	struct in_addr local;
+	uint8_t proto;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	vrf_dnode = yang_dnode_get_parent(args->dnode, "vrf");
+	proto = yang_dnode_get_enum(args->dnode, "protocol");
+	yang_dnode_get_ipv4(&local, args->dnode, "local-address");
+
+	st = zebra_nat_static_create(yang_dnode_get_string(vrf_dnode, "name"), proto, local,
+				     yang_dnode_get_uint16(args->dnode, "local-port"));
+	nb_running_set_entry(args->dnode, st);
+
+	return NB_OK;
+}
+
+int lib_vrf_zebra_nat_static_destroy(struct nb_cb_destroy_args *args)
+{
+	struct zebra_nat_static *st;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	st = nb_running_unset_entry(args->dnode);
+	zebra_nat_static_delete(st);
+
+	return NB_OK;
+}
+
+/* The global side is read as a whole once all its leaves are in place */
+void lib_vrf_zebra_nat_static_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	struct zebra_nat_static *st;
+	struct in_addr global = {};
+	const char *ifname = NULL;
+	uint16_t port = 0;
+
+	st = nb_running_get_entry(args->dnode, NULL, true);
+
+	if (yang_dnode_exists(args->dnode, "global-address"))
+		yang_dnode_get_ipv4(&global, args->dnode, "global-address");
+	if (yang_dnode_exists(args->dnode, "global-interface"))
+		ifname = yang_dnode_get_string(args->dnode, "global-interface");
+	if (yang_dnode_exists(args->dnode, "global-port"))
+		port = yang_dnode_get_uint16(args->dnode, "global-port");
+
+	zebra_nat_static_set_global(st, ifname ? NULL : &global, ifname, port);
+}
+
+/*
+ * XPath: /frr-vrf:lib/vrf/frr-zebra:zebra/nat/static/{global-address,
+ *        global-interface,global-port}
+ *
+ * Handled by the list entry's apply_finish callback.
+ */
+int lib_vrf_zebra_nat_static_global_modify(struct nb_cb_modify_args *args)
+{
+	return NB_OK;
+}
+
+int lib_vrf_zebra_nat_static_global_destroy(struct nb_cb_destroy_args *args)
+{
 	return NB_OK;
 }
 

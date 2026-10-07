@@ -2992,6 +2992,28 @@ module frr-zebra {
           "Interface MPLS status.";
       }
 
+      leaf ip-nat {
+        type enumeration {
+          enum "inside" {
+            value 1;
+            description
+              "Private-facing interface. Traffic received on it and
+               forwarded out of an outside interface in the same VRF
+               is source-translated.";
+          }
+          enum "outside" {
+            value 2;
+            description
+              "Public-facing interface. Translated traffic leaves with
+               the interface's primary IPv4 address as its source.";
+          }
+        }
+        description
+          "Role of the interface for stateful IPv4 NAT (port address
+           translation), implemented with tc flower and conntrack
+           (act_ct).";
+      }
+
       leaf bandwidth {
         type uint32 {
           range "1..1000000";
@@ -3850,6 +3872,100 @@ module frr-zebra {
             description
               "Authorise nexthop resolution over all labeled routes.";
           }
+      }
+
+      container nat {
+        description
+          "Stateful IPv4 NAT configuration.";
+
+        list static {
+          key "protocol local-address local-port";
+          unique "protocol global-address global-port";
+          unique "protocol global-interface global-port";
+          must "count(global-address) + count(global-interface) = 1" {
+            error-message
+              "Exactly one of global address or global interface is required.";
+          }
+          must "protocol = 'any' or global-port" {
+            error-message
+              "Port forwarding needs a global port.";
+          }
+          description
+            "Static translations. With protocol 'any' this is a
+             one-to-one mapping of a local address to a global address
+             in both directions; with 'tcp' or 'udp' connections to the
+             global address and port are forwarded to the local address
+             and port.";
+
+          leaf protocol {
+            type enumeration {
+              enum "any" {
+                value 0;
+                description
+                  "All protocols (one-to-one address translation).";
+              }
+              enum "tcp" {
+                value 6;
+                description
+                  "TCP port forwarding.";
+              }
+              enum "udp" {
+                value 17;
+                description
+                  "UDP port forwarding.";
+              }
+            }
+            description
+              "Protocol of the static translation.";
+          }
+
+          leaf local-address {
+            type inet:ipv4-address;
+            description
+              "Inside local address.";
+          }
+
+          leaf local-port {
+            type uint16;
+            must "(. = 0 and ../protocol = 'any') or
+                  (. != 0 and ../protocol != 'any')" {
+              error-message
+                "A port is required for tcp/udp and not allowed otherwise.";
+            }
+            description
+              "Inside local port; 0 for protocol 'any'.";
+          }
+
+          leaf global-address {
+            type inet:ipv4-address;
+            description
+              "Inside global address. It must be configured on a NAT
+               outside interface of the VRF.";
+          }
+
+          leaf global-interface {
+            type frr-interface:interface-ref;
+            must "../protocol != 'any'" {
+              error-message
+                "One-to-one translations need a global address.";
+            }
+            description
+              "Use the primary address of this NAT outside interface as
+               the inside global address.";
+          }
+
+          leaf global-port {
+            type uint16 {
+              range "1..65535";
+            }
+            must "../protocol != 'any'" {
+              error-message
+                "A global port is only valid for tcp/udp.";
+            }
+            description
+              "Inside global port (tcp/udp only).";
+          }
+        }
       }
 
       uses ribs;

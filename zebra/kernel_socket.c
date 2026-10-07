@@ -1691,6 +1691,12 @@ void kernel_update_multi(struct dplane_ctx_list_head *ctx_list)
 			res = ZEBRA_DPLANE_REQUEST_SUCCESS;
 			break;
 
+		/* Stateful NAT uses Linux tc/conntrack - not supported here */
+		case DPLANE_OP_NAT_TC_INSTALL:
+		case DPLANE_OP_NAT_TC_DELETE:
+			res = ZEBRA_DPLANE_REQUEST_FAILURE;
+			break;
+
 		case DPLANE_OP_INTF_NETCONFIG:
 			res = kernel_intf_netconf_update(ctx);
 			break;

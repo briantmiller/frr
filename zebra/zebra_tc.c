@@ -15,6 +15,7 @@
 #include "zebra/zebra_router.h"
 #include "zebra/zebra_dplane.h"
 #include "zebra/zebra_tc.h"
+#include "zebra/zebra_nat.h"
 #include "zebra/debug.h"
 #include "zebra/zebra_acl_group.h"
 
@@ -486,7 +487,19 @@ void zebra_tc_qdisc_handle_notify(struct zebra_dplane_ctx *ctx)
 		return;
 	}
 
-	if (notify_type != DPLANE_TC_QDISC_NOTIFY_NEW || !startup || major != TC_QDISC_MAJOR_ZEBRA)
+	if (notify_type != DPLANE_TC_QDISC_NOTIFY_NEW || !startup)
+		return;
+
+	/*
+	 * A clsact (or ingress) qdisc may carry NAT filters left behind by
+	 * a previous zebra run; let the NAT code remove its own filters.
+	 */
+	if (major == ZEBRA_NAT_CLSACT_MAJOR) {
+		zebra_nat_startup_cleanup(dplane_ctx_get_ns_id(ctx), ifindex);
+		return;
+	}
+
+	if (major != TC_QDISC_MAJOR_ZEBRA)
 		return;
 
 	qdisc.qdisc.ifindex = ifindex;

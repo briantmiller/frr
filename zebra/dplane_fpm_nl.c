@@ -1076,6 +1076,8 @@ static int fpm_nl_enqueue(struct fpm_nl_ctx *fnc, struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_BRPORT_SET:
 	case DPLANE_OP_LINK_OPTS_SET:
 	case DPLANE_OP_LINK_MTU_SET:
+	case DPLANE_OP_NAT_TC_INSTALL:
+	case DPLANE_OP_NAT_TC_DELETE:
 	case DPLANE_OP_PW_INSTALL:
 	case DPLANE_OP_PW_UNINSTALL:
 	case DPLANE_OP_ADDR_INSTALL:

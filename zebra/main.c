@@ -52,6 +52,7 @@
 #include "zebra/zebra_dhcp.h"
 #include "zebra/zebra_srv6.h"
 #include "zebra/zebra_srv6_vty.h"
+#include "zebra/zebra_nat.h"
 
 #define ZEBRA_PTM_SUPPORT
 
@@ -228,6 +229,8 @@ static void sigint(void)
 void zebra_finalize(struct event *dummy)
 {
 	zlog_info("Zebra final shutdown");
+
+	zebra_nat_terminate();
 
 	vrf_terminate();
 
@@ -543,6 +546,7 @@ int main(int argc, char **argv)
 	zebra_mpls_vty_init();
 	zebra_pw_vty_init();
 	zebra_pbr_init();
+	zebra_nat_init();
 	zebra_opaque_init();
 	zebra_srte_init();
 	zebra_srv6_init();
