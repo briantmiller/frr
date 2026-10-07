@@ -287,6 +287,9 @@ int zebra2proto(int proto)
 	case ZEBRA_ROUTE_SRTE:
 		proto = RTPROT_SRTE;
 		break;
+	case ZEBRA_ROUTE_DHCP:
+		proto = RTPROT_DHCP;
+		break;
 	case ZEBRA_ROUTE_TABLE:
 	case ZEBRA_ROUTE_NHG:
 		proto = RTPROT_ZEBRA;
@@ -374,6 +377,12 @@ static inline int proto2zebra(int proto, int family, bool is_nexthop)
 	case RTPROT_MROUTED:
 	case RTPROT_KEEPALIVED:
 	case RTPROT_OPENR:
+	/*
+	 * RTPROT_DHCP routes may belong to an external DHCP client
+	 * (dhclient, dhcpcd, systemd-networkd...).  Treat them as kernel
+	 * routes so zebra never sweeps a route it does not own.
+	 */
+	case RTPROT_DHCP:
 		proto = ZEBRA_ROUTE_KERNEL;
 		break;
 	case RTPROT_ZEBRA:

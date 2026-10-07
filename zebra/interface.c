@@ -37,6 +37,7 @@
 #include "zebra/zebra_evpn_mh.h"
 #include "zebra/zebra_trace.h"
 #include "zebra/zebra_l2.h"
+#include "zebra/zebra_dhcp.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, ZINFO, "Zebra Interface Information");
 
@@ -262,6 +263,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 		XFREE(MTYPE_ZIF_DESC, zebra_if->desc);
 
 		event_cancel(&zebra_if->speed_update);
+
+		zebra_dhcp_if_free(zebra_if);
 
 		XFREE(MTYPE_ZINFO, zebra_if);
 	}
@@ -637,6 +640,9 @@ void if_add_update(struct interface *ifp)
 	}
 
 	frrtrace(2, frr_zebra, if_add_del_update, ifp, 1);
+
+	/* Interface may already be up when it is first learned. */
+	zebra_dhcp_if_up(ifp);
 }
 
 /* Install connected routes corresponding to an interface. */
@@ -782,6 +788,9 @@ void if_delete_update(struct interface **pifp)
 			   ifp->ifindex);
 
 	frrtrace(2, frr_zebra, if_add_del_update, ifp, 0);
+
+	/* Stop the DHCP client and forget its lease. */
+	zebra_dhcp_if_delete(ifp);
 
 	/* Delete connected routes from the kernel. */
 	if_delete_connected(ifp);
@@ -1050,6 +1059,8 @@ void if_up(struct interface *ifp, bool install_connected)
 	if_handle_bond_speed_change(ifp);
 
 	rib_update_handle_vrf_all(RIB_UPDATE_KERNEL, ZEBRA_ROUTE_KERNEL);
+
+	zebra_dhcp_if_up(ifp);
 }
 
 /* Interface goes down.  We have to manage different behavior of based
@@ -1064,6 +1075,7 @@ void if_down(struct interface *ifp)
 	frr_timestamp(2, zif->down_last, sizeof(zif->down_last));
 
 	rtadv_stop_ra(ifp, true);
+	zebra_dhcp_if_down(ifp);
 	if_down_nhg_dependents(ifp);
 
 	/* Handle interface down for specific types for EVPN. Non-VxLAN

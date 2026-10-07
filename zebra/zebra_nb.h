@@ -99,6 +99,8 @@ int zebra_debugs_debug_dplane_detail_modify(struct nb_cb_modify_args *args);
 int zebra_debugs_debug_dplane_detail_destroy(struct nb_cb_destroy_args *args);
 int zebra_debugs_debug_mlag_modify(struct nb_cb_modify_args *args);
 int zebra_debugs_debug_mlag_destroy(struct nb_cb_destroy_args *args);
+int lib_interface_zebra_ipv4_dhcp_create(struct nb_cb_create_args *args);
+int lib_interface_zebra_ipv4_dhcp_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_ipv4_addrs_create(struct nb_cb_create_args *args);
 int lib_interface_zebra_ipv4_addrs_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_ipv4_addrs_label_modify(struct nb_cb_modify_args *args);

@@ -48,6 +48,7 @@
 #include "zebra/zebra_nb.h"
 #include "zebra/zebra_opaque.h"
 #include "zebra/zebra_srte.h"
+#include "zebra/zebra_dhcp.h"
 #include "zebra/zebra_srv6.h"
 #include "zebra/zebra_srv6_vty.h"
 
@@ -154,6 +155,9 @@ static void sigint(void)
 
 	/* send RA lifetime of 0 before stopping. rfc4861/6.2.5 */
 	rtadv_stop_ra_all();
+
+	/* Stop DHCP client timers and sockets */
+	zebra_dhcp_terminate();
 
 	frr_early_fini();
 
@@ -524,6 +528,7 @@ int main(int argc, char **argv)
 
 	rtadv_init();
 	rtadv_cmd_init();
+	zebra_dhcp_init();
 /* PTM socket */
 #ifdef ZEBRA_PTM_SUPPORT
 	zebra_ptm_init();

@@ -99,6 +99,7 @@ zebra_zebra_SOURCES = \
 	zebra/zebra_ptm_redistribute.c \
 	zebra/zebra_pw.c \
 	zebra/zebra_rib.c \
+	zebra/zebra_dhcp.c \
 	zebra/zebra_router.c \
 	zebra/zebra_rnh.c \
 	zebra/zebra_routemap.c \
@@ -131,6 +132,7 @@ clippy_scan += \
 	zebra/dpdk/zebra_dplane_dpdk_vty.c \
 	zebra/label_manager.c \
 	zebra/zebra_cli.c \
+	zebra/zebra_dhcp.c \
 	# end
 
 nobase_pkginclude_HEADERS += \
@@ -156,6 +158,7 @@ nobase_pkginclude_HEADERS += \
 	zebra/tc_netlink.h \
 	zebra/zapi_msg.h \
 	zebra/zebra_affinitymap.h \
+	zebra/zebra_dhcp.h \
 	zebra/zebra_dplane.h \
 	zebra/zebra_errors.h \
 	zebra/zebra_evpn.h \

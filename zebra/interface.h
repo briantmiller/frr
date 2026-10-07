@@ -89,6 +89,8 @@ enum zebra_if_flags {
 	((zif)->protodown_rc == ZEBRA_PROTODOWN_EXTERNAL)
 
 /* `zebra' daemon local interface structure. */
+struct zebra_dhcp_if;
+
 struct zebra_if {
 	/* back pointer to the interface */
 	struct interface *ifp;
@@ -118,6 +120,9 @@ struct zebra_if {
 
 	/* Router advertise configuration. */
 	uint8_t rtadv_enable;
+
+	/* DHCPv4 client state ("ip address dhcp"), NULL when disabled */
+	struct zebra_dhcp_if *dhcp;
 
 	/* Installed addresses chains tree. */
 	struct route_table *ipv4_subnets;

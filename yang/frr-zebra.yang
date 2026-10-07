@@ -2119,6 +2119,13 @@ module frr-zebra {
       description
         "Container for Zebra-related information.";
 
+      leaf ipv4-dhcp {
+        type empty;
+        description
+          "Obtain the IPv4 address, subnet mask, default gateway and DNS
+           servers of the interface using DHCP (RFC 2131).";
+      }
+
       list ipv4-addrs {
         key "ip prefix-length";
         description

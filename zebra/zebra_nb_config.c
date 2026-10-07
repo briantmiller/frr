@@ -32,6 +32,7 @@
 #include "zebra/table_manager.h"
 #include "zebra/ipforward.h"
 #include "zebra/zebra_nhg.h"
+#include "zebra/zebra_dhcp.h"
 
 /*
  * XPath: /frr-zebra:zebra/ip-forwarding
@@ -921,6 +922,52 @@ int zebra_debugs_debug_mlag_destroy(struct nb_cb_destroy_args *args)
 	case NB_EV_ABORT:
 	case NB_EV_APPLY:
 		/* TODO: implement me. */
+		break;
+	}
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp
+ */
+int lib_interface_zebra_ipv4_dhcp_create(struct nb_cb_create_args *args)
+{
+	struct interface *ifp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		if (!zebra_dhcp_supported()) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "DHCP client is not supported on this platform");
+			return NB_ERR_VALIDATION;
+		}
+		break;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		break;
+	case NB_EV_APPLY:
+		ifp = nb_running_get_entry(args->dnode, NULL, true);
+		zebra_dhcp_if_enable(ifp);
+		break;
+	}
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_ipv4_dhcp_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		break;
+	case NB_EV_APPLY:
+		ifp = nb_running_get_entry(args->dnode, NULL, false);
+		if (ifp)
+			zebra_dhcp_if_disable(ifp);
 		break;
 	}
 

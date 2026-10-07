@@ -1209,6 +1209,31 @@ static void lib_interface_zebra_ipv4_addrs_cli_write(
 	vty_out(vty, "\n");
 }
 
+DEFPY_YANG (ip_address_dhcp,
+	ip_address_dhcp_cmd,
+	"[no] ip address dhcp",
+	NO_STR
+	"Interface Internet Protocol config commands\n"
+	"Set the IP address of an interface\n"
+	"Obtain address, subnet, default gateway and DNS servers via DHCP\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp",
+				      NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp",
+				      NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_ipv4_dhcp_cli_write(struct vty *vty,
+						    const struct lyd_node *dnode,
+						    bool show_defaults)
+{
+	vty_out(vty, " ip address dhcp\n");
+}
+
 #ifdef HAVE_NETLINK
 DEFPY_YANG (ip_address_peer,
 	ip_address_peer_cmd,
@@ -3123,6 +3148,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = zebra_import_kernel_table_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp",
+			.cbs.cli_show = lib_interface_zebra_ipv4_dhcp_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs",
 			.cbs.cli_show = lib_interface_zebra_ipv4_addrs_cli_write,
 		},
@@ -3385,6 +3414,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &shutdown_if_cmd);
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
 	install_element(INTERFACE_NODE, &ip_address_cmd);
+	install_element(INTERFACE_NODE, &ip_address_dhcp_cmd);
 	install_element(INTERFACE_NODE, &ip_address_peer_cmd);
 	install_element(INTERFACE_NODE, &ipv6_address_cmd);
 	install_element(INTERFACE_NODE, &link_params_cmd);
