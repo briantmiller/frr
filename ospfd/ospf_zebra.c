@@ -32,6 +32,7 @@
 #include "ospfd/ospf_lsa.h"
 #include "ospfd/ospf_dump.h"
 #include "ospfd/ospf_route.h"
+#include "ospfd/ospf_spf.h"
 #include "ospfd/ospf_lsdb.h"
 #include "ospfd/ospf_neighbor.h"
 #include "ospfd/ospf_nsm.h"
@@ -1849,6 +1850,12 @@ static void ospf_filter_update(struct access_list *access)
 		/* Schedule ABR tasks -- this will be changed -- takada. */
 		if (IS_OSPF_ABR(ospf) && abr_inv)
 			ospf_schedule_abr_task(ospf);
+
+		/* Per-neighbor distance referencing this access-list:
+		 * recompute routes so the new distances reach zebra.
+		 */
+		if (access->name && ospf_distance_uses_access_list(ospf, access->name))
+			ospf_restart_spf(ospf);
 	}
 }
 
@@ -1936,6 +1943,7 @@ static void ospf_prefix_list_update(struct prefix_list *plist)
 
 static void ospf_distance_free(struct ospf_distance *odistance)
 {
+	XFREE(MTYPE_OSPF_DISTANCE, odistance->access_list);
 	XFREE(MTYPE_OSPF_DISTANCE, odistance);
 }
 
@@ -1949,20 +1957,214 @@ void ospf_distance_reset(struct ospf *ospf)
 		if (!odistance)
 			continue;
 
-		if (odistance->access_list)
-			free(odistance->access_list);
 		ospf_distance_free(odistance);
 		rn->info = NULL;
 		route_unlock_node(rn);
 	}
 }
 
+/*
+ * Convert a <router-id> <wildcard-mask> pair into the prefix used as the key
+ * in ospf->distance_table.  The wildcard is an inverse mask (0.0.0.0 matches
+ * a single router-id exactly) and must be contiguous.
+ */
+static int ospf_distance_prefix(struct vty *vty, struct in_addr router_id, struct in_addr wildcard,
+				struct prefix_ipv4 *p)
+{
+	struct in_addr mask, check;
+	uint8_t plen;
+
+	mask.s_addr = ~wildcard.s_addr;
+	plen = ip_masklen(mask);
+	masklen2ip(plen, &check);
+	if (check.s_addr != mask.s_addr) {
+		vty_out(vty, "%% Wildcard mask %pI4 is not contiguous\n", &wildcard);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	memset(p, 0, sizeof(*p));
+	p->family = AF_INET;
+	p->prefix = router_id;
+	p->prefixlen = plen;
+	apply_mask_ipv4(p);
+
+	return CMD_SUCCESS;
+}
+
+int ospf_distance_set(struct vty *vty, struct ospf *ospf, uint8_t distance,
+		      struct in_addr router_id, struct in_addr wildcard, const char *access_list)
+{
+	struct prefix_ipv4 p;
+	struct route_node *rn;
+	struct ospf_distance *odistance;
+	int ret;
+
+	ret = ospf_distance_prefix(vty, router_id, wildcard, &p);
+	if (ret != CMD_SUCCESS)
+		return ret;
+
+	rn = route_node_get(ospf->distance_table, (struct prefix *)&p);
+	odistance = rn->info;
+	if (odistance) {
+		/* Existing entry: replace it in place. */
+		route_unlock_node(rn);
+		if (odistance->distance == distance &&
+		    ((!odistance->access_list && !access_list) ||
+		     (odistance->access_list && access_list &&
+		      strmatch(odistance->access_list, access_list))))
+			return CMD_SUCCESS;
+	} else {
+		odistance = XCALLOC(MTYPE_OSPF_DISTANCE, sizeof(*odistance));
+		rn->info = odistance;
+	}
+
+	odistance->distance = distance;
+	XFREE(MTYPE_OSPF_DISTANCE, odistance->access_list);
+	if (access_list)
+		odistance->access_list = XSTRDUP(MTYPE_OSPF_DISTANCE, access_list);
+
+	ospf_restart_spf(ospf);
+
+	return CMD_SUCCESS;
+}
+
+int ospf_distance_unset(struct vty *vty, struct ospf *ospf, struct in_addr router_id,
+			struct in_addr wildcard)
+{
+	struct prefix_ipv4 p;
+	struct route_node *rn;
+	struct ospf_distance *odistance;
+	int ret;
+
+	ret = ospf_distance_prefix(vty, router_id, wildcard, &p);
+	if (ret != CMD_SUCCESS)
+		return ret;
+
+	rn = route_node_lookup(ospf->distance_table, (struct prefix *)&p);
+	if (!rn) {
+		vty_out(vty, "%% Can't find specified distance entry\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	odistance = rn->info;
+	ospf_distance_free(odistance);
+	rn->info = NULL;
+
+	/* Once for the lookup above, once for the route_node_get() in set. */
+	route_unlock_node(rn);
+	route_unlock_node(rn);
+
+	ospf_restart_spf(ospf);
+
+	return CMD_SUCCESS;
+}
+
+bool ospf_distance_uses_access_list(struct ospf *ospf, const char *name)
+{
+	struct route_node *rn;
+	struct ospf_distance *odistance;
+
+	for (rn = route_top(ospf->distance_table); rn; rn = route_next(rn)) {
+		odistance = rn->info;
+		if (odistance && odistance->access_list && strmatch(odistance->access_list, name)) {
+			route_unlock_node(rn);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Router-ID of the router that originated the LSA a route was computed from:
+ *  - intra-area: the router-LSA (stub networks) or network-LSA (transit, DR)
+ *  - inter-area: the summary-LSA, i.e. the advertising ABR
+ *  - external:   the AS-external / NSSA LSA, i.e. the advertising ASBR
+ */
+static bool ospf_route_originator(struct ospf_route * or, struct in_addr *originator)
+{
+	switch (or->path_type) {
+	case OSPF_PATH_INTRA_AREA:
+	case OSPF_PATH_INTER_AREA:
+		if (! or->u.std.origin)
+			return false;
+		*originator = or->u.std.origin->adv_router;
+		return true;
+	case OSPF_PATH_TYPE1_EXTERNAL:
+	case OSPF_PATH_TYPE2_EXTERNAL:
+		if (! or->u.ext.origin || ! or->u.ext.origin->data)
+			return false;
+		*originator = or->u.ext.origin->data->adv_router;
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Look up a per-neighbor distance for this route.  The most specific matching
+ * <router-id> <wildcard> entry wins; if that entry has an access-list which
+ * does not permit the prefix, less specific entries are tried in turn.
+ */
+static uint8_t ospf_distance_neighbor_apply(struct ospf *ospf, struct prefix_ipv4 *p,
+					    struct ospf_route * or)
+{
+	struct prefix_ipv4 q;
+	struct route_node *rn, *match;
+	struct ospf_distance *odistance;
+	struct access_list *alist;
+	uint8_t distance = 0;
+
+	if (!ospf->distance_table || !route_table_count(ospf->distance_table))
+		return 0;
+
+	memset(&q, 0, sizeof(q));
+	q.family = AF_INET;
+	q.prefixlen = IPV4_MAX_BITLEN;
+	if (!ospf_route_originator(or, &q.prefix))
+		return 0;
+
+	match = route_node_match(ospf->distance_table, (struct prefix *)&q);
+	if (!match)
+		return 0;
+
+	for (rn = match; rn; rn = rn->parent) {
+		odistance = rn->info;
+		if (!odistance)
+			continue;
+
+		if (odistance->access_list) {
+			alist = access_list_lookup(AFI_IP, odistance->access_list);
+			if (!alist || access_list_apply(alist, p) != FILTER_PERMIT)
+				continue;
+		}
+
+		distance = odistance->distance;
+		if (IS_DEBUG_OSPF(zebra, ZEBRA_REDISTRIBUTE))
+			zlog_debug("%s: %pFX from %pI4 matched distance %pFX%s%s -> %u", __func__,
+				   p, &q.prefix, &rn->p,
+				   odistance->access_list ? " access-list " : "",
+				   odistance->access_list ? odistance->access_list : "", distance);
+		break;
+	}
+
+	route_unlock_node(match);
+
+	return distance;
+}
+
 uint8_t ospf_distance_apply(struct ospf *ospf, struct prefix_ipv4 *p,
 			    struct ospf_route * or)
 {
+	uint8_t distance;
 
 	if (ospf == NULL)
 		return 0;
+
+	/* Per-neighbor distance takes precedence over the global settings. */
+	distance = ospf_distance_neighbor_apply(ospf, p, or);
+	if (distance)
+		return distance;
 
 	if (ospf->distance_intra && or->path_type == OSPF_PATH_INTRA_AREA)
 		return ospf->distance_intra;
