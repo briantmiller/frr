@@ -359,6 +359,13 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp",
+			.cbs = {
+				.create = lib_interface_zebra_ipv4_dhcp_create,
+				.destroy = lib_interface_zebra_ipv4_dhcp_destroy,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs",
 			.cbs = {
 				.create = lib_interface_zebra_ipv4_addrs_create,

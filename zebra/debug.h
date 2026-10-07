@@ -40,6 +40,8 @@ extern "C" {
 
 #define ZEBRA_DEBUG_PW      0x01
 
+#define ZEBRA_DEBUG_DHCP    0x01
+
 #define ZEBRA_DEBUG_DPLANE           0x01
 #define ZEBRA_DEBUG_DPLANE_DETAILED  0x02
 
@@ -92,6 +94,7 @@ extern "C" {
 	(zebra_debug_mpls & ZEBRA_DEBUG_MPLS_DETAILED)
 #define IS_ZEBRA_DEBUG_VXLAN (zebra_debug_vxlan & ZEBRA_DEBUG_VXLAN)
 #define IS_ZEBRA_DEBUG_PW  (zebra_debug_pw & ZEBRA_DEBUG_PW)
+#define IS_ZEBRA_DEBUG_DHCP (zebra_debug_dhcp & ZEBRA_DEBUG_DHCP)
 
 #define IS_ZEBRA_DEBUG_DPLANE (zebra_debug_dplane & ZEBRA_DEBUG_DPLANE)
 #define IS_ZEBRA_DEBUG_DPLANE_DETAIL \
@@ -135,6 +138,7 @@ extern unsigned long zebra_debug_nht;
 extern unsigned long zebra_debug_mpls;
 extern unsigned long zebra_debug_vxlan;
 extern unsigned long zebra_debug_pw;
+extern unsigned long zebra_debug_dhcp;
 extern unsigned long zebra_debug_dplane;
 extern unsigned long zebra_debug_dplane_dpdk;
 extern unsigned long zebra_debug_mlag;

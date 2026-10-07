@@ -192,6 +192,59 @@ Standard Commands
    setups), though generally /32s are used.
 
 
+.. clicmd:: ip address dhcp
+
+   Obtain the IPv4 address of the interface from a DHCP server (RFC 2131).
+   Zebra broadcasts DHCPDISCOVER / DHCPREQUEST messages on the interface,
+   retransmitting with exponential back-off (4 to 64 seconds) until a server
+   answers.  When the lease is acknowledged zebra:
+
+   - installs the leased address with the subnet mask supplied by the server
+     (option 1; the classful mask is used if none is supplied),
+   - installs a default route towards the first router supplied by the server
+     (option 3).  The route has the type ``dhcp`` (``h`` in
+     :clicmd:`show ip route`) and an administrative distance of 254, so any
+     static or dynamically learned default route takes precedence,
+   - rewrites ``/etc/resolv.conf`` with the DNS servers (option 6) and domain
+     name (option 15) of every DHCP interface in the default VRF.  The original
+     file is kept in ``/etc/resolv.conf.frr-dhcp-orig`` and restored once no
+     DHCP lease provides DNS servers any more.
+
+   The lease is renewed with the leasing server at T1 (option 58, half of the
+   lease time by default) and with any server at T2 (option 59, 7/8 of the
+   lease time by default).  The address, default route and DNS servers are
+   removed when the lease expires, when the server answers with a DHCPNAK, or
+   when the command is removed (a DHCPRELEASE is sent to the server in that
+   case).  When the interface goes down the lease is kept and is verified
+   with the server (INIT-REBOOT) once the interface comes back up.
+
+   This command is currently only supported on Linux.
+
+.. clicmd:: show dhcp lease [json]
+
+   Display the DHCP client state and the current lease (address, subnet mask,
+   default gateway, DNS servers, domain name, DHCP server, and the time left
+   until renewal, rebinding and expiry) of every interface configured with
+   :clicmd:`ip address dhcp`.
+
+   ::
+
+      router# show dhcp lease
+      Interface eth0
+        State:             Bound
+        IP address:        192.168.10.23/24
+        Subnet mask:       255.255.255.0
+        Default gateway:   192.168.10.1
+        DNS servers:       192.168.10.1 1.1.1.1
+        Domain name:       example.net
+        DHCP server:       192.168.10.1
+        Lease obtained:    2026-10-06 18:07:56
+        Lease time:        1d00h00m00s
+        Renewal (T1) in:   11:59:12
+        Rebinding (T2) in: 20:59:12
+        Lease expires in:  23:59:12
+        Messages:          1 discover, 1 request, 0 release sent; 1 offer, 1 ack, 0 nak received
+
 .. clicmd:: description DESCRIPTION ...
 
    Set description for the interface.
@@ -2978,6 +3031,10 @@ Debugging
 .. clicmd:: debug zebra pseudowires
 
    Pseudowire events.
+
+.. clicmd:: debug zebra dhcp
+
+   Debug the zebra DHCP client (state changes and messages sent/received).
 
 .. clicmd:: debug zebra packet [<recv|send>] [detail]
 

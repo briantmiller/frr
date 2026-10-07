@@ -176,7 +176,8 @@ def zebra_route_string(proto_val):
         29: "zebra",  # ZEBRA_ROUTE_NHG (canonical name is "zebra" per route_types.txt)
         30: "srte",  # ZEBRA_ROUTE_SRTE
         31: "table-direct",  # ZEBRA_ROUTE_TABLE_DIRECT
-        32: "any",  # ZEBRA_ROUTE_ALL
+        32: "dhcp",  # ZEBRA_ROUTE_DHCP
+        33: "any",  # ZEBRA_ROUTE_ALL
     }
     return zebra_routes.get(proto_val, f"unknown_proto_{proto_val}")
 

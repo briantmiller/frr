@@ -21,6 +21,7 @@ unsigned long zebra_debug_nht;
 unsigned long zebra_debug_mpls;
 unsigned long zebra_debug_vxlan;
 unsigned long zebra_debug_pw;
+unsigned long zebra_debug_dhcp;
 unsigned long zebra_debug_dplane;
 unsigned long zebra_debug_dplane_dpdk;
 unsigned long zebra_debug_mlag;
@@ -91,6 +92,8 @@ DEFUN_NOSH (show_debugging_zebra,
 		vty_out(vty, "  Zebra VXLAN debugging is on\n");
 	if (IS_ZEBRA_DEBUG_PW)
 		vty_out(vty, "  Zebra pseudowire debugging is on\n");
+	if (IS_ZEBRA_DEBUG_DHCP)
+		vty_out(vty, "  Zebra DHCP client debugging is on\n");
 	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
 		vty_out(vty, "  Zebra detailed dataplane debugging is on\n");
 	else if (IS_ZEBRA_DEBUG_DPLANE)
@@ -221,6 +224,21 @@ DEFUN (debug_zebra_pw,
 		SET_FLAG(zebra_debug_pw, ZEBRA_DEBUG_PW);
 		vty_out(vty, "Zebra Pseudowires debugging is on\n");
 	}
+	return CMD_SUCCESS;
+}
+
+DEFPY (debug_zebra_dhcp,
+       debug_zebra_dhcp_cmd,
+       "[no] debug zebra dhcp",
+       NO_STR
+       DEBUG_STR
+       "Zebra configuration\n"
+       "Debug option set for the zebra DHCP client\n")
+{
+	if (no)
+		UNSET_FLAG(zebra_debug_dhcp, ZEBRA_DEBUG_DHCP);
+	else
+		SET_FLAG(zebra_debug_dhcp, ZEBRA_DEBUG_DHCP);
 	return CMD_SUCCESS;
 }
 
@@ -822,6 +840,10 @@ static int config_write_debug(struct vty *vty)
 		vty_out(vty, "debug zebra pseudowires\n");
 		write++;
 	}
+	if (IS_ZEBRA_DEBUG_DHCP) {
+		vty_out(vty, "debug zebra dhcp\n");
+		write++;
+	}
 
 	if (CHECK_FLAG(zebra_debug_dplane, ZEBRA_DEBUG_DPLANE_DETAILED)) {
 		vty_out(vty, "debug zebra dplane detailed\n");
@@ -877,6 +899,7 @@ void zebra_debug_init(void)
 	zebra_debug_mpls = 0;
 	zebra_debug_vxlan = 0;
 	zebra_debug_pw = 0;
+	zebra_debug_dhcp = 0;
 	zebra_debug_dplane = 0;
 	zebra_debug_dplane_dpdk = 0;
 	zebra_debug_mlag = 0;
@@ -895,6 +918,7 @@ void zebra_debug_init(void)
 	install_element(ENABLE_NODE, &debug_zebra_mpls_cmd);
 	install_element(ENABLE_NODE, &debug_zebra_vxlan_cmd);
 	install_element(ENABLE_NODE, &debug_zebra_pw_cmd);
+	install_element(ENABLE_NODE, &debug_zebra_dhcp_cmd);
 	install_element(ENABLE_NODE, &debug_zebra_packet_cmd);
 	install_element(ENABLE_NODE, &debug_zebra_kernel_cmd);
 #if defined(HAVE_NETLINK)
@@ -930,6 +954,7 @@ void zebra_debug_init(void)
 	install_element(CONFIG_NODE, &debug_zebra_mpls_cmd);
 	install_element(CONFIG_NODE, &debug_zebra_vxlan_cmd);
 	install_element(CONFIG_NODE, &debug_zebra_pw_cmd);
+	install_element(CONFIG_NODE, &debug_zebra_dhcp_cmd);
 	install_element(CONFIG_NODE, &debug_zebra_packet_cmd);
 	install_element(CONFIG_NODE, &debug_zebra_kernel_cmd);
 #if defined(HAVE_NETLINK)
