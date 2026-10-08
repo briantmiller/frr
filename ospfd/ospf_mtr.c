@@ -24,7 +24,7 @@
  *   participate in every topology.
  *
  * - The routes of topology N are installed into kernel routing table
- *   "mtr-route-table-offset + N".
+ *   "mtr route-table-offset + N".
  */
 
 #include <zebra.h>
@@ -485,7 +485,7 @@ static uint32_t mtr_target_table(struct ospf *ospf, struct ospf_mtr_topo *topo)
 	uint32_t table_id = ospf_mtr_table_id(ospf, topo->mtid);
 
 	if (!ospf_mtr_table_valid(ospf, table_id)) {
-		zlog_warn("MTR: not installing MT-ID %u routes: table %u is reserved, adjust mtr-route-table-offset",
+		zlog_warn("MTR: not installing MT-ID %u routes: table %u is reserved, adjust mtr route-table-offset",
 			  topo->mtid, table_id);
 		return 0;
 	}
@@ -955,7 +955,8 @@ DEFPY (ospf_mtr_copy_base,
 
 DEFPY (ospf_mtr_table_offset,
        ospf_mtr_table_offset_cmd,
-       "mtr-route-table-offset (0-4294967168)$offset",
+       "mtr route-table-offset (0-4294967168)$offset",
+       "Multi-topology routing (RFC 4915)\n"
        "Kernel routing table offset for multi-topology routes (table = offset + MT-ID)\n"
        "Offset\n")
 {
@@ -977,8 +978,9 @@ DEFPY (ospf_mtr_table_offset,
 
 DEFPY (no_ospf_mtr_table_offset,
        no_ospf_mtr_table_offset_cmd,
-       "no mtr-route-table-offset [(0-4294967168)]",
+       "no mtr route-table-offset [(0-4294967168)]",
        NO_STR
+       "Multi-topology routing (RFC 4915)\n"
        "Kernel routing table offset for multi-topology routes (table = offset + MT-ID)\n"
        "Offset\n")
 {
@@ -1003,7 +1005,7 @@ void ospf_mtr_config_write_router(struct vty *vty, struct ospf *ospf)
 	if (ospf->mtr_copy_base)
 		vty_out(vty, " mtr copy-base-topology\n");
 	if (ospf->mtr_table_offset_configured)
-		vty_out(vty, " mtr-route-table-offset %u\n", ospf->mtr_table_offset);
+		vty_out(vty, " mtr route-table-offset %u\n", ospf->mtr_table_offset);
 }
 
 void ospf_mtr_config_write_if(struct vty *vty, struct interface *ifp)

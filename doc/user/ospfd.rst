@@ -1032,7 +1032,7 @@ which is left unchanged.
 Routers that do not implement :rfc:`4915` ignore the MT-ID metrics, so MTR
 routers interoperate with them in the default topology. Until MTR is
 configured on a router (an ``ip ospf mt-id`` cost on one of its interfaces,
-``mtr copy-base-topology`` or ``mtr-route-table-offset``), *ospfd* ignores
+``mtr copy-base-topology`` or ``mtr route-table-offset``), *ospfd* ignores
 the MT-ID metrics advertised by other routers as well.
 
 During the calculation for MT-ID *N* only links that advertise a metric for
@@ -1063,11 +1063,11 @@ originates.
    the MT-ID metrics that differ from the base topology need to be
    configured.
 
-.. clicmd:: mtr-route-table-offset (0-4294967168)
+.. clicmd:: mtr route-table-offset (0-4294967168)
 
    Set the number the MTR kernel routing tables start from: the routes of
    MT-ID *N* are installed into table *offset + N*. For example with
-   ``mtr-route-table-offset 255`` MT-ID 1 is installed into table 256. The
+   ``mtr route-table-offset 255`` MT-ID 1 is installed into table 256. The
    default offset is 0. Routes are never installed into tables 253
    (default), 254 (main) and 255 (local); a warning is logged when an MT-ID
    maps onto one of them. Changing the offset moves the installed routes.
@@ -1095,7 +1095,7 @@ normal cost. Topology 10 routes are installed into kernel table 265.
    !
    router ospf
     mtr copy-base-topology
-    mtr-route-table-offset 255
+    mtr route-table-offset 255
    !
 
 The following parts of :rfc:`4915` are not implemented: the

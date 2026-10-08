@@ -8,7 +8,7 @@
  * in the LSDB or configured locally, and the resulting routes are installed
  * into a dedicated kernel routing table:
  *
- *      table-id = mtr-route-table-offset + MT-ID
+ *      table-id = mtr route-table-offset + MT-ID
  *
  * MT-ID 0 is the default topology and is handled by the regular OSPF code.
  */
