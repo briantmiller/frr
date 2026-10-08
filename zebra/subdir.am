@@ -160,6 +160,7 @@ nobase_pkginclude_HEADERS += \
 	zebra/kernel_socket.h \
 	zebra/label_manager.h \
 	zebra/nat_netlink.h \
+	zebra/nat_port.h \
 	zebra/netconf_netlink.h \
 	zebra/redistribute.h \
 	zebra/rib.h \
