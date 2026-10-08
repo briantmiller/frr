@@ -15,7 +15,7 @@
 #        r5 (legacy)
 #
 # r1, r2 and r3 run MTR with "mtr copy-base-topology" and
-# "mtr-route-table-offset 255"; r4 and r5 have no MTR configuration.
+# "mtr route-table-offset 255"; r4 and r5 have no MTR configuration.
 # The r1-r2 link is expensive in topology 10 only, so topology 10 routes
 # (kernel table 265) avoid it while the default topology still uses it.
 #
@@ -249,7 +249,7 @@ def test_ospf_mtr_table_offset():
 
     r1 = tgen.gears["r1"]
 
-    r1.vtysh_cmd("configure terminal\nrouter ospf\nmtr-route-table-offset 1000")
+    r1.vtysh_cmd("configure terminal\nrouter ospf\nmtr route-table-offset 1000")
     _expect(
         r1,
         "show ip route table 1010 json",
@@ -263,7 +263,7 @@ def test_ospf_mtr_table_offset():
         "topology 10 routes not removed from table 265",
     )
 
-    r1.vtysh_cmd("configure terminal\nrouter ospf\nmtr-route-table-offset 255")
+    r1.vtysh_cmd("configure terminal\nrouter ospf\nmtr route-table-offset 255")
     _expect(
         r1,
         "show ip route table 265 json",
