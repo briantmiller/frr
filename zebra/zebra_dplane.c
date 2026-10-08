@@ -8217,6 +8217,7 @@ static void kernel_dplane_handle_result(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_LINK_MTU_SET:
 		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
 			atomic_fetch_add_explicit(&zdplane_info.dg_link_errors, 1,
+						  memory_order_relaxed);
 	case DPLANE_OP_NAT_TC_INSTALL:
 	case DPLANE_OP_NAT_TC_DELETE:
 		if (res != ZEBRA_DPLANE_REQUEST_SUCCESS)
