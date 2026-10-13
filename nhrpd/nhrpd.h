@@ -11,6 +11,7 @@
 #include "debug.h"
 #include "memory.h"
 #include "resolver.h"
+#include "pktpair.h"
 
 DECLARE_MGROUP(NHRPD);
 
@@ -89,6 +90,9 @@ static inline int notifier_active(struct notifier_list *l)
 extern struct hash *nhrp_gre_list;
 
 void nhrp_zebra_init(void);
+struct zapi_detected_bw;
+void nhrp_zebra_detected_bw_send(vrf_id_t vrf_id,
+				 const struct zapi_detected_bw *bw);
 void nhrp_zebra_terminate(void);
 void nhrp_send_zebra_configure_arp(struct interface *ifp, int family);
 void nhrp_send_zebra_nbr(union sockunion *in,
@@ -245,6 +249,9 @@ struct nhrp_cache {
 		time_t expires;
 		uint32_t mtu;
 		int holding_time;
+		/* Bound by a registration request from this peer (we are
+		 * its NHS), rather than by resolution or shortcut. */
+		unsigned registered : 1;
 	} cur, new;
 };
 
@@ -339,6 +346,14 @@ struct nhrp_interface {
 
 	struct interface *nbmaifp;
 	struct notifier_block nbmanifp_notifier;
+
+	/* Packet-pair probing (nhrp_pktpair.c), IPv4 only. */
+	unsigned pp_enabled : 1;
+	unsigned pp_interval_set : 1;
+	unsigned pp_probes_set : 1;
+	unsigned pp_dscp_set : 1;
+	struct pktpair_cfg pp_cfg;
+	struct pktpair_session *pp;
 
 	struct nhrp_afi_data {
 		unsigned flags;
@@ -453,6 +468,7 @@ void nhrp_cache_foreach(struct interface *ifp,
 void nhrp_cache_config_foreach(struct interface *ifp,
 			       void (*cb)(struct nhrp_cache_config *, void *), void *ctx);
 void nhrp_cache_set_used(struct nhrp_cache *c, int used);
+void nhrp_cache_mark_registered(struct nhrp_cache *c);
 int nhrp_cache_update_binding(struct nhrp_cache *, enum nhrp_cache_type type,
 			      int holding_time, struct nhrp_peer *p,
 			      uint32_t mtu, union sockunion *nbma_natoa,

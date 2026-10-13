@@ -1712,6 +1712,81 @@ DEFPY(sharp_use_resolved_nexthop_weight,
 	return CMD_SUCCESS;
 }
 
+DEFPY (sharp_detected_bw,
+       sharp_detected_bw_cmd,
+       "sharp detected-bandwidth IFNAME$ifname <A.B.C.D$nh4|X:X::X:X$nh6> [rtt (0-4294967295)$rtt] [out (0-4294967295)$out] [in (0-4294967295)$in]",
+       "Sharp routing Protocol\n"
+       "Report detected bandwidth towards a next hop to zebra\n"
+       "Interface name\n"
+       "IPv4 next hop\n"
+       "IPv6 next hop\n"
+       "Round-trip estimate\n"
+       "kbit/s\n"
+       "Outbound, one-way\n"
+       "kbit/s\n"
+       "Inbound, one-way\n"
+       "kbit/s\n")
+{
+	struct zapi_detected_bw bw = {};
+	struct interface *ifp;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		vty_out(vty, "%% Unknown interface %s\n", ifname);
+		return CMD_WARNING;
+	}
+	bw.ifindex = ifp->ifindex;
+	if (nh4_str) {
+		bw.nexthop.ipa_type = IPADDR_V4;
+		bw.nexthop.ipaddr_v4 = nh4;
+	} else {
+		bw.nexthop.ipa_type = IPADDR_V6;
+		bw.nexthop.ipaddr_v6 = nh6;
+	}
+	bw.rtt_kbps = rtt_str ? rtt : 0;
+	bw.out_kbps = out_str ? out : 0;
+	bw.in_kbps = in_str ? in : 0;
+	if (sharp_zebra_detected_bw_send(&bw) == ZCLIENT_SEND_FAILURE) {
+		vty_out(vty, "%% Failed to send to zebra\n");
+		return CMD_WARNING;
+	}
+	return CMD_SUCCESS;
+}
+
+DEFPY (no_sharp_detected_bw,
+       no_sharp_detected_bw_cmd,
+       "no sharp detected-bandwidth IFNAME$ifname [<A.B.C.D$nh4|X:X::X:X$nh6>]",
+       NO_STR
+       "Sharp routing Protocol\n"
+       "Withdraw detected bandwidth reported to zebra\n"
+       "Interface name\n"
+       "IPv4 next hop\n"
+       "IPv6 next hop\n")
+{
+	struct zapi_detected_bw bw = {};
+	struct interface *ifp;
+
+	ifp = if_lookup_by_name(ifname, VRF_DEFAULT);
+	if (!ifp) {
+		vty_out(vty, "%% Unknown interface %s\n", ifname);
+		return CMD_WARNING;
+	}
+	bw.ifindex = ifp->ifindex;
+	if (nh4_str) {
+		bw.nexthop.ipa_type = IPADDR_V4;
+		bw.nexthop.ipaddr_v4 = nh4;
+		bw.flags = ZAPI_DETECTED_BW_DELETE;
+	} else if (nh6_str) {
+		bw.nexthop.ipa_type = IPADDR_V6;
+		bw.nexthop.ipaddr_v6 = nh6;
+		bw.flags = ZAPI_DETECTED_BW_DELETE;
+	} else {
+		bw.flags = ZAPI_DETECTED_BW_CLEAR;
+	}
+	sharp_zebra_detected_bw_send(&bw);
+	return CMD_SUCCESS;
+}
+
 void sharp_vty_init(void)
 {
 	install_element(ENABLE_NODE, &install_routes_data_dump_cmd);
@@ -1757,5 +1832,7 @@ void sharp_vty_init(void)
 	install_element(ENABLE_NODE, &crashme_uaf_cmd);
 
 	install_element(ENABLE_NODE, &sharp_use_resolved_nexthop_weight_cmd);
+	install_element(ENABLE_NODE, &sharp_detected_bw_cmd);
+	install_element(ENABLE_NODE, &no_sharp_detected_bw_cmd);
 	return;
 }

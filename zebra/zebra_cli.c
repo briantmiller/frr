@@ -524,6 +524,34 @@ DEFPY_YANG (bandwidth_if,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (detected_bw_aggregate,
+	detected_bw_aggregate_cmd,
+	"[no] detected-bandwidth aggregate ![<max|sum>$agg]",
+	NO_STR
+	"Bandwidth detected by protocol daemons towards next hops\n"
+	"How several next hops of one daemon make up the interface bandwidth\n"
+	"Use the fastest next hop (default)\n"
+	"Use the sum over all next hops\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty,
+				      "./frr-zebra:zebra/detected-bandwidth-aggregate",
+				      NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty,
+				      "./frr-zebra:zebra/detected-bandwidth-aggregate",
+				      NB_OP_MODIFY, agg);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_detected_bandwidth_aggregate_cli_write(
+	struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	if (show_defaults || yang_dnode_get_enum(dnode, NULL) != 0)
+		vty_out(vty, " detected-bandwidth aggregate %s\n",
+			yang_dnode_get_string(dnode, NULL));
+}
+
 static void lib_interface_zebra_bandwidth_cli_write(struct vty *vty,
 						    const struct lyd_node *dnode,
 						    bool show_defaults)
@@ -3151,6 +3179,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_bandwidth_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/detected-bandwidth-aggregate",
+			.cbs.cli_show = lib_interface_zebra_detected_bandwidth_aggregate_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/mpls",
 			.cbs.cli_show = lib_interface_zebra_mpls_cli_write,
 		},
@@ -3384,6 +3416,7 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &linkdetect_cmd);
 	install_element(INTERFACE_NODE, &shutdown_if_cmd);
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
+	install_element(INTERFACE_NODE, &detected_bw_aggregate_cmd);
 	install_element(INTERFACE_NODE, &ip_address_cmd);
 	install_element(INTERFACE_NODE, &ip_address_peer_cmd);
 	install_element(INTERFACE_NODE, &ipv6_address_cmd);

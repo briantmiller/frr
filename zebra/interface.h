@@ -93,6 +93,10 @@ struct zebra_if {
 	/* back pointer to the interface */
 	struct interface *ifp;
 
+	/* Bandwidth detected by protocol daemons (zebra_dbw.c). */
+	uint8_t dbw_aggregate; /* enum zebra_dbw_aggregate */
+	struct zebra_dbw_if *dbw;
+
 	/* Event timer to batch  ICMPv6 join requests */
 	struct event *icmpv6_join_timer;
 

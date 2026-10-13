@@ -5046,6 +5046,53 @@ static void zclient_event(enum zclient_event event, struct zclient *zclient)
 	}
 }
 
+enum zclient_send_status
+zclient_detected_bw_send(struct zclient *zclient, vrf_id_t vrf_id,
+			 const struct zapi_detected_bw *bw)
+{
+	struct stream *s;
+
+	if (!zclient || zclient->sock < 0)
+		return ZCLIENT_SEND_FAILURE;
+
+	s = zclient->obuf;
+	stream_reset(s);
+	zclient_create_header(s, ZEBRA_DETECTED_BW_UPDATE, vrf_id);
+
+	stream_putl(s, bw->ifindex);
+	stream_putc(s, bw->flags);
+	if (!CHECK_FLAG(bw->flags, ZAPI_DETECTED_BW_CLEAR) &&
+	    !stream_put_ipaddr(s, &bw->nexthop))
+		return ZCLIENT_SEND_FAILURE;
+	stream_putq(s, bw->rtt_kbps);
+	stream_putq(s, bw->out_kbps);
+	stream_putq(s, bw->in_kbps);
+
+	stream_putw_at(s, 0, stream_get_endp(s));
+	return zclient_send_message(zclient);
+}
+
+int zapi_detected_bw_decode(struct stream *s, struct zapi_detected_bw *bw)
+{
+	memset(bw, 0, sizeof(*bw));
+
+	STREAM_GETL(s, bw->ifindex);
+	STREAM_GETC(s, bw->flags);
+	if (!CHECK_FLAG(bw->flags, ZAPI_DETECTED_BW_CLEAR)) {
+		STREAM_GET_IPADDR(s, &bw->nexthop);
+		if (bw->nexthop.ipa_type != IPADDR_V4 &&
+		    bw->nexthop.ipa_type != IPADDR_V6)
+			return -1;
+	}
+	STREAM_GETQ(s, bw->rtt_kbps);
+	STREAM_GETQ(s, bw->out_kbps);
+	STREAM_GETQ(s, bw->in_kbps);
+	return 0;
+
+stream_failure:
+	return -1;
+}
+
 enum zclient_send_status zclient_interface_set_arp(struct zclient *client,
 						   struct interface *ifp,
 						   bool arp_enable)

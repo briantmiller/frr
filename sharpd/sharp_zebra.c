@@ -1195,3 +1195,9 @@ void sharp_zebra_terminate(void)
 	zclient_stop(g_zclient);
 	zclient_free(g_zclient);
 }
+
+enum zclient_send_status
+sharp_zebra_detected_bw_send(const struct zapi_detected_bw *bw)
+{
+	return zclient_detected_bw_send(g_zclient, VRF_DEFAULT, bw);
+}

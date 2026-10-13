@@ -91,6 +91,7 @@ lib_libfrr_la_SOURCES = \
 	lib/ntop.c \
 	lib/openbsd-tree.c \
 	lib/pid_output.c \
+	lib/pktpair.c \
 	lib/plist.c \
 	lib/prefix.c \
 	lib/privs.c \
@@ -277,6 +278,7 @@ nobase_pkginclude_HEADERS += \
 	lib/ns.h \
 	lib/openbsd-queue.h \
 	lib/openbsd-tree.h \
+	lib/pktpair.h \
 	lib/plist.h \
 	lib/prefix.h \
 	lib/printfrr.h \

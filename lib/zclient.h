@@ -238,10 +238,36 @@ typedef enum {
 	ZEBRA_TC_FILTER_DELETE,
 	ZEBRA_OPAQUE_NOTIFY,
 	ZEBRA_SRV6_SID_NOTIFY,
+	ZEBRA_DETECTED_BW_UPDATE,
 } zebra_message_types_t;
 /* Zebra message types. Please update the corresponding
  * command_types array with any changes!
  */
+
+/*
+ * Detected bandwidth towards a next hop on an interface, as measured by a
+ * protocol daemon (e.g. packet-pair probing in ospfd or nhrpd).  zebra
+ * keeps the values per sending daemon (protocol and instance), so several
+ * daemons can report for the same interface without overwriting each
+ * other, and derives a per-interface bandwidth per daemon from them.
+ * All rates are in kbit/s; 0 means unknown.
+ */
+struct zapi_detected_bw {
+	ifindex_t ifindex;
+	struct ipaddr nexthop; /* unused with ZAPI_DETECTED_BW_CLEAR */
+	uint8_t flags;
+#define ZAPI_DETECTED_BW_DELETE 0x01 /* forget this next hop          */
+#define ZAPI_DETECTED_BW_CLEAR	0x02 /* forget all next hops on ifindex */
+	uint64_t rtt_kbps; /* round-trip estimate: min of both directions */
+	uint64_t out_kbps; /* local -> next hop, measured one-way         */
+	uint64_t in_kbps;  /* next hop -> local, measured one-way         */
+};
+
+extern enum zclient_send_status
+zclient_detected_bw_send(struct zclient *zclient, vrf_id_t vrf_id,
+			 const struct zapi_detected_bw *bw);
+extern int zapi_detected_bw_decode(struct stream *s,
+				   struct zapi_detected_bw *bw);
 
 enum zebra_error_types {
 	ZEBRA_UNKNOWN_ERROR,    /* Error of unknown type */

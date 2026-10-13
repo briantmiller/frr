@@ -131,6 +131,72 @@ Configuring NHRP
 
    Configure NHRP advertised MTU.
 
+.. clicmd:: ip nhrp packet-pair [{interval (1-3600)|probes (2-64)|dscp (0-63)}]
+
+   Periodically estimate the speed of the path to each NHRP peer on this
+   tunnel using packet pairs, and measure its round trip time and jitter.
+   A client (spoke) probes every NHS it is registered with; an NHS (hub)
+   probes every client registered with it. Spoke-to-spoke shortcut peers
+   are not probed.
+
+   Every ``interval`` seconds (default 60) ``probes`` pairs (default 10)
+   of back-to-back ICMP echo requests, the size of the tunnel MTU, are
+   sent through the tunnel to each peer's protocol address. The inner
+   probe is marked with the given ``dscp`` value (default 0); the outer
+   header's DSCP follows the tunnel's ``tos`` setting, as for any other
+   tunnel traffic. Peers only need to answer ICMP echo requests. The
+   estimated speed is the probe size divided by the gap between the two
+   replies of a pair, reported as the median over a sample and smoothed
+   across samples. Options omitted from the command revert to their
+   defaults. IPv4 only.
+
+   Probes are sent with ``PACKET_QDISC_BYPASS``, so local egress QoS does
+   not affect the estimate, which can then be used to size such a policy:
+
+   - Normally nhrpd builds the complete frame (outer IPv4, GRE header with
+     the tunnel's key, and the probe) and writes it directly to the
+     underlay Ethernet interface, bypassing both the tunnel's and the
+     underlay interface's qdisc.
+   - When that is not possible the probe is written to the GRE interface
+     instead, like NHRP packets themselves: the tunnel's qdisc is bypassed
+     but the underlay's applies. This happens when the tunnel is protected
+     by IPsec (``tunnel protection``, or any IPsec SA to the peer), since a
+     frame written to the underlay would skip encryption; when the tunnel
+     uses GRE checksums, sequence numbers or FOU/GUE encapsulation; when
+     the underlay interface is not Ethernet; when the underlay next hop's
+     MAC address is not resolved; or when the probe would exceed the
+     underlay MTU.
+
+   When the peer also runs packet-pair, probing or as a responder, each
+   direction is measured separately: the peer times the arrival of this
+   router's probe pairs inside the tunnel and reports the one-way speed
+   and jitter back (an ICMP echo reply carrying this router's probe
+   identifier). ``show ip nhrp packet-pair`` then shows an *outbound*
+   speed (reported by the peer) and an *inbound* speed (measured locally
+   from the peer's probes), which differ on asymmetric links such as
+   DSL or cable access. Only probes from NHSes and registered clients
+   are measured. The results are also reported to zebra, per peer, as
+   detected bandwidth towards that next hop on the tunnel (see
+   ``detected-bandwidth aggregate`` and ``show zebra detected-bandwidth``).
+   Probes and reports carry a payload format version
+   (currently 1); messages of another version are ignored and counted in
+   ``show ip nhrp packet-pair`` (``versionMismatches`` in JSON), so
+   one-way results need both ends to use the same version.
+
+   Frames written to the underlay skip netfilter output hooks, and
+   bypassed probes are not seen by packet captures on the sending
+   interfaces. QoS elsewhere on the path, including the peer's egress
+   for the replies, still affects the measurement. On a hub with many
+   clients, pairs are spaced more closely so a sample still fits in the
+   interval.
+
+
+.. clicmd:: ip nhrp packet-pair responder
+
+   Measure the packet-pair probes of NHSes and registered clients on this
+   tunnel and report the one-way results back to them, without sending
+   probes. For example, spokes configured as responders let the hub learn
+   its outbound speed to each spoke.
 
 .. _hub-functionality:
 
@@ -245,6 +311,15 @@ Show  NHRP
 .. clicmd:: show [ip|ipv6] nhrp nhs [json]
 
    Dump the hub context.
+
+.. clicmd:: show ip nhrp packet-pair [json]
+
+   Show packet-pair probing per tunnel interface and, for each NHS or
+   registered client, the latest RTT, jitter, inter-packet delay and
+   estimated speed, and how probes were sent (``txPath`` in JSON:
+   ``underlay-bypass``, ``tunnel-bypass`` or ``ip-stack``, with the reason
+   in ``txQdiscBypassReason`` when bypass was partial). One-way results
+   appear as ``outbound`` and ``inbound`` objects in JSON.
 
 .. clicmd:: show dmvpn [json]
 

@@ -2230,6 +2230,29 @@ module frr-zebra {
         description
           "Link bandwidth informational parameter, in megabits.";
       }
+
+      leaf detected-bandwidth-aggregate {
+        type enumeration {
+          enum max {
+            value 0;
+            description
+              "Use the bandwidth of the fastest next hop.";
+          }
+          enum sum {
+            value 1;
+            description
+              "Use the sum of the bandwidths of all next hops.";
+          }
+        }
+        default "max";
+        description
+          "Protocol daemons report the bandwidth they detect towards
+           their next hops on this interface.  For each daemon, this
+           selects how the bandwidths of several next hops (several
+           OSPF neighbors on a broadcast network, several NHRP NHSes or
+           clients on a tunnel) are combined into one interface
+           bandwidth.";
+      }
       container link-params {
         presence "Activates link parameters on this interface.";
         description

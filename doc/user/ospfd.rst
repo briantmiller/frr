@@ -984,6 +984,82 @@ a BFD profile to these sessions.
    optional IPv4 address is specified, the prefix suppression will apply
    to the OSPF interface associated with the specified interface address.
 
+.. clicmd:: ip ospf packet-pair [{interval (1-3600)|probes (2-64)|dscp (0-63)}]
+
+   Periodically estimate the speed of the link to each OSPF neighbor on
+   this interface using packet pairs. Every ``interval`` seconds
+   (default 60) ``probes`` pairs (default 10) of back-to-back,
+   MTU-sized ICMP echo requests are sent to every neighbor in state
+   2-Way or better, marked with the given ``dscp`` value (default 0).
+   The neighbor's IP stack echoes them back; no configuration is needed
+   on the neighbor beyond answering ICMP echo requests.
+
+   From the replies ospfd derives the round trip time (min/avg/max, from
+   the first packet of each pair), jitter (mean absolute difference
+   between consecutive RTTs), the inter-packet delay (dispersion) of the
+   two replies, and the estimated bottleneck speed of the round-trip
+   path, computed as ``probe_bits / dispersion`` and reported as the
+   median over the pairs of a sample plus a smoothed value across
+   samples. Results are shown by ``show ip ospf neighbor detail [json]``.
+
+   On Linux the probes are sent on an ``AF_PACKET`` socket with
+   ``PACKET_QDISC_BYPASS`` set, so they skip the egress queueing
+   discipline of the local interface (shapers, policers, fq_codel and
+   the like) and go straight to the driver. The estimate therefore
+   reflects the link itself rather than a QoS policy configured on it,
+   and can be used to size such a policy. Bypassed probes also skip
+   netfilter output hooks and are not seen by packet captures on the
+   sending interface. QoS applied elsewhere on the path, including the
+   neighbor's egress for the replies and ingress policing on this
+   router, still affects the measurement.
+
+   The bypass path needs the neighbor's MAC address from the ARP cache.
+   When it is not resolved, the interface is not Ethernet, or the
+   kernel lacks the option, the probes go through the IP stack instead
+   (and through the local qdisc). The transmit path and the reason for
+   a fallback are shown in ``show ip ospf interface`` and per neighbor
+   in ``show ip ospf neighbor detail`` (``txQdiscBypass`` and
+   ``txQdiscBypassReason`` in JSON).
+
+   The round-trip estimate is limited by the slower of the two
+   directions. When the neighbor also runs packet-pair (probing, or as a
+   responder, see below), each direction is measured separately: the
+   neighbor times the arrival of this router's probe pairs, computes the
+   one-way speed and one-way jitter (the variation of the one-way delay;
+   clock offset between the routers cancels out), and reports them back
+   in a small ICMP echo reply carrying this router's probe identifier.
+   ``show ip ospf neighbor detail`` then shows an *outbound* speed
+   (reported by the neighbor) and an *inbound* speed (measured locally
+   from the neighbor's probes), which differ on asymmetric links. Probes
+   are only measured, and reports only sent, for OSPF neighbors on the
+   interface. Results from a neighbor that stops reporting or probing
+   expire after a few intervals.
+
+   The results are also reported to zebra, per neighbor, as detected
+   bandwidth towards that next hop (see ``detected-bandwidth aggregate``
+   and ``show zebra detected-bandwidth``).
+
+   Probes and reports carry a payload format version (currently 1).
+   Messages of another version are ignored, so one-way results need both
+   routers to use the same version; round-trip results do not depend on
+   it. Ignored messages are counted in ``show ip ospf interface``
+   (``versionMismatches`` in JSON), and ``show ip ospf neighbor detail``
+   names the version a neighbor uses when it differs.
+
+   Options omitted from the command revert to their defaults. The
+   setting applies to the whole interface; loopback interfaces and
+   virtual links are not probed. Packet-pair estimates are sensitive to
+   receive interrupt coalescing and, for shapers that are still on the
+   path, to a token-bucket burst larger than two packets, so they are
+   most meaningful on links whose speed is set by serialization.
+
+.. clicmd:: ip ospf packet-pair responder
+
+   Measure the packet-pair probes of neighbors on this interface and
+   report the one-way results back to them, without sending probes. Use
+   this on a router that should let its neighbors learn their outbound
+   speed but has no use for its own measurements.
+
 .. clicmd:: ip ospf neighbor-filter NAME [A.B.C.D]
 
    Configure an IP prefix-list to use to filter packets received from

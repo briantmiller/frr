@@ -15,6 +15,7 @@
 #include "lib/command.h"
 #include "lib/routemap.h"
 #include "zebra/rtadv.h"
+#include "zebra/zebra_dbw.h"
 #include "zebra/zebra_nb.h"
 #include "zebra/rib.h"
 #include "zebra_nb.h"
@@ -1374,6 +1375,23 @@ int lib_interface_zebra_bandwidth_destroy(struct nb_cb_destroy_args *args)
 	/* force protocols to recalculate routes due to cost change */
 	if (if_is_operative(ifp))
 		zebra_interface_up_update(ifp);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/detected-bandwidth-aggregate
+ */
+int lib_interface_zebra_detected_bandwidth_aggregate_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, true);
+	zebra_dbw_set_aggregate(ifp, yang_dnode_get_enum(args->dnode, NULL));
 
 	return NB_OK;
 }
