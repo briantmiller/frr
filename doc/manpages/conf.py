@@ -340,6 +340,7 @@ man_pages = [
         8,
     ),
     ("frr", "frr", "a systemd interaction script", [], 1),
+    ("frr-confjson", "frr-confjson", "convert FRR configuration between text and JSON", [], 1),
     ("mtracebis", "mtracebis", "a multicast trace client", [], 8),
     ("vtysh", "vtysh", "an integrated shell for FRRouting.", [], 1),
 ]

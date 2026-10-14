@@ -780,7 +780,13 @@ fi
 %{_libdir}/libfrrfpm_pb.so*
 %{_libdir}/libmgmt_be_nb.so*
 %{_libdir}/libmlag_pb.so*
-%{_bindir}/*
+%{_bindir}/vtysh
+%{_bindir}/frr-confjson
+%if %{with_pimd}
+    %{_bindir}/mtracebis
+%endif
+%dir %{_datadir}/frr
+%{_datadir}/frr/frr.xref
 %config(noreplace) %{configdir}/[!v]*.conf*
 %config(noreplace) %attr(750,%{frr_user},%{frr_user}) %{configdir}/daemons
 %if "%{initsystem}" == "systemd"

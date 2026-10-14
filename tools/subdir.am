@@ -16,6 +16,7 @@ sbin_PROGRAMS += tools/ssd
 
 if VTYSH
 bin_PROGRAMS += tools/frr-confjson
+man1 += $(MANBUILD)/frr-confjson.1
 endif
 
 if PYTHON_RUNTIME_DEPENDENCY
