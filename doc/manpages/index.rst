@@ -9,6 +9,7 @@
    frr
    frr-bfdd
    frr-bgpd
+   frr-confjson
    frr-eigrpd
    frr-isisd
    frr-fabricd
