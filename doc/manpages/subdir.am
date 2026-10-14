@@ -10,6 +10,7 @@ man_RSTFILES = \
 	doc/manpages/epilogue.rst \
 	doc/manpages/frr-bfdd.rst \
 	doc/manpages/frr-bgpd.rst \
+	doc/manpages/frr-confjson.rst \
 	doc/manpages/frr-eigrpd.rst \
 	doc/manpages/frr-fabricd.rst \
 	doc/manpages/frr-isisd.rst \

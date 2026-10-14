@@ -3,6 +3,7 @@ etc/
 tools/etc/frr/frr.conf etc/frr/
 tools/etc/logrotate.d/frr etc/logrotate.d/
 tools/frr-reload usr/lib/frr/
+usr/bin/frr-confjson
 usr/bin/mtracebis
 usr/bin/vtysh
 usr/lib/*/frr/libfrr.*
@@ -18,5 +19,6 @@ usr/lib/frr/*.sh
 usr/lib/frr/*d
 usr/lib/frr/watchfrr
 usr/lib/frr/zebra
+usr/share/frr/frr.xref
 usr/share/man/
 usr/share/yang/
