@@ -14,6 +14,10 @@ EXTRA_PROGRAMS += \
 
 sbin_PROGRAMS += tools/ssd
 
+if VTYSH
+bin_PROGRAMS += tools/frr-confjson
+endif
+
 if PYTHON_RUNTIME_DEPENDENCY
 sbin_SCRIPTS += \
 	tools/frr-reload.py \
@@ -42,6 +46,25 @@ tools_gen_northbound_callbacks_LDADD = lib/libfrr.la $(LIBYANG_LIBS)
 
 tools_gen_yang_deviations_SOURCES = tools/gen_yang_deviations.c
 tools_gen_yang_deviations_LDADD = lib/libfrr.la $(LIBYANG_LIBS)
+
+# frr-confjson: frr.conf <-> JSON, driven by frr.xref.  Links vtysh's node
+# table and node-switching handlers; the commands come from frr.xref.
+tools_frr_confjson_SOURCES = \
+	tools/frr-confjson.c \
+	vtysh/vtysh.c \
+	vtysh/vtysh_user.c \
+	vtysh/vtysh_config.c \
+	# end
+tools_frr_confjson_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DFRR_XREF_DEFAULT=\"$(pkgdatadir)/frr.xref\" \
+	-DFRR_VTYSH_DEFAULT=\"$(bindir)/vtysh\"
+tools_frr_confjson_LDADD = lib/libfrr.la $(LIBCAP) $(LIBREADLINE) $(LIBS) $(LIBPAM)
+
+# the catalog frr-confjson reads at runtime
+if VTYSH
+frrxrefdir = $(pkgdatadir)
+nodist_frrxref_DATA = frr.xref
+endif
 
 tools_ssd_SOURCES = tools/start-stop-daemon.c lib/strlcpy.c
 tools_ssd_CPPFLAGS =
