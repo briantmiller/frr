@@ -633,6 +633,69 @@ def test_mtu(tgen):
     conf(r1, "no interface mt0", "no interface mt1")
 
 
+def link_is_up(r1, name):
+    got = link(r1, name)
+    return bool(got) and "UP" in got.get("flags", [])
+
+
+def wait_admin_state(r1, name, up, timeout=15):
+    "Wait until the administrative state (IFF_UP) of NAME is UP."
+
+    def check():
+        return (
+            None
+            if link_is_up(r1, name) == up
+            else "{} is not {}".format(name, "up" if up else "down")
+        )
+
+    _, result = topotest.run_and_expect(check, None, count=timeout * 2, wait=0.5)
+    return result
+
+
+def test_link_admin_up(tgen):
+    "links zebra creates are brought up without an address; shutdown keeps one down"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bridge") or not kind_supported(
+        r1, "veth", "peer name probe1"
+    ):
+        pytest.skip("kernel lacks bridge or veth support")
+
+    conf(r1, "interface up0", "link-type bridge")
+    conf(r1, "interface up1", "link-type veth peer up2")
+    conf(r1, "interface up3", "shutdown", "link-type bridge")
+    assert wait_admin_state(r1, "up0", True) is None
+    assert wait_admin_state(r1, "up1", True) is None
+    # the other end of a pair is ours as well
+    assert wait_admin_state(r1, "up2", True) is None
+    assert wait_link(r1, "up3", {"ifname": "up3"}) is None
+    assert wait_admin_state(r1, "up3", False) is None
+
+    conf(r1, "interface up3", "no shutdown")
+    assert wait_admin_state(r1, "up3", True) is None
+
+    # re-created behind our back: up again
+    r1.cmd("ip link del up0")
+    assert wait_admin_state(r1, "up0", True) is None
+
+    # a link that already exists is brought up when it is configured
+    r1.cmd("ip link add up4 type bridge")
+    assert wait_admin_state(r1, "up4", False) is None
+    conf(r1, "interface up4", "link-type bridge")
+    assert wait_admin_state(r1, "up4", True) is None
+
+    for name in ("up0", "up1", "up3", "up4"):
+        conf(r1, "interface " + name, "no link-type")
+        assert wait_link(r1, name, None) is None
+    conf(
+        r1,
+        "no interface up0",
+        "no interface up1",
+        "no interface up2",
+        "no interface up3",
+        "no interface up4",
+    )
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.
