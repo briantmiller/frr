@@ -82,79 +82,123 @@ def test_round_trip():
     doc = json.loads(out)
     rc, conf, err = run("to-conf", "-", stdin=out)
     assert rc == 0, err
-    assert lines(conf) == lines(CONF)
-    # structure and parameter names
-    bgp = [s for s in doc["config"] if s.get("cmd") == "router bgp"][0]
-    assert bgp["params"] == {"instasn": 65001}
-    assert {"cmd": "bgp ebgp-requires-policy", "no": True} in bgp["config"]
-    af = [s for s in bgp["config"] if "config" in s][0]
-    assert af["config"][0] == {"cmd": "network", "params": {"prefix": "198.51.100.0/24"}}
+    # commands sharing leading words are grouped, so compare as sets
+    assert sorted(lines(conf)) == sorted(lines(CONF))
+    # text -> JSON -> text -> JSON is stable
+    rc, out2, err = run("to-json", "-", stdin=conf)
+    assert rc == 0, err
+    assert json.loads(out2) == doc
+
+
+def test_hierarchy_follows_command_line():
+    rc, out, err = run("to-json", "-", stdin=CONF)
+    assert rc == 0, err
+    cfg = json.loads(out)["config"]
+    assert cfg["hostname"] == "r1"
+    assert cfg["log"] == {"syslog": "informational"}
+    assert cfg["interface"]["eth0"] == {
+        "description": "uplink to core",
+        "ip": {"address": "192.0.2.1/24", "ospf": {"area": "0.0.0.0"}},
+    }
+    bgp = cfg["router"]["bgp"]["65001"]
+    assert bgp["no"] == {"bgp": {"ebgp-requires-policy": True}}
+    assert bgp["neighbor"]["192.0.2.2"] == {"remote-as": "external", "timers": "10 30"}
+    assert bgp["address-family"]["ipv4"]["unicast"] == {
+        "network": "198.51.100.0/24",
+        "neighbor": {"192.0.2.2": {"route-map": {"OUT": "out"}}},
+    }
+    assert cfg["route-map"]["OUT"]["permit"]["10"]["set"] == {
+        "community": "65000:1 65000:2"
+    }
+    assert cfg["router"]["ospf"] == {"ospf": {"router-id": "10.0.0.1"}}
+
+
+def test_user_example():
+    doc = {"config": {"interface": {"eth0": {"ip": {"address": "1.2.3.4/24"}}}}}
+    rc, conf, err = run("to-conf", "-", stdin=json.dumps(doc))
+    assert rc == 0, err
+    assert lines(conf) == ["interface eth0", " ip address 1.2.3.4/24", "exit"]
+
+
+def test_lists_and_forms():
+    doc = {"config": {
+        "ip": {"route": {"10.0.0.0/8": ["192.0.2.1", {"192.0.2.3": {"tag": 7}}]}},
+        "router": {"ospf": {}},
+        "interface": {"lo": {"shutdown": False, "description": "a b c"}},
+        "route-map": {"RM": {"permit": {"10": {"set": {"metric": 5}}}}},
+        "bgp": ["as-path access-list AP seq 5 permit ^65001_"],
+    }}
+    rc, conf, err = run("to-conf", "-", stdin=json.dumps(doc))
+    assert rc == 0, err
+    assert lines(conf) == [
+        "ip route 10.0.0.0/8 192.0.2.1",
+        "ip route 10.0.0.0/8 192.0.2.3 tag 7",
+        "router ospf",
+        "exit",
+        "interface lo",
+        " description a b c",
+        "exit",
+        "route-map RM permit 10",
+        " set metric 5",
+        "exit",
+        "bgp as-path access-list AP seq 5 permit ^65001_",
+    ]
 
 
 def test_no_statements():
-    doc = {
-        "config": [
-            {"cmd": "ip route", "no": True,
-             "params": {"prefix": "0.0.0.0/0", "gate": "192.0.2.254", "tag": 5, "distance": 200}},
-            {"cmd": "interface", "params": {"ifname": "eth0"}, "config": [
-                {"cmd": "description", "no": True, "params": {"line": "uplink to core"}}]},
-            {"cmd": "router bgp", "params": {"instasn": 65001}, "config": [
-                {"cmd": "neighbor timers", "no": True,
-                 "params": {"neighbor": "192.0.2.2", "timers": 10, "holdtime": 30}},
-                {"cmd": "bgp ebgp-requires-policy"},
-                {"cmd": "neighbor 192.0.2.2 timers 10 30", "no": True}]},
-            {"cmd": "log syslog", "no": True, "params": {"levelarg": "informational"}},
-            {"cmd": "pbr-map seq", "no": True, "params": {"pbrmap": "P", "seq": 1}},
-            "no ip prefix-list OWN seq 5 permit 198.51.100.0/24",
-        ]
-    }
+    doc = {"config": {
+        "no": {"ip": {"route": {"0.0.0.0/0": {"192.0.2.254": {"tag": {"5": 200}}}}}},
+        "interface": {"eth0": {"no": {"description": "uplink to core"}}},
+        "router": {"bgp": {"65001": {
+            "no": {"neighbor": {"192.0.2.2": {"timers": "10 30", "remote-as": 2}}},
+            "bgp": {"ebgp-requires-policy": True},
+        }}},
+        "pbr-map": {"P": {"no": {}}},
+    }}
+    doc["config"]["no"]["log"] = {"syslog": "informational"}
+    doc["config"]["no"]["pbr-map"] = {"P": {"seq": 1}}
+    rc, conf, err = run("to-conf", "-", stdin=json.dumps(doc))
+    assert rc == 1  # "pbr-map P" + {"no": {}} is not a command
+    doc["config"].pop("pbr-map")
     rc, conf, err = run("to-conf", "-", stdin=json.dumps(doc))
     assert rc == 0, err
     assert lines(conf) == [
         "no ip route 0.0.0.0/0 192.0.2.254 tag 5 200",
+        "no log syslog informational",
+        "no pbr-map P seq 1",
         "interface eth0",
         " no description",
         "exit",
         "router bgp 65001",
         " no neighbor 192.0.2.2 timers 10 30",
+        # never shortened below the command's keywords ("no neighbor X")
+        " no neighbor 192.0.2.2 remote-as 2",
         " bgp ebgp-requires-policy",
-        " no neighbor 192.0.2.2 timers 10 30",
         "exit",
-        "no log syslog informational",
-        "no pbr-map P seq 1",
-        "no ip prefix-list OWN seq 5 permit 198.51.100.0/24",
     ]
 
 
-def test_no_never_widens():
-    # "no neighbor X remote-as ..." must not turn into "no neighbor X"
-    doc = [{"cmd": "router bgp", "params": {"instasn": 1}, "config": [
-        {"cmd": "neighbor remote-as", "no": True,
-         "params": {"neighbor": "192.0.2.2", "remote_as": 2}}]}]
-    rc, conf, err = run("to-conf", "-", stdin=json.dumps(doc))
-    assert rc == 0, err
-    assert " no neighbor 192.0.2.2 remote-as 2" in conf.splitlines()
-
-
 @pytest.mark.parametrize(
-    "doc,needle",
+    "cfg,where,needle",
     [
-        ([{"cmd": "router bgp", "params": {"instasn": "x"}}], "not accepted by 'router bgp"),
-        ([{"cmd": "router bgp", "params": {"asn": 1}}], "unknown parameter 'asn'"),
-        (["neighbor 192.0.2.1 remote-as 1"], "unknown command in config"),
-        ([{"cmd": "hostname", "params": {"hostname": "x"}, "config": ["x"]}],
-         "does not enter a sub-mode"),
-        ([{"cmd": "router ospf", "config": ["exit"]}], "leaves the current mode"),
-        ([{"cmd": "frr version", "no": True, "params": {"version": "1"}}], 'has no "no" form'),
+        ({"interface": {"eth0": {"ip": {"adress": "1.2.3.4/24"}}}},
+         "/config/interface/eth0/ip/adress", "after 'interface eth0'"),
+        ({"neighbor": {"192.0.2.1": {"remote-as": 1}}},
+         "/config/neighbor/192.0.2.1/remote-as", "valid in: bgp"),
+        ({"router": {"ospf": {"exit": True}}},
+         "/config/router/ospf/exit", "not with exit"),
+        # (a bad gateway would still be a valid interface name)
+        ({"ip": {"route": {"10.0.0.0/99": "Null0"}}},
+         "/config/ip/route/10.0.0.0~199", "unknown command"),
     ],
 )
-def test_errors(doc, needle):
-    rc, out, err = run("to-conf", "-", stdin=json.dumps(doc))
+def test_errors(cfg, where, needle):
+    rc, out, err = run("to-conf", "-", stdin=json.dumps({"config": cfg}))
     assert rc == 1
     assert out == ""
     e = json.loads(err)[0]
     assert needle in e["error"], e
-    assert e["path"].startswith("/config/0")
+    assert e["path"] == where
 
 
 def test_text_errors_name_the_line():
@@ -162,5 +206,7 @@ def test_text_errors_name_the_line():
     assert rc == 1
     e = json.loads(err)[0]
     assert e["path"] == "line 2" and "unknown command" in e["error"]
-    # the line is kept, as a string, in the output
-    assert json.loads(out)["config"][0]["config"] == ["router-info area 1.1.1.1"]
+    # the words are kept in the output
+    assert json.loads(out)["config"]["router"]["ospf"] == {
+        "router-info": {"area": "1.1.1.1"}
+    }
