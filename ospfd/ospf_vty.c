@@ -10735,6 +10735,73 @@ DEFPY(no_ip_ospf_packet_pair, no_ip_ospf_packet_pair_cmd,
 	UNSET_IF_PARAM(params, pp_dscp);
 	params->pp_responder = false;
 	UNSET_IF_PARAM(params, pp_responder);
+	UNSET_IF_PARAM(params, pp_smooth_weight);
+	UNSET_IF_PARAM(params, pp_step_threshold);
+	UNSET_IF_PARAM(params, pp_step_samples);
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(ip_ospf_packet_pair_smoothing, ip_ospf_packet_pair_smoothing_cmd,
+      "ip ospf packet-pair smoothing {weight (1-100)$weight|step-threshold (0-1000)$thr|step-samples (1-16)$samples}",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Weight of each new sample\n"
+      "Percent (default 25, 100 = latest sample only)\n"
+      "Reset to a new level when samples deviate by more than\n"
+      "Percent (default 30, 0 = never reset)\n"
+      "Consecutive deviating samples needed for a reset\n"
+      "Samples (default 2)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	if (weight_str) {
+		params->pp_smooth_weight = weight;
+		SET_IF_PARAM(params, pp_smooth_weight);
+	} else {
+		UNSET_IF_PARAM(params, pp_smooth_weight);
+	}
+	if (thr_str) {
+		params->pp_step_threshold = thr;
+		SET_IF_PARAM(params, pp_step_threshold);
+	} else {
+		UNSET_IF_PARAM(params, pp_step_threshold);
+	}
+	if (samples_str) {
+		params->pp_step_samples = samples;
+		SET_IF_PARAM(params, pp_step_samples);
+	} else {
+		UNSET_IF_PARAM(params, pp_step_samples);
+	}
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair_smoothing, no_ip_ospf_packet_pair_smoothing_cmd,
+      "no ip ospf packet-pair smoothing [{weight (1-100)|step-threshold (0-1000)|step-samples (1-16)}]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Weight of each new sample\n"
+      "Percent (default 25, 100 = latest sample only)\n"
+      "Reset to a new level when samples deviate by more than\n"
+      "Percent (default 30, 0 = never reset)\n"
+      "Consecutive deviating samples needed for a reset\n"
+      "Samples (default 2)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	UNSET_IF_PARAM(params, pp_smooth_weight);
+	UNSET_IF_PARAM(params, pp_step_threshold);
+	UNSET_IF_PARAM(params, pp_step_samples);
 
 	ospf_pp_if_config_changed(ifp);
 	return CMD_SUCCESS;
@@ -13377,6 +13444,25 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 					vty_out(vty, " dscp %u", params->pp_dscp);
 				vty_out(vty, "\n");
 			}
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    (OSPF_IF_PARAM_CONFIGURED(params, pp_smooth_weight) ||
+			     OSPF_IF_PARAM_CONFIGURED(params, pp_step_threshold) ||
+			     OSPF_IF_PARAM_CONFIGURED(params, pp_step_samples))) {
+				vty_out(vty, " ip ospf packet-pair smoothing");
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_smooth_weight))
+					vty_out(vty, " weight %u",
+						params->pp_smooth_weight);
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_step_threshold))
+					vty_out(vty, " step-threshold %u",
+						params->pp_step_threshold);
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_step_samples))
+					vty_out(vty, " step-samples %u",
+						params->pp_step_samples);
+				vty_out(vty, "\n");
+			}
 
 			/* neighbor-filter print. */
 			if (OSPF_IF_PARAM_CONFIGURED(params, nbr_filter_name)) {
@@ -14257,6 +14343,8 @@ static void ospf_vty_if_init(void)
 	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_cmd);
 	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_cmd);
 	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_responder_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_smoothing_cmd);
+	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_smoothing_cmd);
 
 	/* "ip ospf neighbor-filter" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_neighbor_filter_addr_cmd);

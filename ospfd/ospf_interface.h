@@ -122,6 +122,9 @@ struct ospf_if_params {
 	DECLARE_IF_PARAM(uint8_t, pp_probes);	 /* pairs per sample */
 	DECLARE_IF_PARAM(uint8_t, pp_dscp);	 /* 0-63 */
 	DECLARE_IF_PARAM(bool, pp_responder);	 /* measure peers only */
+	DECLARE_IF_PARAM(uint8_t, pp_smooth_weight);	/* % per sample */
+	DECLARE_IF_PARAM(uint16_t, pp_step_threshold); /* %, 0 = off */
+	DECLARE_IF_PARAM(uint8_t, pp_step_samples);
 
 	/* Authentication data. */
 	uint8_t auth_simple[OSPF_AUTH_SIMPLE_SIZE + 1]; /* Simple password. */

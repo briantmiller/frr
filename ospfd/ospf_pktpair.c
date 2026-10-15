@@ -63,6 +63,17 @@ static void pp_cfg(struct interface *ifp, struct pktpair_cfg *cfg)
 			    : PKTPAIR_DSCP_DEFAULT;
 	cfg->respond_only = OSPF_IF_PARAM_CONFIGURED(params, pp_responder) &&
 			    params->pp_responder;
+	cfg->smooth.weight = OSPF_IF_PARAM_CONFIGURED(params, pp_smooth_weight)
+				     ? params->pp_smooth_weight
+				     : PKTPAIR_SMOOTH_WEIGHT_DEFAULT;
+	cfg->smooth.step_threshold =
+		OSPF_IF_PARAM_CONFIGURED(params, pp_step_threshold)
+			? params->pp_step_threshold
+			: PKTPAIR_STEP_THRESHOLD_DEFAULT;
+	cfg->smooth.step_samples =
+		OSPF_IF_PARAM_CONFIGURED(params, pp_step_samples)
+			? params->pp_step_samples
+			: PKTPAIR_STEP_SAMPLES_DEFAULT;
 }
 
 /* ------------------------------------------------------------------ */
@@ -302,6 +313,7 @@ void ospf_pp_show_if(struct vty *vty, struct ospf_interface *oi,
 		json_object_int_add(json_pp, "intervalSec", cfg.interval);
 		json_object_int_add(json_pp, "pairsPerSample", cfg.probes);
 		json_object_int_add(json_pp, "dscp", cfg.dscp);
+		pktpair_show_smoothing(vty, json_pp, &cfg.smooth, NULL);
 		pktpair_show_session(vty, json_pp, oi->pp, NULL);
 		json_object_object_add(json_iface, "packetPair", json_pp);
 	} else if (cfg.respond_only) {
@@ -321,6 +333,8 @@ void ospf_pp_show_if(struct vty *vty, struct ospf_interface *oi,
 				"    Probes use the IP stack, egress qdisc applies (%s)\n",
 				reason ? reason : "unknown");
 	}
-	if (!json_iface)
+	if (!json_iface) {
+		pktpair_show_smoothing(vty, NULL, &cfg.smooth, "    ");
 		pktpair_show_session(vty, NULL, oi->pp, "    ");
+	}
 }

@@ -286,6 +286,65 @@ static int uint64_cmp(const void *a, const void *b)
 }
 
 /* ------------------------------------------------------------------ */
+/* Smoothing                                                          */
+/* ------------------------------------------------------------------ */
+
+uint64_t pktpair_smooth_update(struct pktpair_smoother *sm,
+			       const struct pktpair_smooth_cfg *cfg,
+			       uint64_t sample_kbps)
+{
+	double x, w, ratio, limit;
+	int8_t dir;
+
+	if (sample_kbps == 0)
+		return sm->inv > 0 ? (uint64_t)(1.0 / sm->inv + 0.5) : 0;
+
+	x = 1.0 / (double)sample_kbps;
+	w = (cfg->weight ? MIN(cfg->weight, 100) : PKTPAIR_SMOOTH_WEIGHT_DEFAULT) /
+	    100.0;
+
+	if (sm->inv <= 0) {
+		/* First sample. */
+		sm->inv = x;
+		goto out;
+	}
+
+	/*
+	 * Step detection, symmetric in ratio: with a 30% threshold a sample
+	 * deviates when it is 1.3 times faster or slower than the average.
+	 */
+	if (cfg->step_threshold) {
+		ratio = sm->inv / x; /* sample / smoothed */
+		limit = 1.0 + cfg->step_threshold / 100.0;
+		dir = ratio > limit ? 1 : (ratio < 1.0 / limit ? -1 : 0);
+
+		if (dir == 0 || dir != sm->step_dir) {
+			sm->step_count = 0;
+			sm->step_inv_sum = 0;
+			sm->step_dir = dir;
+		}
+		if (dir) {
+			sm->step_count++;
+			sm->step_inv_sum += x;
+			if (sm->step_count >=
+			    MAX(cfg->step_samples, PKTPAIR_STEP_SAMPLES_MIN)) {
+				/* Sustained change: restart from it. */
+				sm->inv = sm->step_inv_sum / sm->step_count;
+				sm->step_count = 0;
+				sm->step_inv_sum = 0;
+				sm->step_dir = 0;
+				sm->resets++;
+				goto out;
+			}
+		}
+	}
+
+	sm->inv = (1.0 - w) * sm->inv + w * x;
+out:
+	return (uint64_t)(1.0 / sm->inv + 0.5);
+}
+
+/* ------------------------------------------------------------------ */
 /* Sample evaluation                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -380,11 +439,8 @@ static void pp_target_finalize(struct pktpair_session *s,
 		st->bw_kbps = (nbw & 1) ? bw[nbw / 2]
 					: (bw[nbw / 2 - 1] + bw[nbw / 2]) / 2;
 		st->ipd_avg_usec = ipd_sum / nbw / 1000;
-		if (st->bw_smooth_kbps == 0)
-			st->bw_smooth_kbps = st->bw_kbps;
-		else
-			st->bw_smooth_kbps =
-				(3 * st->bw_smooth_kbps + st->bw_kbps) / 4;
+		st->bw_smooth_kbps = pktpair_smooth_update(
+			&st->smoother, &s->cfg.smooth, st->bw_kbps);
 	} else {
 		st->bw_kbps = 0;
 		st->ipd_avg_usec = 0;
@@ -697,11 +753,8 @@ static void pp_handle_report(struct pktpair_session *s, struct ip *iph,
 	ow->ipd_avg_usec = ntohl(rp->ipd_avg_usec);
 	ow->jitter_usec = ntohl(rp->jitter_usec);
 	if (ow->pairs_valid) {
-		if (ow->bw_smooth_kbps == 0)
-			ow->bw_smooth_kbps = ow->bw_kbps;
-		else
-			ow->bw_smooth_kbps =
-				(3 * ow->bw_smooth_kbps + ow->bw_kbps) / 4;
+		ow->bw_smooth_kbps = pktpair_smooth_update(
+			&ow->smoother, &s->cfg.smooth, ow->bw_kbps);
 	}
 	ow->samples++;
 	monotime(&ow->last_update);
@@ -826,11 +879,8 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 		ow->bw_kbps = (nbw & 1) ? bw[nbw / 2]
 					: (bw[nbw / 2 - 1] + bw[nbw / 2]) / 2;
 		ow->ipd_avg_usec = ipd_sum / nbw / 1000;
-		if (ow->bw_smooth_kbps == 0)
-			ow->bw_smooth_kbps = ow->bw_kbps;
-		else
-			ow->bw_smooth_kbps =
-				(3 * ow->bw_smooth_kbps + ow->bw_kbps) / 4;
+		ow->bw_smooth_kbps = pktpair_smooth_update(
+			&ow->smoother, &s->cfg.smooth, ow->bw_kbps);
 	} else {
 		ow->bw_kbps = 0;
 		ow->ipd_avg_usec = 0;
@@ -1396,6 +1446,8 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json,
 		json_object_int_add(json, "estimatedSpeedKbps", st->bw_kbps);
 		json_object_int_add(json, "estimatedSpeedSmoothedKbps",
 				    st->bw_smooth_kbps);
+		json_object_int_add(json, "smoothingResets",
+				    st->smoother.resets);
 		return;
 	}
 
@@ -1464,6 +1516,8 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 		json_object_int_add(jo, "estimatedSpeedKbps", ow->bw_kbps);
 		json_object_int_add(jo, "estimatedSpeedSmoothedKbps",
 				    ow->bw_smooth_kbps);
+		json_object_int_add(jo, "smoothingResets",
+				    ow->smoother.resets);
 		json_object_object_add(json, key, jo);
 		return;
 	}
@@ -1562,4 +1616,28 @@ void pktpair_show_session(struct vty *vty, struct json_object *json,
 		".%03" PRId64 "s ago)\n",
 		indent, s->ver_mismatch, PKTPAIR_VERSION, &s->ver_last_src,
 		s->ver_last, age_ms / 1000, age_ms % 1000);
+}
+
+void pktpair_show_smoothing(struct vty *vty, struct json_object *json,
+			    const struct pktpair_smooth_cfg *smooth,
+			    const char *indent)
+{
+	if (json) {
+		json_object_int_add(json, "smoothingWeight", smooth->weight);
+		json_object_int_add(json, "stepThreshold",
+				    smooth->step_threshold);
+		json_object_int_add(json, "stepSamples", smooth->step_samples);
+		return;
+	}
+
+	if (smooth->step_threshold)
+		vty_out(vty,
+			"%sSmoothing: weight %u%%, reset after %u sample%s beyond %u%%\n",
+			indent, smooth->weight, smooth->step_samples,
+			smooth->step_samples == 1 ? "" : "s",
+			smooth->step_threshold);
+	else
+		vty_out(vty,
+			"%sSmoothing: weight %u%%, step detection off\n",
+			indent, smooth->weight);
 }

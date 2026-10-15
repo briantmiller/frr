@@ -48,6 +48,7 @@ frr_northbound*
 /lib/test_nexthop
 /lib/test_nexthop_iter
 /lib/test_ntop
+/lib/test_pktpair_smooth
 /lib/test_plist
 /lib/test_prefix2str
 /lib/test_printfrr
