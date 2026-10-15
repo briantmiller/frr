@@ -18,6 +18,7 @@
 #include "lib/frrevent.h"
 
 #include "zebra/zebra_router.h"
+#include "zebra/ioctl.h"
 #include "zebra/zebra_dplane.h"
 #include "zebra/zebra_vrf.h"
 #include "zebra/interface.h"
@@ -39,6 +40,13 @@ struct zebra_link_cfg {
 	bool master_inflight;
 	/* ifindex of the master we last successfully enslaved to, or 0 */
 	ifindex_t master_applied;
+
+	/*
+	 * A link zebra created is brought up administratively once it exists and its
+	 * settings are in (tried once per kernel link; not forced again later).
+	 */
+	bool up_done;
+
 };
 
 static struct event *t_link_cfg_kick;
@@ -121,6 +129,73 @@ static bool link_matches_kind(struct interface *ifp, enum zebra_link_kind kind)
 }
 
 /*
+ * A new Linux link starts administratively down, and nothing else in zebra
+ * brings it up unless an address is configured on it.  A link that zebra was
+ * asked to create is meant to be used, so it is brought up, unless "shutdown"
+ * is configured.  This waits for what the kernel wants to be done on a down
+ * link (bond settings such as ad-select cannot be changed on a bond that is
+ * up) and for the master to be set, and is done once per kernel link: if
+ * somebody sets it down afterwards, that is left alone.
+ */
+static bool link_cfg_shutdown_configured(const struct interface *ifp)
+{
+	const struct zebra_if *zif = ifp->info;
+
+	return zif && zif->shutdown == IF_ZEBRA_DATA_ON;
+}
+
+static void link_cfg_set_up(struct interface *ifp)
+{
+	if (if_is_up(ifp))
+		return;
+
+	if (if_set_flags(ifp, IFF_UP | IFF_RUNNING) < 0) {
+		zlog_warn("Unable to bring up %s", ifp->name);
+		return;
+	}
+	if_refresh(ifp);
+	/* IPv6 addresses are removed when a link goes down; add them again */
+	if_addr_wakeup(ifp);
+}
+
+static void link_cfg_admin_up(struct interface *ifp, struct zebra_link_cfg *cfg)
+{
+	struct interface *peer = NULL;
+	unsigned int scope;
+
+	if (!link_matches_kind(ifp, cfg->params.kind))
+		return;
+
+	if (cfg->create_inflight || cfg->master_inflight || cfg->mtu_inflight ||
+	    cfg->brport_inflight)
+		return;
+	for (scope = 0; scope < ZLO_SCOPE_MAX; scope++)
+		if (cfg->opt_inflight[scope])
+			return;
+	/* Bond settings go first: some can only be changed while it is down */
+	if ((cfg->opt[ZLO_SCOPE_BOND] || cfg->opt_reset[ZLO_SCOPE_BOND] || bondx_active(cfg)) &&
+	    cfg->opt_applied_gen[ZLO_SCOPE_BOND] != cfg->opt_gen[ZLO_SCOPE_BOND])
+		return;
+
+	if (link_cfg_shutdown_configured(ifp)) {
+		cfg->up_done = true;
+		return;
+	}
+
+	/* Both ends of a veth pair are ours, and a pair needs both up */
+	if (cfg->params.kind == ZEBRA_LINK_VETH) {
+		peer = link_cfg_lookup(ifp, cfg->params.u.veth.peer_name);
+		if (!peer || !ifp_is_real(peer))
+			return; /* its arrival re-evaluates this */
+	}
+
+	cfg->up_done = true;
+	link_cfg_set_up(ifp);
+	if (peer && !link_cfg_shutdown_configured(peer))
+		link_cfg_set_up(peer);
+}
+
+/*
  * Bring the kernel in line with the desired state of one interface.  Safe to
  * call at any time and as often as needed.
  */
@@ -190,6 +265,10 @@ static void link_cfg_realize(struct interface *ifp)
 			}
 		}
 	}
+	/* --- admin up, after everything above has had its say --- */
+	if (cfg->has_link && ifp_is_real(ifp) && !cfg->up_done)
+		link_cfg_admin_up(ifp, cfg);
+
 }
 
 static void link_cfg_realize_all(struct event *event)
@@ -352,6 +431,7 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 		cfg->create_inflight = false;
 		cfg->master_inflight = false;
 		cfg->master_applied = 0;
+		cfg->up_done = false;
 	}
 
 	/*

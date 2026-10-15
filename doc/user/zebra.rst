@@ -227,6 +227,14 @@ Standard Commands
 
    In FRR, link-detect is on by default.
 
+A link that zebra creates with one of the ``link-type`` commands below is
+brought up (administratively) once it exists and its settings, ``master`` and
+``mtu`` have been applied, so it does not need an address configured on it to
+come up. Configure ``shutdown`` on the interface to keep it down. Both ends of
+a ``veth`` pair are brought up. This is done once for each kernel link: when
+zebra starts it also brings up a matching link that already exists, but it
+does not force a link up again that someone sets down later.
+
 .. clicmd:: link-type bridge
 
    Have zebra create this interface as a Linux bridge using netlink.
