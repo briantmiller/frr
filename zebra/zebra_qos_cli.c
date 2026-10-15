@@ -1107,6 +1107,97 @@ DEFPY_YANG (no_interface_qos_bandwidth,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (interface_qos_bandwidth_detected,
+	    interface_qos_bandwidth_detected_cmd,
+	    "qos bandwidth detected <ospf|nhrp>$first [<ospf|nhrp>$second] [default RATE$def]",
+	    QOS_STR
+	    "Bandwidth available to the output service-policy\n"
+	    "Use the bandwidth protocol daemons detect, in this order of priority\n"
+	    "Bandwidth detected by ospfd\n"
+	    "Bandwidth detected by nhrpd\n"
+	    "Bandwidth detected by ospfd, used when the first source has none\n"
+	    "Bandwidth detected by nhrpd, used when the first source has none\n"
+	    "Bandwidth while no source has detected any\n"
+	    RATE_STR)
+{
+	const char *base = "./frr-qos:qos/detected-bandwidth";
+	char xpath1[64], xpath2[64], xpath_def[64];
+	char value[32];
+	uint64_t bps;
+
+	if (second && strcmp(first, second) == 0) {
+		vty_out(vty, "%% %s given twice\n", first);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	if (def && qos_parse_rate(def, &bps)) {
+		vty_out(vty, "%% Invalid rate: %s\n", def);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	/* the whole statement replaces what was there */
+	nb_cli_enqueue_change(vty, base, NB_OP_DESTROY, NULL);
+	nb_cli_enqueue_change(vty, base, NB_OP_CREATE, NULL);
+	snprintf(xpath1, sizeof(xpath1), "%s/source[priority='1']/protocol", base);
+	nb_cli_enqueue_change(vty, xpath1, NB_OP_MODIFY, first);
+	if (second) {
+		snprintf(xpath2, sizeof(xpath2), "%s/source[priority='2']/protocol", base);
+		nb_cli_enqueue_change(vty, xpath2, NB_OP_MODIFY, second);
+	}
+	if (def) {
+		snprintf(value, sizeof(value), "%" PRIu64, bps);
+		snprintf(xpath_def, sizeof(xpath_def), "%s/default", base);
+		nb_cli_enqueue_change(vty, xpath_def, NB_OP_MODIFY, value);
+	}
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (no_interface_qos_bandwidth_detected,
+	    no_interface_qos_bandwidth_detected_cmd,
+	    "no qos bandwidth detected [<ospf|nhrp> [<ospf|nhrp>]] [default RATE]",
+	    NO_STR
+	    QOS_STR
+	    "Bandwidth available to the output service-policy\n"
+	    "Use the bandwidth protocol daemons detect, in this order of priority\n"
+	    "Bandwidth detected by ospfd\n"
+	    "Bandwidth detected by nhrpd\n"
+	    "Bandwidth detected by ospfd\n"
+	    "Bandwidth detected by nhrpd\n"
+	    "Bandwidth while no source has detected any\n"
+	    RATE_STR)
+{
+	nb_cli_enqueue_change(vty, "./frr-qos:qos/detected-bandwidth", NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void cli_show_interface_qos_detected(struct vty *vty, const struct lyd_node *dnode,
+					    bool show_defaults)
+{
+	const char *src[2] = {};
+	const struct lyd_node *child;
+	char buf[32];
+
+	LY_LIST_FOR (lyd_child(dnode), child) {
+		uint8_t prio;
+
+		if (strcmp(child->schema->name, "source"))
+			continue;
+		prio = yang_dnode_get_uint8(child, "priority");
+		if (prio >= 1 && prio <= 2)
+			src[prio - 1] = yang_dnode_get_string(child, "protocol");
+	}
+
+	vty_out(vty, " qos bandwidth detected");
+	for (int i = 0; i < 2; i++)
+		if (src[i])
+			vty_out(vty, " %s", src[i]);
+	if (yang_dnode_exists(dnode, "default"))
+		vty_out(vty, " default %s",
+			qos_rate2str(yang_dnode_get_uint64(dnode, "default"), buf, sizeof(buf)));
+	vty_out(vty, "\n");
+}
+
 DEFPY_YANG (interface_service_policy,
 	    interface_service_policy_cmd,
 	    "[no] service-policy [output] ![QOS_PMAP_NAME$name]",
@@ -1332,6 +1423,10 @@ const struct frr_yang_module_info frr_qos_cli_info = {
 			.cbs.cli_show = cli_show_interface_access_group,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth",
+			.cbs.cli_show = cli_show_interface_qos_detected,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-qos:qos/service-policy-output",
 			.cbs.cli_show = cli_show_interface_service_policy,
 		},
@@ -1388,6 +1483,8 @@ void zebra_qos_cli_init(void)
 	install_element(INTERFACE_NODE, &interface_qos_bandwidth_cmd);
 	install_element(INTERFACE_NODE, &no_interface_qos_bandwidth_cmd);
 	install_element(INTERFACE_NODE, &interface_service_policy_cmd);
+	install_element(INTERFACE_NODE, &interface_qos_bandwidth_detected_cmd);
+	install_element(INTERFACE_NODE, &no_interface_qos_bandwidth_detected_cmd);
 	install_element(INTERFACE_NODE, &interface_ip_access_group_cmd);
 	install_element(INTERFACE_NODE, &no_interface_ip_access_group_cmd);
 }

@@ -48,6 +48,13 @@ module frr-qos {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-10-15 {
+    description
+      "Add detected-bandwidth: the output service policy bandwidth from
+       bandwidth measured by protocol daemons, with fallback.";
+    reference "FRRouting";
+  }
+
   revision 2026-10-05 {
     description
       "Add HFSC policy-maps and service curves, extended
@@ -462,10 +469,77 @@ module frr-qos {
       description
         "Interface QoS configuration.";
 
-      leaf bandwidth {
-        type bits-per-second;
+      choice bandwidth-source {
         description
-          "Bandwidth available to the output service policy.";
+          "Where the bandwidth available to the output service policy
+           comes from.  Without either, the interface bandwidth or the
+           link speed is used.";
+
+        case static {
+          leaf bandwidth {
+            type bits-per-second;
+            description
+              "Bandwidth available to the output service policy.";
+          }
+        }
+
+        case detected {
+          container detected-bandwidth {
+            presence
+              "Use the bandwidth protocol daemons detect.";
+            description
+              "Use the outbound bandwidth that protocol daemons measure
+               towards their next hops on this interface (e.g. packet-pair
+               probing in ospfd and nhrpd).  The sources are tried in
+               priority order, the first one with a measurement is used;
+               without any, the default.  Several next hops of one daemon
+               are combined according to the zebra interface setting
+               detected-bandwidth-aggregate, several instances of a
+               daemon by taking the highest value.";
+
+            list source {
+              key "priority";
+              min-elements 1;
+              unique "protocol";
+              description
+                "A daemon whose detected bandwidth is used.";
+
+              leaf priority {
+                type uint8 {
+                  range "1..2";
+                }
+                description
+                  "Order in which the sources are tried, 1 first.";
+              }
+
+              leaf protocol {
+                type enumeration {
+                  enum ospf {
+                    value 1;
+                    description
+                      "Bandwidth detected by ospfd.";
+                  }
+                  enum nhrp {
+                    value 2;
+                    description
+                      "Bandwidth detected by nhrpd.";
+                  }
+                }
+                mandatory true;
+                description
+                  "The daemon.";
+              }
+            }
+
+            leaf default {
+              type bits-per-second;
+              description
+                "Bandwidth used while no source has a measurement.
+                 Without it, the interface bandwidth or the link speed is
+                 used.";
+            }
+          }
+        }
       }
 
       leaf service-policy-output {

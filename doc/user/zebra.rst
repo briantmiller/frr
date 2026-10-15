@@ -1383,6 +1383,36 @@ Interface commands
    ceiling of the HTB root class and as the reference for percentages. When
    not configured, the interface ``bandwidth`` or the link speed is used.
 
+.. clicmd:: qos bandwidth detected <ospf|nhrp> [<ospf|nhrp>] [default RATE]
+
+   Take the QoS bandwidth from the bandwidth ospfd and/or nhrpd measured
+   towards their neighbors on this interface (see ``show zebra
+   detected-bandwidth``). The daemons are tried in the order given: the
+   first one that has a measurement is used, and when it has none, e.g.
+   because it lost its neighbors, was not configured to measure or is not
+   running, the next one is. When no daemon has a measurement, ``RATE``
+   is used, or without ``default`` the interface ``bandwidth`` or the link
+   speed.
+
+   The outbound bandwidth is used (the one-way measurement, or the round
+   trip one when no one-way value is available). Measurements towards
+   several next hops are combined according to ``detected-bandwidth
+   aggregate``, and several instances of a daemon by taking the highest.
+   Whenever the selected value changes, the HTB classes are updated in
+   place, so a new measurement does not disturb traffic.
+
+   This command and ``qos bandwidth RATE`` replace each other.
+
+   .. code-block:: frr
+
+      interface gre1
+       qos bandwidth detected nhrp ospf default 10mbps
+       service-policy output WAN
+      exit
+
+   ``show qos interface`` shows the bandwidth in use and where it came
+   from, and the value of every configured daemon.
+
 .. clicmd:: service-policy [output] NAME
 
    Apply the policy-map ``NAME`` to traffic leaving the interface.

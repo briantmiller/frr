@@ -28,6 +28,8 @@ DEFINE_MTYPE_STATIC(ZEBRA, DBW_IF, "Detected bandwidth interface");
 DEFINE_MTYPE_STATIC(ZEBRA, DBW_SRC, "Detected bandwidth source");
 DEFINE_MTYPE_STATIC(ZEBRA, DBW_NH, "Detected bandwidth next hop");
 
+DEFINE_HOOK(zebra_dbw_changed, (struct interface *ifp), (ifp));
+
 /* One next hop, as reported by one daemon. */
 PREDECL_RBTREE_UNIQ(dbw_nhs);
 struct dbw_nh {
@@ -216,13 +218,39 @@ bool zebra_dbw_get(struct interface *ifp, uint8_t proto,
 	return true;
 }
 
+bool zebra_dbw_get_proto(struct interface *ifp, uint8_t proto,
+			struct zebra_dbw_result *res)
+{
+	struct zebra_if *zif = ifp->info;
+	struct dbw_src *src;
+	bool found = false;
+
+	memset(res, 0, sizeof(*res));
+	if (!zif || !zif->dbw)
+		return false;
+
+	frr_each (dbw_srcs, &zif->dbw->srcs, src) {
+		struct zebra_dbw_result r;
+
+		if (src->proto != proto)
+			continue;
+		dbw_compute(src, zif->dbw_aggregate, &r);
+		if (!found || r.out_kbps > res->out_kbps)
+			*res = r;
+		found = true;
+	}
+	return found;
+}
+
 void zebra_dbw_set_aggregate(struct interface *ifp,
 			     enum zebra_dbw_aggregate agg)
 {
 	struct zebra_if *zif = ifp->info;
 
-	if (zif)
-		zif->dbw_aggregate = agg;
+	if (!zif || zif->dbw_aggregate == agg)
+		return;
+	zif->dbw_aggregate = agg;
+	hook_call(zebra_dbw_changed, ifp);
 }
 
 /* ------------------------------------------------------------------ */
@@ -262,6 +290,7 @@ void zread_detected_bw(ZAPI_HANDLER_ARGS)
 	}
 
 	dbw_update(ifp, client->proto, client->instance, &bw);
+	hook_call(zebra_dbw_changed, ifp);
 }
 
 /* A daemon went away: its measurements go with it. */
@@ -283,8 +312,10 @@ static int dbw_client_close(struct zserv *client)
 				continue;
 			src = dbw_src_find(zif, client->proto, client->instance,
 					   false);
-			if (src)
+			if (src) {
 				dbw_src_free(zif, src);
+				hook_call(zebra_dbw_changed, ifp);
+			}
 		}
 	}
 	return 0;
