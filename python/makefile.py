@@ -169,6 +169,7 @@ xref_targets = [
         "bgpd/rfp-example/rfptest/rfptest",
         "pimd/mtracebis",
         "tools/ssd",
+        "tools/frr-confjson",
         "vtysh/vtysh",
     ]
 ]

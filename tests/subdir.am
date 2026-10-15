@@ -30,6 +30,7 @@ TESTS_CXXFLAGS = \
 ALL_TESTS_LDADD = lib/libfrr.la $(LIBCAP)
 
 EXTRA_DIST += \
+	tests/tools/test_frr_confjson.py \
 	tests/runtests.py \
 	tests/helpers/python/frrsix.py \
 	tests/helpers/python/frrtest.py \

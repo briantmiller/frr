@@ -32,6 +32,7 @@ FRR is a fork of the Quagga project.
    packet-dumps
    glossary
    frr-reload
+   frr-confjson
 
 ################
 Copyright notice

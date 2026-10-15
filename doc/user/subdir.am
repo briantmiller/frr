@@ -17,6 +17,7 @@ user_RSTFILES = \
 	doc/user/fabricd.rst \
 	doc/user/filter.rst \
 	doc/user/frr-reload.rst \
+	doc/user/frr-confjson.rst \
 	doc/user/glossary.rst \
 	doc/user/grpc.rst \
 	doc/user/index.rst \
