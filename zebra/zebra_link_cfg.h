@@ -3,7 +3,7 @@
  * Zebra - configured (zebra-created) Linux link types.
  *
  * Describes links that zebra is asked to create in the kernel through
- * configuration: bridge, veth, vlan, (standard) gre, dummy, vxlan and bareudp.  The parameter
+ * configuration: bridge, veth, vlan, (standard) gre, dummy, vxlan, bareudp and bond.  The parameter
  * structures in this file are intentionally free of zebra/lib types so that
  * they can be carried inside a dataplane context and consumed by the netlink
  * encoder (zebra_link_netlink.c) without any additional dependencies.
@@ -37,6 +37,7 @@ enum zebra_link_kind {
 	ZEBRA_LINK_DUMMY,
 	ZEBRA_LINK_VXLAN,
 	ZEBRA_LINK_BAREUDP,
+	ZEBRA_LINK_BOND,
 	/* Future: GRETAP, IP6GRE, IP6GRETAP, VXLAN, ... */
 	ZEBRA_LINK_KIND_MAX,
 };
@@ -193,6 +194,17 @@ struct zebra_link_bareudp {
 };
 
 /*
+ * Bond: only the mode is part of the definition, because the kernel allows
+ * changing it just while the bond is down and has no slaves, so a different
+ * mode means a new bond.  All other bond settings are applied in place, see
+ * zebra_link_opts.h.
+ */
+struct zebra_link_bond {
+	bool has_mode; /* false: the kernel default (balance-rr) */
+	uint8_t mode;  /* index into zebra_link_bond_mode_names */
+};
+
+/*
  * Always memset() to zero before filling in: the struct is compared with
  * memcmp() to detect configuration changes.
  */
@@ -205,6 +217,7 @@ struct zebra_link_params {
 		struct zebra_link_gre gre;
 		struct zebra_link_vxlan vxlan;
 		struct zebra_link_bareudp bareudp;
+		struct zebra_link_bond bond;
 	} u;
 };
 
@@ -225,6 +238,8 @@ static inline const char *zebra_link_kind2str(enum zebra_link_kind kind)
 		return "vxlan";
 	case ZEBRA_LINK_BAREUDP:
 		return "bareudp";
+	case ZEBRA_LINK_BOND:
+		return "bond";
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;

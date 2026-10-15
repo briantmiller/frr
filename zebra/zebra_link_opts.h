@@ -10,8 +10,8 @@
  * X(SYM, "name", kind, wire width, min, max, default, kernel attribute, enum names,
  *   cli value syntax, cli value help, cli help)
  *
- * The kernel attribute numbers are IFLA_BR_* (bridge) and IFLA_BRPORT_*
- * (port) from linux/if_link.h; they are part of the stable kernel ABI and are
+ * The kernel attribute numbers are IFLA_BR_* (bridge), IFLA_BRPORT_*
+ * (port) and IFLA_BOND_* (bond) from linux/if_link.h; they are part of the stable kernel ABI and are
  * spelled out so this file does not depend on the kernel headers.
  */
 
@@ -38,6 +38,7 @@ enum zebra_link_opt_kind {
 enum zebra_link_opt_scope {
 	ZLO_SCOPE_BRIDGE, /* settings of the bridge device */
 	ZLO_SCOPE_PORT,	  /* settings of a bridge port */
+	ZLO_SCOPE_BOND,	  /* settings of a bond device */
 	ZLO_SCOPE_MAX,
 };
 
@@ -105,12 +106,47 @@ enum zebra_link_opt_scope {
 	X(MULTICAST_MAX_GROUPS, "multicast-max-groups", ZLO_UINT, 4, 0, 4294967295, 0ULL, 42, NULL, "(0-4294967295)", "Value\n", "Maximum multicast groups learned on the port, 0 for no limit") \
 	X(MULTICAST_EHT_HOSTS_LIMIT, "multicast-eht-hosts-limit", ZLO_UINT, 4, 0, 4294967295, 512ULL, 37, NULL, "(0-4294967295)", "Value\n", "Maximum explicit-host-tracking hosts per port")
 
+#define ZEBRA_BOND_OPT_LIST(X) \
+	X(MIIMON, "miimon", ZLO_UINT, 4, 0, 2147483647, 0ULL, 3, NULL, "(0-2147483647)", "Value\n", "MII link monitoring interval in milliseconds, 0 to disable (kernel default 0)") \
+	X(UPDELAY, "updelay", ZLO_UINT, 4, 0, 2147483647, 0ULL, 4, NULL, "(0-2147483647)", "Value\n", "Time in milliseconds to wait before enabling a slave after a link up is detected (multiple of miimon)") \
+	X(DOWNDELAY, "downdelay", ZLO_UINT, 4, 0, 2147483647, 0ULL, 5, NULL, "(0-2147483647)", "Value\n", "Time in milliseconds to wait before disabling a slave after a link failure is detected (multiple of miimon)") \
+	X(USE_CARRIER, "use-carrier", ZLO_BOOL, 1, 0, 1, 1ULL, 6, NULL, "<on|off>", "on\n" "off\n", "Use the interface carrier state for MII monitoring (kernel default on)") \
+	X(ARP_INTERVAL, "arp-interval", ZLO_UINT, 4, 0, 2147483647, 0ULL, 7, NULL, "(0-2147483647)", "Value\n", "ARP monitoring interval in milliseconds, 0 to disable (kernel default 0)") \
+	X(ARP_VALIDATE, "arp-validate", ZLO_ENUM, 4, 0, 6, 0ULL, 9, zlo_enum_bond_arp_validate, "<none|active|backup|all|filter|filter-active|filter-backup>", "none\n" "active\n" "backup\n" "all\n" "filter\n" "filter-active\n" "filter-backup\n" "", "Which ARP replies are validated (kernel default none)") \
+	X(ARP_ALL_TARGETS, "arp-all-targets", ZLO_ENUM, 4, 0, 1, 0ULL, 10, zlo_enum_bond_arp_all_targets, "<any|all>", "any\n" "all\n" "", "Whether any or all ARP targets must answer for a slave to be up (kernel default any)") \
+	X(PRIMARY_RESELECT, "primary-reselect", ZLO_ENUM, 1, 0, 2, 0ULL, 12, zlo_enum_bond_primary_reselect, "<always|better|failure>", "always\n" "better\n" "failure\n" "", "When the primary slave is made active again (kernel default always)") \
+	X(FAIL_OVER_MAC, "fail-over-mac", ZLO_ENUM, 1, 0, 2, 0ULL, 13, zlo_enum_bond_fail_over_mac, "<none|active|follow>", "none\n" "active\n" "follow\n" "", "MAC address handling on failover in active-backup mode (kernel default none)") \
+	X(XMIT_HASH_POLICY, "xmit-hash-policy", ZLO_ENUM, 1, 0, 5, 0ULL, 14, zlo_enum_bond_xmit_hash_policy, "<layer2|layer3-4|layer2-3|encap2-3|encap3-4|vlan-srcmac>", "layer2\n" "layer3-4\n" "layer2-3\n" "encap2-3\n" "encap3-4\n" "vlan-srcmac\n" "", "Transmit hash policy for balance-xor, 802.3ad and balance-tlb (kernel default layer2)") \
+	X(RESEND_IGMP, "resend-igmp", ZLO_UINT, 4, 0, 255, 1ULL, 15, NULL, "(0-255)", "Value\n", "Number of IGMP reports sent after a failover (kernel default 1)") \
+	X(NUM_GRAT_ARP, "num-grat-arp", ZLO_UINT, 1, 0, 255, 1ULL, 16, NULL, "(0-255)", "Value\n", "Number of gratuitous ARPs / unsolicited NAs sent after a failover (kernel default 1)") \
+	X(ALL_SLAVES_ACTIVE, "all-slaves-active", ZLO_BOOL, 1, 0, 1, 0ULL, 17, NULL, "<on|off>", "on\n" "off\n", "Deliver duplicate frames received on inactive slaves (kernel default off)") \
+	X(MIN_LINKS, "min-links", ZLO_UINT, 4, 0, 4294967295, 0ULL, 18, NULL, "(0-4294967295)", "Value\n", "Minimum number of slaves with link up for the bond to be up (kernel default 0)") \
+	X(LP_INTERVAL, "lp-interval", ZLO_UINT, 4, 1, 2147483647, 1ULL, 19, NULL, "(1-2147483647)", "Value\n", "Seconds between learning packets sent on each slave in balance-tlb and balance-alb (kernel default 1)") \
+	X(PACKETS_PER_SLAVE, "packets-per-slave", ZLO_UINT, 4, 0, 65535, 1ULL, 20, NULL, "(0-65535)", "Value\n", "Packets sent on a slave before moving to the next one in balance-rr (kernel default 1)") \
+	X(LACP_RATE, "lacp-rate", ZLO_ENUM, 1, 0, 1, 0ULL, 21, zlo_enum_bond_lacp_rate, "<slow|fast>", "slow\n" "fast\n" "", "LACPDU rate requested from the partner in 802.3ad (kernel default slow)") \
+	X(LACP_ACTIVE, "lacp-active", ZLO_BOOL, 1, 0, 1, 1ULL, 29, NULL, "<on|off>", "on\n" "off\n", "Send LACPDUs periodically in 802.3ad (kernel default on)") \
+	X(AD_SELECT, "ad-select", ZLO_ENUM, 1, 0, 2, 0ULL, 22, zlo_enum_bond_ad_select, "<stable|bandwidth|count>", "stable\n" "bandwidth\n" "count\n" "", "Aggregator selection policy in 802.3ad (kernel default stable)") \
+	X(AD_ACTOR_SYS_PRIO, "ad-actor-sys-prio", ZLO_UINT, 2, 1, 65535, 65535ULL, 24, NULL, "(1-65535)", "Value\n", "LACP system priority in 802.3ad (kernel default 65535)") \
+	X(AD_USER_PORT_KEY, "ad-user-port-key", ZLO_UINT, 2, 0, 1023, 0ULL, 25, NULL, "(0-1023)", "Value\n", "Upper 10 bits of the LACP port key in 802.3ad (kernel default 0)") \
+	X(AD_ACTOR_SYSTEM, "ad-actor-system", ZLO_MAC, 6, 0, 0, ZLO_NODEFAULT, 26, NULL, "X:X:X:X:X:X", "MAC address\n", "LACP system MAC address in 802.3ad") \
+	X(TLB_DYNAMIC_LB, "tlb-dynamic-lb", ZLO_BOOL, 1, 0, 1, 1ULL, 27, NULL, "<on|off>", "on\n" "off\n", "Dynamic load balancing in balance-tlb (kernel default on)") \
+	X(PEER_NOTIF_DELAY, "peer-notif-delay", ZLO_UINT, 4, 0, 300000, 0ULL, 28, NULL, "(0-300000)", "Value\n", "Delay in milliseconds between a failover and the peer notifications (kernel default 0)") \
+	X(MISSED_MAX, "missed-max", ZLO_UINT, 1, 1, 255, 2ULL, 30, NULL, "(1-255)", "Value\n", "Number of missed ARP monitor intervals before a slave is considered down (kernel default 2)") \
+	X(COUPLED_CONTROL, "coupled-control", ZLO_BOOL, 1, 0, 1, 1ULL, 32, NULL, "<on|off>", "on\n" "off\n", "Coupled mux control state machine in 802.3ad (kernel default on)")
+
 /* Indexes into the tables */
 enum zebra_bridge_opt {
 #define X(sym, ...) ZBO_##sym,
 	ZEBRA_BRIDGE_OPT_LIST(X)
 #undef X
 	ZBO_COUNT
+};
+
+enum zebra_bond_opt {
+#define X(sym, ...) ZBD_##sym,
+	ZEBRA_BOND_OPT_LIST(X)
+#undef X
+	ZBD_COUNT
 };
 
 enum zebra_brport_opt {
@@ -134,6 +170,9 @@ struct zebra_link_opt_def {
 struct zebra_link_optset {
 	uint64_t mask; /* options that are set, bit per index */
 	uint64_t val[ZLO_MAX];
+	/* Bond scope: what was last sent, so only changes are sent again */
+	uint64_t sent_mask;
+	uint64_t sent[ZLO_MAX];
 };
 
 extern const struct zebra_link_opt_def *zebra_link_opt_table(enum zebra_link_opt_scope scope,
@@ -153,6 +192,16 @@ extern bool zebra_link_opt_parse(const struct zebra_link_opt_def *def, const cha
 extern const char *zebra_link_opt_format(const struct zebra_link_opt_def *def, uint64_t val,
 					 char *buf, size_t buflen);
 
+/* Bonding modes; the index is the kernel value (IFLA_BOND_MODE) */
+extern const char *const zebra_link_bond_mode_names[];
+#define ZEBRA_LINK_BOND_MODE_COUNT 7
+
+/* Index of the mode called 'name', or -1 */
+extern int zebra_link_bond_mode_find(const char *name);
+
+/* Most targets of the ARP and NS monitors (kernel BOND_MAX_ARP_TARGETS) */
+#define ZEBRA_LINK_BOND_MAX_TARGETS 16
+
 /* Settings to be sent to the kernel in one request */
 struct zebra_link_opts_req {
 	enum zebra_link_opt_scope scope;
@@ -161,6 +210,19 @@ struct zebra_link_opts_req {
 		uint8_t idx;
 		uint64_t val;
 	} item[ZLO_MAX];
+
+	/*
+	 * Bond settings that are not a single number (scope ZLO_SCOPE_BOND).
+	 * An empty list, or a primary ifindex of 0, removes the setting.
+	 */
+	bool has_primary;
+	int32_t primary_ifindex;
+	bool has_arp_targets;
+	unsigned int n_arp_targets;
+	uint32_t arp_targets[ZEBRA_LINK_BOND_MAX_TARGETS]; /* network order */
+	bool has_ns_targets;
+	unsigned int n_ns_targets;
+	uint8_t ns_targets[ZEBRA_LINK_BOND_MAX_TARGETS][16]; /* IPv6 addresses */
 };
 
 #ifdef __cplusplus

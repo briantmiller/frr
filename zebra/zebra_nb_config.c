@@ -1562,6 +1562,88 @@ static int link_opt_destroy(struct nb_cb_destroy_args *args, enum zebra_link_opt
 	return NB_OK;
 }
 
+int lib_interface_zebra_bond_options_modify(struct nb_cb_modify_args *args)
+{
+	return link_opt_modify(args, ZLO_SCOPE_BOND);
+}
+
+int lib_interface_zebra_bond_options_destroy(struct nb_cb_destroy_args *args)
+{
+	return link_opt_destroy(args, ZLO_SCOPE_BOND);
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/bond-options/primary
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bond-options/arp-ip-target
+ *        /frr-interface:lib/interface/frr-zebra:zebra/bond-options/ns-ip6-target
+ */
+int lib_interface_zebra_bond_options_primary_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	zebra_link_cfg_set_bond_primary(nb_running_get_entry(args->dnode, NULL, true),
+					yang_dnode_get_string(args->dnode, NULL));
+	return NB_OK;
+}
+
+int lib_interface_zebra_bond_options_primary_destroy(struct nb_cb_destroy_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	zebra_link_cfg_unset_bond_primary(nb_running_get_entry(args->dnode, NULL, true));
+	return NB_OK;
+}
+
+int lib_interface_zebra_bond_options_arp_ip_target_create(struct nb_cb_create_args *args)
+{
+	struct in_addr addr;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	yang_dnode_get_ipv4(&addr, args->dnode, NULL);
+	zebra_link_cfg_bond_arp_target(nb_running_get_entry(args->dnode, NULL, true), &addr, true);
+	return NB_OK;
+}
+
+int lib_interface_zebra_bond_options_arp_ip_target_destroy(struct nb_cb_destroy_args *args)
+{
+	struct in_addr addr;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	yang_dnode_get_ipv4(&addr, args->dnode, NULL);
+	zebra_link_cfg_bond_arp_target(nb_running_get_entry(args->dnode, NULL, true), &addr, false);
+	return NB_OK;
+}
+
+int lib_interface_zebra_bond_options_ns_ip6_target_create(struct nb_cb_create_args *args)
+{
+	struct in6_addr addr;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	yang_dnode_get_ipv6(&addr, args->dnode, NULL);
+	zebra_link_cfg_bond_ns_target(nb_running_get_entry(args->dnode, NULL, true), &addr, true);
+	return NB_OK;
+}
+
+int lib_interface_zebra_bond_options_ns_ip6_target_destroy(struct nb_cb_destroy_args *args)
+{
+	struct in6_addr addr;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	yang_dnode_get_ipv6(&addr, args->dnode, NULL);
+	zebra_link_cfg_bond_ns_target(nb_running_get_entry(args->dnode, NULL, true), &addr, false);
+	return NB_OK;
+}
+
 int lib_interface_zebra_bridge_options_modify(struct nb_cb_modify_args *args)
 {
 	return link_opt_modify(args, ZLO_SCOPE_BRIDGE);
@@ -1659,7 +1741,7 @@ int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
 /*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/link-type/<kind>
  *
- * Every kind (bridge, veth, vlan, gre, dummy, vxlan, bareudp, and future ones) shares these
+ * Every kind (bridge, veth, vlan, gre, dummy, vxlan, bareudp, bond, and future ones) shares these
  * callbacks.  Create/modify of the individual leaves are no-ops: the whole
  * container is evaluated once per transaction in apply_finish, so leaves that
  * depend on one another (gre local/dev/remote) are always seen consistently.
@@ -1739,6 +1821,16 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 			b->srcport_min = yang_dnode_get_uint16(dnode, "srcport-min");
 		if (yang_dnode_exists(dnode, "multiproto"))
 			b->multiproto = yang_dnode_get_bool(dnode, "multiproto");
+	} else if (strmatch(kind, "bond")) {
+		p->kind = ZEBRA_LINK_BOND;
+		if (yang_dnode_exists(dnode, "mode")) {
+			int mode = zebra_link_bond_mode_find(yang_dnode_get_string(dnode, "mode"));
+
+			if (mode < 0)
+				return false;
+			p->u.bond.has_mode = true;
+			p->u.bond.mode = mode;
+		}
 	} else if (strmatch(kind, "dummy")) {
 		p->kind = ZEBRA_LINK_DUMMY;
 	} else if (strmatch(kind, "veth")) {

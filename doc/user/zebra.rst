@@ -341,6 +341,55 @@ does not force a link up again that someone sets down later.
    route are provided by the routes that use the device (for example lightweight
    tunnel routes). Requires a kernel built with ``CONFIG_BAREUDP``.
 
+.. clicmd:: link-type bond [mode <balance-rr|active-backup|balance-xor|broadcast|802-3ad|balance-tlb|balance-alb>]
+
+   Create this interface as a Linux bonding device. ``mode`` is what the
+   kernel shows in ``/sys/class/net/bondN/bonding/mode`` (``802-3ad`` is the
+   kernel's ``802.3ad``, the CLI cannot contain a dot); without it the kernel
+   default, ``balance-rr``, is used. The mode is part of the definition: the
+   kernel only allows changing it while the bond is down and has no slaves, so
+   a different mode deletes and re-creates the bond. Slaves are added with
+   ``master`` on the slave interface and are enslaved again after a
+   re-creation.
+
+   All the other parameters are set with the ``bond`` commands below.
+
+.. clicmd:: bond <setting> VALUE
+
+   Set a parameter of this interface when it is a bond. The settings are the
+   files in ``/sys/class/net/bondN/bonding/`` with underscores replaced by
+   hyphens, and take the same values (``on`` and ``off`` for 0 and 1, and the
+   kernel's names where it has them). They are written through netlink, in
+   place, and again when the bond is re-created. ``no bond <setting>`` puts
+   the kernel default back (``ad-actor-system`` has none and is left alone).
+
+   ``miimon``, ``updelay``, ``downdelay``, ``use-carrier``, ``peer-notif-delay``
+      Link monitoring through the interface state.
+
+   ``arp-interval``, ``arp-validate``, ``arp-all-targets``, ``missed-max``
+      ARP monitoring. The probed addresses are given with ``bond
+      arp-ip-target`` (up to 16) and ``bond ns-ip6-target`` (IPv6).
+
+   ``primary``, ``primary-reselect``, ``fail-over-mac``, ``resend-igmp``, ``num-grat-arp``, ``all-slaves-active``, ``min-links``
+      Slave selection and failover.
+
+   ``xmit-hash-policy``, ``packets-per-slave``, ``lp-interval``, ``tlb-dynamic-lb``
+      Transmit distribution. ``xmit-hash-policy`` is ``layer2``, ``layer3-4``,
+      ``layer2-3``, ``encap2-3``, ``encap3-4`` or ``vlan-srcmac``.
+
+   ``lacp-rate``, ``lacp-active``, ``ad-select``, ``ad-actor-sys-prio``, ``ad-user-port-key``, ``ad-actor-system``, ``coupled-control``
+      802.3ad (LACP).
+
+   The kernel decides whether a setting can be applied: some only apply in
+   some modes, some only while the bond is down or without slaves, and
+   ``miimon`` and ``arp-interval`` exclude one another. Every setting is
+   sent on its own, so one the kernel refuses is logged and does not stop the
+   others; it is not retried until its value changes or the bond is
+   re-created. Configure a bond with its mode and settings together, before it
+   has slaves. ``primary`` is applied once that interface exists. The
+   read-only files (``slaves``, ``mii_status``, ``ad_*`` status, ...) and
+   ``active_slave`` and ``queue_id`` (runtime state) are not configurable.
+
 .. clicmd:: no link-type [...]
 
    Remove the link-type configuration. Zebra deletes the kernel interface it

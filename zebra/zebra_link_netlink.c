@@ -88,6 +88,13 @@ static const char *bareudp_validate(const struct zebra_link_params *p)
 	return NULL;
 }
 
+static const char *bond_validate(const struct zebra_link_params *p)
+{
+	if (p->u.bond.has_mode && p->u.bond.mode >= ZEBRA_LINK_BOND_MODE_COUNT)
+		return "unknown bond mode";
+	return NULL;
+}
+
 const char *zebra_link_params_validate(const char *ifname,
 				       const struct zebra_link_params *p)
 {
@@ -111,6 +118,8 @@ const char *zebra_link_params_validate(const char *ifname,
 		return vxlan_validate(ifname, p);
 	case ZEBRA_LINK_BAREUDP:
 		return bareudp_validate(p);
+	case ZEBRA_LINK_BOND:
+		return bond_validate(p);
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;
@@ -145,8 +154,15 @@ const char *zebra_link_opts_validate(const struct zebra_link_opts_req *r)
 	if (!r || r->scope >= ZLO_SCOPE_MAX)
 		return "missing settings request";
 	zebra_link_opt_table(r->scope, &count);
-	if (!r->count || r->count > ZLO_MAX)
+	if (r->count > ZLO_MAX)
+		return "too many settings";
+	if (!r->count && !r->has_primary && !r->has_arp_targets && !r->has_ns_targets)
 		return "no settings to apply";
+	if (r->n_arp_targets > ZEBRA_LINK_BOND_MAX_TARGETS ||
+	    r->n_ns_targets > ZEBRA_LINK_BOND_MAX_TARGETS)
+		return "too many bond targets";
+	if (r->scope != ZLO_SCOPE_BOND && (r->has_primary || r->has_arp_targets || r->has_ns_targets))
+		return "bond settings in a request for something else";
 	for (i = 0; i < r->count; i++) {
 		if (r->item[i].idx >= count)
 			return "unknown setting";
@@ -173,6 +189,15 @@ const char *zebra_link_opts_validate(const struct zebra_link_opts_req *r)
 #include <linux/veth.h>
 #include <linux/if_bridge.h>
 #include <arpa/inet.h>
+
+/*
+ * The bond attributes (IFLA_BOND_*) used outside the options table.  The
+ * values are part of the stable kernel ABI, older headers may lack them.
+ */
+#define ZLNL_IFLA_BOND_MODE 1
+#define ZLNL_IFLA_BOND_ARP_IP_TARGET 8
+#define ZLNL_IFLA_BOND_PRIMARY 11
+#define ZLNL_IFLA_BOND_NS_IP6_TARGET 31
 
 /*
  * Older kernel headers lack the bareudp attributes; these values are part of
@@ -260,7 +285,8 @@ static bool put_opt(struct nlmsghdr *n, size_t buflen, const struct zebra_link_o
 		/* The kernel takes clock ticks (USER_HZ is always 100) */
 		return nl_attr_put32(n, buflen, def->attr, val * 100);
 	case ZLO_ENUM:
-		return nl_attr_put8(n, buflen, def->attr, val);
+		return def->width == 4 ? nl_attr_put32(n, buflen, def->attr, val)
+				       : nl_attr_put8(n, buflen, def->attr, val);
 	case ZLO_VLANPROTO:
 		/* an ethertype, big-endian on the wire */
 		return nl_attr_put16(n, buflen, def->attr,
@@ -301,7 +327,52 @@ static ssize_t encode_opts(const struct zebra_link_nl_req *req, void *buf, size_
 	msg->n.nlmsg_flags = NLM_F_REQUEST;
 	msg->ifi.ifi_index = req->ifindex;
 
-	if (r->scope == ZLO_SCOPE_BRIDGE) {
+	if (r->scope == ZLO_SCOPE_BOND) {
+		/* Change the bond in place: RTM_NEWLINK without CREATE */
+		msg->n.nlmsg_type = RTM_NEWLINK;
+		msg->ifi.ifi_family = AF_UNSPEC;
+
+		linkinfo = nl_attr_nest(&msg->n, buflen, IFLA_LINKINFO);
+		if (!linkinfo || !nl_attr_put(&msg->n, buflen, IFLA_INFO_KIND, "bond", 5))
+			goto nospace;
+		data = nl_attr_nest(&msg->n, buflen, IFLA_INFO_DATA);
+		if (!data)
+			goto nospace;
+		for (i = 0; i < r->count; i++)
+			if (!put_opt(&msg->n, buflen, &t[r->item[i].idx], r->item[i].val))
+				goto nospace;
+
+		/* The kernel takes an ifindex; 0 removes the primary */
+		if (r->has_primary &&
+		    !nl_attr_put32(&msg->n, buflen, ZLNL_IFLA_BOND_PRIMARY, r->primary_ifindex))
+			goto nospace;
+
+		/*
+		 * A list replaces the one in the kernel (the kernel clears it
+		 * first), so an empty list removes all targets.  The type of
+		 * each entry is its position.
+		 */
+		if (r->has_arp_targets) {
+			nest = nl_attr_nest(&msg->n, buflen, ZLNL_IFLA_BOND_ARP_IP_TARGET);
+			if (!nest)
+				goto nospace;
+			for (i = 0; i < r->n_arp_targets; i++)
+				if (!nl_attr_put(&msg->n, buflen, i, &r->arp_targets[i], 4))
+					goto nospace;
+			nl_attr_nest_end(&msg->n, nest);
+		}
+		if (r->has_ns_targets) {
+			nest = nl_attr_nest(&msg->n, buflen, ZLNL_IFLA_BOND_NS_IP6_TARGET);
+			if (!nest)
+				goto nospace;
+			for (i = 0; i < r->n_ns_targets; i++)
+				if (!nl_attr_put(&msg->n, buflen, i, r->ns_targets[i], 16))
+					goto nospace;
+			nl_attr_nest_end(&msg->n, nest);
+		}
+		nl_attr_nest_end(&msg->n, data);
+		nl_attr_nest_end(&msg->n, linkinfo);
+	} else if (r->scope == ZLO_SCOPE_BRIDGE) {
 		/* Change the bridge in place: RTM_NEWLINK without CREATE */
 		msg->n.nlmsg_type = RTM_NEWLINK;
 		msg->ifi.ifi_family = AF_UNSPEC;
@@ -562,7 +633,21 @@ static bool bareudp_put_data(struct nlmsghdr *n, size_t buflen,
 	return true;
 }
 
+/* IFLA_BOND_MODE; every other bond setting is applied in place afterwards */
+static bool bond_put_data(struct nlmsghdr *n, size_t buflen, const struct zebra_link_params *p,
+			  int link_ifindex)
+{
+	if (!p->u.bond.has_mode)
+		return true;
+	return nl_attr_put8(n, buflen, ZLNL_IFLA_BOND_MODE, p->u.bond.mode);
+}
+
 static const struct link_kind_ops link_kinds[] = {
+	{
+		.kind = ZEBRA_LINK_BOND,
+		.name = "bond",
+		.put_data = bond_put_data,
+	},
 	{
 		.kind = ZEBRA_LINK_BAREUDP,
 		.name = "bareudp",
