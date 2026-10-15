@@ -121,6 +121,12 @@ struct ospf_if_params {
 	 * 0 means "not configured" for that MT-ID.
 	 */
 	uint16_t *mt_cost;
+	/* Packet-pair link speed probing (interface-wide only). */
+	DECLARE_IF_PARAM(bool, pp_enable);
+	DECLARE_IF_PARAM(uint16_t, pp_interval); /* seconds */
+	DECLARE_IF_PARAM(uint8_t, pp_probes);	 /* pairs per sample */
+	DECLARE_IF_PARAM(uint8_t, pp_dscp);	 /* 0-63 */
+	DECLARE_IF_PARAM(bool, pp_responder);	 /* measure peers only */
 
 	/* Authentication data. */
 	uint8_t auth_simple[OSPF_AUTH_SIMPLE_SIZE + 1]; /* Simple password. */
@@ -324,6 +330,9 @@ struct ospf_interface {
 	/* Neighbor information. */
 	struct route_table *nbrs;       /* OSPF Neighbor List */
 	struct ospf_neighbor *nbr_self; /* Neighbor Self */
+
+	/* Packet-pair probing session (NULL when not running). */
+	struct pktpair_session *pp;
 	/* BFD session entries for this interface (keyed by neighbor endpoint). */
 	struct route_table *bfd_sessions;
 #define DR(I)			((I)->nbr_self->d_router)

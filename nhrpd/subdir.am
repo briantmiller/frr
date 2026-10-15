@@ -20,6 +20,7 @@ nhrpd_nhrpd_SOURCES = \
 	nhrpd/nhrp_nhs.c \
 	nhrpd/nhrp_packet.c \
 	nhrpd/nhrp_peer.c \
+	nhrpd/nhrp_pktpair.c \
 	nhrpd/nhrp_multicast.c \
 	nhrpd/nhrp_route.c \
 	nhrpd/nhrp_shortcut.c \
@@ -35,6 +36,7 @@ noinst_HEADERS += \
 	nhrpd/debug.h \
 	nhrpd/netlink.h \
 	nhrpd/nhrp_errors.h \
+	nhrpd/nhrp_pktpair.h \
 	nhrpd/nhrp_protocol.h \
 	nhrpd/nhrpd.h \
 	nhrpd/os.h \

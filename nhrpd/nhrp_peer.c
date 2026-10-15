@@ -703,6 +703,7 @@ static void nhrp_handle_registration_request(struct nhrp_packet_parser *p)
 			cie->code = NHRP_CODE_ADMINISTRATIVELY_PROHIBITED;
 			continue;
 		}
+		nhrp_cache_mark_registered(c);
 
 		cie->code = NHRP_CODE_SUCCESS;
 	}

@@ -67,6 +67,7 @@ zebra_zebra_SOURCES = \
 	zebra/tc_netlink.c \
 	zebra/tc_socket.c \
 	zebra/zapi_msg.c \
+	zebra/zebra_dbw.c \
 	zebra/zebra_affinitymap.c \
 	zebra/zebra_dplane.c \
 	zebra/zebra_errors.c \
@@ -147,6 +148,7 @@ clippy_scan += \
 	zebra/zebra_acl_group.c \
 	zebra/zebra_dhcp.c \
 	zebra/zebra_nat.c \
+	zebra/zebra_dbw.c \
 	# end
 
 nobase_pkginclude_HEADERS += \
@@ -229,6 +231,7 @@ nobase_pkginclude_HEADERS += \
 	# end
 
 noinst_HEADERS += \
+	zebra/zebra_dbw.h \
 	zebra/dpdk/zebra_dplane_dpdk.h \
 	zebra/dpdk/zebra_dplane_dpdk_private.h \
 	# end

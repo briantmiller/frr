@@ -380,6 +380,12 @@ static zclient_handler *const nhrp_handlers[] = {
 	[ZEBRA_GRE_UPDATE] = nhrp_gre_update,
 };
 
+void nhrp_zebra_detected_bw_send(vrf_id_t vrf_id,
+				 const struct zapi_detected_bw *bw)
+{
+	zclient_detected_bw_send(nhrp_zclient, vrf_id, bw);
+}
+
 void nhrp_zebra_init(void)
 {
 	zebra_rib[AFI_IP] = route_table_init();

@@ -510,6 +510,20 @@ int nhrp_cache_update_binding(struct nhrp_cache *c, enum nhrp_cache_type type,
 	return 1;
 }
 
+/*
+ * Record that the binding just requested with nhrp_cache_update_binding()
+ * came from a registration.  Dynamic bindings are committed later, after
+ * authorization, so mark the pending binding if there is one; otherwise
+ * the existing binding was refreshed in place.
+ */
+void nhrp_cache_mark_registered(struct nhrp_cache *c)
+{
+	if (c->new.type == NHRP_CACHE_DYNAMIC)
+		c->new.registered = 1;
+	else if (c->cur.type == NHRP_CACHE_DYNAMIC)
+		c->cur.registered = 1;
+}
+
 void nhrp_cache_set_used(struct nhrp_cache *c, int used)
 {
 	c->used = used;

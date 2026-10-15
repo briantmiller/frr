@@ -14,6 +14,7 @@
 #include "frrevent.h"
 
 #include "nhrpd.h"
+#include "nhrp_pktpair.h"
 #include "os.h"
 #include "hash.h"
 
@@ -77,6 +78,9 @@ static int nhrp_if_new_hook(struct interface *ifp)
 	nifp->ifp = ifp;
 
 	notifier_init(&nifp->notifier_list);
+	nifp->pp_cfg.interval = PKTPAIR_INTERVAL_DEFAULT;
+	nifp->pp_cfg.probes = PKTPAIR_PROBES_DEFAULT;
+	nifp->pp_cfg.dscp = PKTPAIR_DSCP_DEFAULT;
 	for (afi = 0; afi < AFI_MAX; afi++) {
 		struct nhrp_afi_data *ad = &nifp->afi[afi];
 		ad->holdtime = NHRPD_DEFAULT_HOLDTIME;
@@ -93,6 +97,7 @@ static int nhrp_if_delete_hook(struct interface *ifp)
 
 	debugf(NHRP_DEBUG_IF, "Deleted interface (%s)", ifp->name);
 
+	nhrp_pp_stop(ifp);
 	nhrp_cache_interface_del(ifp);
 	nhrp_nhs_interface_del(ifp);
 	nhrp_multicast_interface_del(ifp);
@@ -374,6 +379,8 @@ void nhrp_interface_update(struct interface *ifp)
 			      enabled ? NOTIFY_INTERFACE_UP
 				      : NOTIFY_INTERFACE_DOWN);
 	}
+
+	nhrp_pp_update(ifp);
 }
 
 int nhrp_ifp_create(struct interface *ifp)

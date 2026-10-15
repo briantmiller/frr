@@ -40,6 +40,7 @@
 #include "ospfd/ospf_vty.h"
 #include "ospfd/ospf_dump.h"
 #include "ospfd/ospf_bfd.h"
+#include "ospfd/ospf_pktpair.h"
 #include "ospfd/ospf_ldp_sync.h"
 #include "ospfd/ospf_network.h"
 #include "ospfd/ospf_memory.h"
@@ -4673,6 +4674,8 @@ static void show_ip_ospf_interface_sub(struct vty *vty, struct ospf *ospf,
 
 		ospf_interface_bfd_show(vty, ifp, json_interface_sub);
 
+		ospf_pp_show_if(vty, oi, use_json ? json_interface_sub : NULL);
+
 		if (use_json)
 			json_object_boolean_add(json_interface_sub,
 						"prefixSuppression",
@@ -6069,6 +6072,9 @@ static void show_ip_ospf_neighbor_detail_sub(struct vty *vty,
 		vty_out(vty, "    Non hello dead timer resets: %llu\n",
 			(unsigned long long)nbr->dead_timer_resets);
 	}
+
+	/* Packet-pair RTT, jitter and estimated speed. */
+	ospf_pp_show_nbr(vty, nbr, use_json ? json_neigh : NULL);
 
 	/* Show Database Summary list. */
 	if (use_json)
@@ -10800,6 +10806,111 @@ DEFPY(ip_ospf_prefix_suppression, ip_ospf_prefix_suppression_addr_cmd,
 	return CMD_SUCCESS;
 }
 
+DEFPY(ip_ospf_packet_pair, ip_ospf_packet_pair_cmd,
+      "ip ospf packet-pair [{interval (1-3600)$interval|probes (2-64)$probes|dscp (0-63)$dscp}]",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Time between samples\n"
+      "Seconds (default 60)\n"
+      "Packet pairs per sample\n"
+      "Number of pairs (default 10)\n"
+      "DSCP marking of probe packets\n"
+      "DSCP value (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	params->pp_enable = true;
+	SET_IF_PARAM(params, pp_enable);
+	params->pp_responder = false;
+	UNSET_IF_PARAM(params, pp_responder);
+
+	if (interval_str) {
+		params->pp_interval = interval;
+		SET_IF_PARAM(params, pp_interval);
+	} else {
+		params->pp_interval = OSPF_PP_INTERVAL_DEFAULT;
+		UNSET_IF_PARAM(params, pp_interval);
+	}
+
+	if (probes_str) {
+		params->pp_probes = probes;
+		SET_IF_PARAM(params, pp_probes);
+	} else {
+		params->pp_probes = OSPF_PP_PROBES_DEFAULT;
+		UNSET_IF_PARAM(params, pp_probes);
+	}
+
+	if (dscp_str) {
+		params->pp_dscp = dscp;
+		SET_IF_PARAM(params, pp_dscp);
+	} else {
+		params->pp_dscp = OSPF_PP_DSCP_DEFAULT;
+		UNSET_IF_PARAM(params, pp_dscp);
+	}
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair, no_ip_ospf_packet_pair_cmd,
+      "no ip ospf packet-pair [<responder|{interval (1-3600)|probes (2-64)|dscp (0-63)}>]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Only measure neighbors' probes and report the one-way results back\n"
+      "Time between samples\n"
+      "Seconds (default 60)\n"
+      "Packet pairs per sample\n"
+      "Number of pairs (default 10)\n"
+      "DSCP marking of probe packets\n"
+      "DSCP value (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	params->pp_enable = false;
+	UNSET_IF_PARAM(params, pp_enable);
+	params->pp_interval = OSPF_PP_INTERVAL_DEFAULT;
+	UNSET_IF_PARAM(params, pp_interval);
+	params->pp_probes = OSPF_PP_PROBES_DEFAULT;
+	UNSET_IF_PARAM(params, pp_probes);
+	params->pp_dscp = OSPF_PP_DSCP_DEFAULT;
+	UNSET_IF_PARAM(params, pp_dscp);
+	params->pp_responder = false;
+	UNSET_IF_PARAM(params, pp_responder);
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(ip_ospf_packet_pair_responder, ip_ospf_packet_pair_responder_cmd,
+      "ip ospf packet-pair responder",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Only measure neighbors' probes and report the one-way results back\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	params->pp_enable = true;
+	SET_IF_PARAM(params, pp_enable);
+	params->pp_responder = true;
+	SET_IF_PARAM(params, pp_responder);
+	params->pp_interval = OSPF_PP_INTERVAL_DEFAULT;
+	UNSET_IF_PARAM(params, pp_interval);
+	params->pp_probes = OSPF_PP_PROBES_DEFAULT;
+	UNSET_IF_PARAM(params, pp_probes);
+	params->pp_dscp = OSPF_PP_DSCP_DEFAULT;
+	UNSET_IF_PARAM(params, pp_dscp);
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
 DEFPY(ip_ospf_neighbor_filter, ip_ospf_neighbor_filter_addr_cmd,
       "[no] ip ospf neighbor-filter ![PREFIXLIST4_NAME]$prefix_list [A.B.C.D]$ip_addr", NO_STR
       "IP Information\n"
@@ -13395,6 +13506,28 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 				vty_out(vty, "\n");
 			}
 
+			/* packet-pair print (interface-wide only). */
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    OSPF_IF_PARAM_CONFIGURED(params, pp_enable) &&
+			    params->pp_enable &&
+			    OSPF_IF_PARAM_CONFIGURED(params, pp_responder) &&
+			    params->pp_responder) {
+				vty_out(vty, " ip ospf packet-pair responder\n");
+			} else if (params == IF_DEF_PARAMS(ifp) &&
+				   OSPF_IF_PARAM_CONFIGURED(params, pp_enable) &&
+				   params->pp_enable) {
+				vty_out(vty, " ip ospf packet-pair");
+				if (OSPF_IF_PARAM_CONFIGURED(params, pp_interval))
+					vty_out(vty, " interval %u",
+						params->pp_interval);
+				if (OSPF_IF_PARAM_CONFIGURED(params, pp_probes))
+					vty_out(vty, " probes %u",
+						params->pp_probes);
+				if (OSPF_IF_PARAM_CONFIGURED(params, pp_dscp))
+					vty_out(vty, " dscp %u", params->pp_dscp);
+				vty_out(vty, "\n");
+			}
+
 			/* neighbor-filter print. */
 			if (OSPF_IF_PARAM_CONFIGURED(params, nbr_filter_name)) {
 				vty_out(vty, " ip ospf neighbor-filter %s",
@@ -14281,6 +14414,11 @@ static void ospf_vty_if_init(void)
 
 	/* "ip ospf prefix-suppression" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_prefix_suppression_addr_cmd);
+
+	/* "ip ospf packet-pair" commands. */
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_cmd);
+	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_responder_cmd);
 
 	/* "ip ospf neighbor-filter" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_neighbor_filter_addr_cmd);

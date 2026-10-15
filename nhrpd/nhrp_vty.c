@@ -13,6 +13,7 @@
 #include "nhrpd.h"
 #include "netlink.h"
 #include "nhrp_protocol.h"
+#include "nhrp_pktpair.h"
 
 #include "nhrpd/nhrp_vty_clippy.c"
 
@@ -1069,6 +1070,111 @@ DEFUN(show_ip_nhrp, show_ip_nhrp_cmd,
 	return ret;
 }
 
+DEFPY(if_nhrp_packet_pair, if_nhrp_packet_pair_cmd,
+      "ip nhrp packet-pair [{interval (1-3600)$interval|probes (2-64)$probes|dscp (0-63)$dscp}]",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Time between samples\n"
+      "Seconds (default 60)\n"
+      "Packet pairs per sample\n"
+      "Number of pairs (default 10)\n"
+      "DSCP marking of probe packets\n"
+      "DSCP value (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_enabled = 1;
+	nifp->pp_cfg.respond_only = false;
+	nifp->pp_interval_set = !!interval_str;
+	nifp->pp_cfg.interval = interval_str ? interval
+					     : PKTPAIR_INTERVAL_DEFAULT;
+	nifp->pp_probes_set = !!probes_str;
+	nifp->pp_cfg.probes = probes_str ? probes : PKTPAIR_PROBES_DEFAULT;
+	nifp->pp_dscp_set = !!dscp_str;
+	nifp->pp_cfg.dscp = dscp_str ? dscp : PKTPAIR_DSCP_DEFAULT;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_no_nhrp_packet_pair, if_no_nhrp_packet_pair_cmd,
+      "no ip nhrp packet-pair [<responder|{interval (1-3600)|probes (2-64)|dscp (0-63)}>]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Only measure peers' probes and report the one-way results back\n"
+      "Time between samples\n"
+      "Seconds (default 60)\n"
+      "Packet pairs per sample\n"
+      "Number of pairs (default 10)\n"
+      "DSCP marking of probe packets\n"
+      "DSCP value (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_enabled = 0;
+	nifp->pp_interval_set = 0;
+	nifp->pp_probes_set = 0;
+	nifp->pp_dscp_set = 0;
+	nifp->pp_cfg.interval = PKTPAIR_INTERVAL_DEFAULT;
+	nifp->pp_cfg.probes = PKTPAIR_PROBES_DEFAULT;
+	nifp->pp_cfg.dscp = PKTPAIR_DSCP_DEFAULT;
+	nifp->pp_cfg.respond_only = false;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_responder, if_nhrp_packet_pair_responder_cmd,
+      "ip nhrp packet-pair responder",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Only measure peers' probes and report the one-way results back\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_enabled = 1;
+	nifp->pp_interval_set = 0;
+	nifp->pp_probes_set = 0;
+	nifp->pp_dscp_set = 0;
+	nifp->pp_cfg.interval = PKTPAIR_INTERVAL_DEFAULT;
+	nifp->pp_cfg.probes = PKTPAIR_PROBES_DEFAULT;
+	nifp->pp_cfg.dscp = PKTPAIR_DSCP_DEFAULT;
+	nifp->pp_cfg.respond_only = true;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(show_ip_nhrp_packet_pair, show_ip_nhrp_packet_pair_cmd,
+      "show ip nhrp packet-pair [json$json]",
+      SHOW_STR
+      IP_STR
+      "NHRP information\n"
+      "Packet-pair speed, RTT and jitter to NHSes and registered clients\n"
+      JSON_STR)
+{
+	struct vrf *vrf = vrf_lookup_by_id(VRF_DEFAULT);
+	struct json_object *json_top = NULL;
+	struct interface *ifp;
+
+	if (json)
+		json_top = json_object_new_object();
+
+	FOR_ALL_INTERFACES (vrf, ifp)
+		nhrp_pp_show(vty, ifp, json_top);
+
+	if (json)
+		vty_json(vty, json_top);
+	return CMD_SUCCESS;
+}
+
 struct dmvpn_cfg {
 	struct vty *vty;
 	struct json_object *json;
@@ -1305,6 +1411,8 @@ static int interface_config_write(struct vty *vty)
 			}
 		}
 
+		nhrp_pp_config_write(vty, ifp);
+
 		if_vty_config_end(vty);
 	}
 
@@ -1322,6 +1430,7 @@ void nhrp_config_init(void)
 	/* global commands */
 	install_element(VIEW_NODE, &show_ip_nhrp_cmd);
 	install_element(VIEW_NODE, &show_dmvpn_cmd);
+	install_element(VIEW_NODE, &show_ip_nhrp_packet_pair_cmd);
 	install_element(ENABLE_NODE, &clear_nhrp_cmd);
 
 	install_element(ENABLE_NODE, &show_debugging_nhrp_cmd);
@@ -1365,4 +1474,7 @@ void nhrp_config_init(void)
 	install_element(INTERFACE_NODE, &if_no_nhrp_map_multicast_cmd);
 	install_element(INTERFACE_NODE, &if_nhrp_nhs_cmd);
 	install_element(INTERFACE_NODE, &if_no_nhrp_nhs_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_cmd);
+	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_responder_cmd);
 }

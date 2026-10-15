@@ -24,6 +24,7 @@
 #include "zebra_ns.h"
 #include "zebra_vrf.h"
 #include "zebra/interface.h"
+#include "zebra/zebra_dbw.h"
 #include "zebra/rib.h"
 #include "zebra/rt.h"
 #include "zebra/zebra_router.h"
@@ -233,6 +234,8 @@ static int if_zebra_delete_hook(struct interface *ifp)
 			route_table_finish(zebra_if->ipv4_subnets);
 
 		rtadv_if_fini(zebra_if);
+
+		zebra_dbw_if_free(zebra_if);
 
 		bond = &zebra_if->bond_info;
 		if (bond && bond->mbr_zifs)
@@ -2977,6 +2980,8 @@ static void if_dump_vty(struct vty *vty, struct interface *ifp)
 		vty_out(vty, "\n");
 	}
 
+	zebra_dbw_show_if(vty, ifp, NULL);
+
 	for (rn = route_top(zebra_if->ipv4_subnets); rn; rn = route_next(rn)) {
 		if (!rn->info)
 			continue;
@@ -3356,6 +3361,8 @@ static void if_dump_vty_json(struct vty *vty, struct interface *ifp,
 	/* Bandwidth in Mbps */
 	if (ifp->bandwidth != 0)
 		json_object_int_add(json_if, "bandwidth", ifp->bandwidth);
+
+	zebra_dbw_show_if(vty, ifp, json_if);
 
 
 	/* IP addresses. */
@@ -4234,6 +4241,7 @@ void zebra_if_init(void)
 	/* Initialize interface and new hook. */
 	hook_register_prio(if_add, 0, if_zebra_new_hook);
 	hook_register_prio(if_del, 0, if_zebra_delete_hook);
+	zebra_dbw_init();
 
 	install_element(VIEW_NODE, &show_interface_cmd);
 	install_element(VIEW_NODE, &show_interface_vrf_all_cmd);

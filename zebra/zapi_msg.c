@@ -47,6 +47,7 @@
 #include "zebra/zebra_tc.h"
 #include "zebra/table_manager.h"
 #include "zebra/zapi_msg.h"
+#include "zebra/zebra_dbw.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/zebra_mlag.h"
 #include "zebra/connected.h"
@@ -4230,6 +4231,7 @@ void (*const zserv_handlers[])(ZAPI_HANDLER_ARGS) = {
 	[ZEBRA_TC_CLASS_DELETE] = zread_tc_class,
 	[ZEBRA_TC_FILTER_ADD] = zread_tc_filter,
 	[ZEBRA_TC_FILTER_DELETE] = zread_tc_filter,
+	[ZEBRA_DETECTED_BW_UPDATE] = zread_detected_bw,
 };
 
 /*

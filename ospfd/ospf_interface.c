@@ -30,6 +30,7 @@
 #include "ospfd/ospf_lsa.h"
 #include "ospfd/ospf_lsdb.h"
 #include "ospfd/ospf_neighbor.h"
+#include "ospfd/ospf_pktpair.h"
 #include "ospfd/ospf_nsm.h"
 #include "ospfd/ospf_packet.h"
 #include "ospfd/ospf_flood.h"
@@ -1051,6 +1052,8 @@ int ospf_if_up(struct ospf_interface *oi)
 	else
 		OSPF_ISM_EVENT_EXECUTE(oi, ISM_InterfaceUp);
 
+	ospf_pp_if_up(oi);
+
 	return 1;
 }
 
@@ -1116,6 +1119,8 @@ int ospf_if_down(struct ospf_interface *oi)
 			}
 		}
 	}
+
+	ospf_pp_if_down(oi);
 
 	OSPF_ISM_EVENT_EXECUTE(oi, ISM_InterfaceDown);
 	/* delete position in router LSA */

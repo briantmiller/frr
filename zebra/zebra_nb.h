@@ -151,6 +151,8 @@ int lib_interface_zebra_link_type_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_link_type_param_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_link_type_param_destroy(struct nb_cb_destroy_args *args);
 void lib_interface_zebra_link_type_apply_finish(struct nb_cb_apply_finish_args *args);
+int lib_interface_zebra_detected_bandwidth_aggregate_modify(
+	struct nb_cb_modify_args *args);
 int lib_interface_zebra_mpls_modify(struct nb_cb_modify_args *args);
 int lib_interface_zebra_mpls_destroy(struct nb_cb_destroy_args *args);
 int lib_interface_zebra_ip_nat_modify(struct nb_cb_modify_args *args);

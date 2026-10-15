@@ -270,6 +270,28 @@ Standard Commands
    calculating OSPF cost. This command does not affect the actual device
    configuration.
 
+.. clicmd:: detected-bandwidth aggregate <max|sum>
+
+   Protocol daemons can report the bandwidth they detect towards their
+   next hops on an interface, for example with ``ip ospf packet-pair`` or
+   ``ip nhrp packet-pair``. zebra keeps these values separately for each
+   reporting daemon, so OSPF and NHRP (or several instances of one
+   protocol) can report for the same interface, even for the same next
+   hop, without overwriting each other. For every daemon zebra also
+   derives one bandwidth for the interface from that daemon's next hops,
+   separately for the outbound (local to next hop) and inbound (next hop
+   to local) direction. When a daemon has several next hops on the
+   interface (several OSPF neighbors on a broadcast network, several NHRP
+   NHSes or registered clients on a tunnel), this command selects whether
+   that is the bandwidth of the fastest next hop (``max``, the default) or
+   the sum over all next hops (``sum``).
+
+   Per next hop, the one-way measurement is used when the daemon has one,
+   otherwise its round-trip estimate, which is a lower bound for both
+   directions. Values are removed when the daemon withdraws them or
+   disconnects from zebra. They are informational and do not change
+   ``bandwidth`` or route selection.
+
 
 .. clicmd:: link-detect
 
@@ -3007,6 +3029,15 @@ zebra Terminal Mode Commands
    due to the way that linux supports local and connected routes the FIB
    total may not be exactly what is shown in the equivalent `ip route show`
    command to see the state of the linux kernel.
+
+.. clicmd:: show zebra detected-bandwidth [interface IFNAME] [json]
+
+   Show the bandwidth detected by protocol daemons, per interface and
+   reporting daemon: the interface value according to ``detected-bandwidth
+   aggregate`` and, per next hop, the round-trip, outbound and inbound
+   values with their source (``one-way`` or ``round-trip``) and age.
+   ``show interface`` includes a per-daemon summary
+   (``detectedBandwidth`` in JSON).
 
 .. clicmd:: show interface [NAME] [{vrf VRF|brief}] [json]
 
