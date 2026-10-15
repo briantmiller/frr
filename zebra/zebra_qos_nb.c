@@ -734,6 +734,123 @@ static int lib_interface_access_group_out_destroy(struct nb_cb_destroy_args *arg
 	return qos_access_group_set(args->dnode, ACLG_OUT, NULL);
 }
 
+/*
+ * ----------------------------------------------------------------------
+ * /frr-interface:lib/interface/frr-qos:qos/detected-bandwidth
+ * ----------------------------------------------------------------------
+ */
+static int lib_interface_qos_detected_bw_create(struct nb_cb_create_args *args)
+{
+	struct zebra_if_qos *qos;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	qos->detected = true;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_destroy(struct nb_cb_destroy_args *args)
+{
+	struct zebra_if_qos *qos;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (qos) {
+		qos->detected = false;
+		memset(qos->detected_src, 0, sizeof(qos->detected_src));
+		qos->detected_default = 0;
+	}
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_source_create(struct nb_cb_create_args *args)
+{
+	/* the protocol leaf carries the value */
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_source_destroy(struct nb_cb_destroy_args *args)
+{
+	struct zebra_if_qos *qos;
+	uint8_t prio;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	prio = yang_dnode_get_uint8(args->dnode, "priority");
+	if (qos && prio >= 1 && prio <= QOS_BW_SOURCES)
+		qos->detected_src[prio - 1] = QOS_BW_PROTO_NONE;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_source_protocol_modify(struct nb_cb_modify_args *args)
+{
+	struct zebra_if_qos *qos;
+	uint8_t prio;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	prio = yang_dnode_get_uint8(args->dnode, "../priority");
+	if (prio < 1 || prio > QOS_BW_SOURCES)
+		return NB_ERR_INCONSISTENCY;
+
+	qos->detected_src[prio - 1] = yang_dnode_get_enum(args->dnode, NULL);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_default_modify(struct nb_cb_modify_args *args)
+{
+	struct zebra_if_qos *qos;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	qos->detected_default = yang_dnode_get_uint64(args->dnode, NULL);
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_default_destroy(struct nb_cb_destroy_args *args)
+{
+	struct zebra_if_qos *qos;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (qos)
+		qos->detected_default = 0;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
 static int lib_interface_qos_bandwidth_modify(struct nb_cb_modify_args *args)
 {
 	struct zebra_if_qos *qos;
@@ -1129,6 +1246,33 @@ const struct frr_yang_module_info frr_qos_info = {
 			.cbs = {
 				.modify = lib_interface_access_group_out_modify,
 				.destroy = lib_interface_access_group_out_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth",
+			.cbs = {
+				.create = lib_interface_qos_detected_bw_create,
+				.destroy = lib_interface_qos_detected_bw_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/source",
+			.cbs = {
+				.create = lib_interface_qos_detected_bw_source_create,
+				.destroy = lib_interface_qos_detected_bw_source_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/source/protocol",
+			.cbs = {
+				.modify = lib_interface_qos_detected_bw_source_protocol_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/default",
+			.cbs = {
+				.modify = lib_interface_qos_detected_bw_default_modify,
+				.destroy = lib_interface_qos_detected_bw_default_destroy,
 			}
 		},
 		{

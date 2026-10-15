@@ -19,6 +19,7 @@
 #ifndef _ZEBRA_DBW_H
 #define _ZEBRA_DBW_H
 
+#include "hook.h"
 #include "zebra/zserv.h"
 
 #ifdef __cplusplus
@@ -57,6 +58,20 @@ extern void zebra_dbw_set_aggregate(struct interface *ifp,
 extern bool zebra_dbw_get(struct interface *ifp, uint8_t proto,
 			  unsigned short instance,
 			  struct zebra_dbw_result *res);
+
+/*
+ * Interface bandwidth as detected by any instance of daemon proto on ifp,
+ * the highest one when several instances report.  Returns false if no
+ * instance reported anything for ifp.
+ */
+extern bool zebra_dbw_get_proto(struct interface *ifp, uint8_t proto,
+				struct zebra_dbw_result *res);
+
+/*
+ * Called whenever the detected bandwidth of an interface may have changed:
+ * a report, a withdrawal, a daemon going away, or a new aggregate mode.
+ */
+DECLARE_HOOK(zebra_dbw_changed, (struct interface *ifp), (ifp));
 
 /* Summary for "show interface". */
 extern void zebra_dbw_show_if(struct vty *vty, struct interface *ifp,

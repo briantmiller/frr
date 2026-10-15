@@ -61,6 +61,7 @@
 #include "zebra/zebra_acl_ext.h"
 #include "zebra/zebra_acl_flower.h"
 #include "zebra/zebra_acl_group.h"
+#include "zebra/zebra_dbw.h"
 
 #include "zebra/zebra_qos_clippy.c"
 
@@ -1234,17 +1235,157 @@ static void qos_build_level(struct qos_build *b, const struct qos_policy_map *pm
 	b->depth--;
 }
 
-static uint64_t qos_if_bandwidth(const struct interface *ifp, const struct zebra_if_qos *qos)
+/* Where the QoS bandwidth of an interface comes from */
+enum qos_bw_origin {
+	QOS_BW_FROM_NONE = 0,
+	QOS_BW_FROM_STATIC,    /* "qos bandwidth RATE" */
+	QOS_BW_FROM_DETECTED,  /* "qos bandwidth detected", a source measured it */
+	QOS_BW_FROM_DEFAULT,   /* "qos bandwidth detected ... default RATE" */
+	QOS_BW_FROM_INTERFACE, /* interface "bandwidth" */
+	QOS_BW_FROM_LINK,      /* link speed */
+};
+
+struct qos_bw_info {
+	uint64_t bps;
+	enum qos_bw_origin origin;
+	/* QOS_BW_FROM_DETECTED: which source, from how many next hops */
+	enum qos_bw_proto proto;
+	unsigned int nexthops;
+};
+
+static const char *qos_bw_proto2str(enum qos_bw_proto proto)
 {
-	if (qos->bandwidth)
-		return qos->bandwidth;
+	switch (proto) {
+	case QOS_BW_PROTO_OSPF:
+		return "ospf";
+	case QOS_BW_PROTO_NHRP:
+		return "nhrp";
+	case QOS_BW_PROTO_NONE:
+		break;
+	}
+	return "none";
+}
+
+static uint8_t qos_bw_proto2route(enum qos_bw_proto proto)
+{
+	switch (proto) {
+	case QOS_BW_PROTO_OSPF:
+		return ZEBRA_ROUTE_OSPF;
+	case QOS_BW_PROTO_NHRP:
+		return ZEBRA_ROUTE_NHRP;
+	case QOS_BW_PROTO_NONE:
+		break;
+	}
+	return ZEBRA_ROUTE_MAX;
+}
+
+/*
+ * Outbound bandwidth a daemon detected on the interface, in bps; false
+ * when it has no measurement.
+ */
+static bool qos_bw_detected(struct interface *ifp, enum qos_bw_proto proto,
+			    struct zebra_dbw_result *res)
+{
+	uint8_t route = qos_bw_proto2route(proto);
+
+	if (route == ZEBRA_ROUTE_MAX || !zebra_dbw_get_proto(ifp, route, res))
+		return false;
+
+	return res->out_kbps != 0;
+}
+
+static void qos_if_bandwidth_info(struct interface *ifp, const struct zebra_if_qos *qos,
+				  struct qos_bw_info *info)
+{
+	memset(info, 0, sizeof(*info));
+
+	if (qos->bandwidth) {
+		info->bps = qos->bandwidth;
+		info->origin = QOS_BW_FROM_STATIC;
+		return;
+	}
+
+	if (qos->detected) {
+		/* the first source, by priority, that has a measurement */
+		for (int i = 0; i < QOS_BW_SOURCES; i++) {
+			struct zebra_dbw_result res;
+
+			if (!qos_bw_detected(ifp, qos->detected_src[i], &res))
+				continue;
+			info->bps = res.out_kbps * 1000;
+			info->origin = QOS_BW_FROM_DETECTED;
+			info->proto = qos->detected_src[i];
+			info->nexthops = res.nexthops;
+			return;
+		}
+
+		if (qos->detected_default) {
+			info->bps = qos->detected_default;
+			info->origin = QOS_BW_FROM_DEFAULT;
+			return;
+		}
+	}
 
 	/* interface "bandwidth" (kbps), then the link speed (Mbps) */
-	if (ifp->bandwidth)
-		return (uint64_t)ifp->bandwidth * 1000;
+	if (ifp->bandwidth) {
+		info->bps = (uint64_t)ifp->bandwidth * 1000;
+		info->origin = QOS_BW_FROM_INTERFACE;
+		return;
+	}
 
-	if (ifp->speed && ifp->speed != UINT32_MAX)
-		return (uint64_t)ifp->speed * 1000000;
+	if (ifp->speed && ifp->speed != UINT32_MAX) {
+		info->bps = (uint64_t)ifp->speed * 1000000;
+		info->origin = QOS_BW_FROM_LINK;
+	}
+}
+
+static const char *qos_bw_origin2str(const struct qos_bw_info *info, char *buf, size_t len)
+{
+	switch (info->origin) {
+	case QOS_BW_FROM_STATIC:
+		return "configured";
+	case QOS_BW_FROM_DETECTED:
+		snprintf(buf, len, "detected by %s, %u next hop%s", qos_bw_proto2str(info->proto),
+			 info->nexthops, info->nexthops == 1 ? "" : "s");
+		return buf;
+	case QOS_BW_FROM_DEFAULT:
+		return "default, no detected bandwidth";
+	case QOS_BW_FROM_INTERFACE:
+		return "from the interface bandwidth";
+	case QOS_BW_FROM_LINK:
+		return "from the link speed";
+	case QOS_BW_FROM_NONE:
+		break;
+	}
+	return "unknown";
+}
+
+static const char *qos_bw_origin2json(const struct qos_bw_info *info)
+{
+	switch (info->origin) {
+	case QOS_BW_FROM_STATIC:
+		return "static";
+	case QOS_BW_FROM_DETECTED:
+		return qos_bw_proto2str(info->proto);
+	case QOS_BW_FROM_DEFAULT:
+		return "default";
+	case QOS_BW_FROM_INTERFACE:
+		return "interface";
+	case QOS_BW_FROM_LINK:
+		return "link";
+	case QOS_BW_FROM_NONE:
+		break;
+	}
+	return "none";
+}
+
+/* A daemon's detected bandwidth changed: re-resolve the QoS bandwidth */
+static int qos_dbw_changed(struct interface *ifp)
+{
+	struct zebra_if *zif = ifp->info;
+
+	if (zif && zif->qos && zif->qos->detected)
+		zebra_qos_config_changed();
 
 	return 0;
 }
@@ -1254,6 +1395,7 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 {
 	const struct qos_policy_map *pmap;
 	struct qos_build b = {};
+	struct qos_bw_info bwi;
 	struct qos_hw_class *root;
 	uint64_t bw;
 
@@ -1278,11 +1420,23 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 		return NULL;
 	}
 
-	bw = qos_if_bandwidth(ifp, qos);
+	qos_if_bandwidth_info(ifp, qos, &bwi);
+	bw = bwi.bps;
 	if (!bw) {
-		strlcpy(reason, "interface bandwidth unknown, configure \"qos bandwidth\"",
-			reason_len);
+		if (qos->detected)
+			strlcpy(reason,
+				"no bandwidth detected yet and no default, interface bandwidth unknown",
+				reason_len);
+		else
+			strlcpy(reason, "interface bandwidth unknown, configure \"qos bandwidth\"",
+				reason_len);
 		return NULL;
+	}
+	if (IS_ZEBRA_DEBUG_TC) {
+		char obuf[64];
+
+		zlog_debug("%s: %s: bandwidth %" PRIu64 " bps (%s)", __func__, ifp->name, bw,
+			   qos_bw_origin2str(&bwi, obuf, sizeof(obuf)));
 	}
 
 	b.hw = XCALLOC(MTYPE_QOS_HW, sizeof(*b.hw));
@@ -1701,6 +1855,58 @@ static void qos_curve_json(json_object *jc, const char *name, const struct qos_h
 	json_object_int_add(jcurve, "m2", c->m2);
 }
 
+/* "qos bandwidth detected": every source, its measurement, and the default */
+static void qos_show_detected(struct vty *vty, struct interface *ifp,
+			      const struct zebra_if_qos *qos, json_object *json_if)
+{
+	json_object *jd = NULL, *jsrcs = NULL;
+	char buf[32];
+
+	if (json_if) {
+		jd = json_object_new_object();
+		jsrcs = json_object_new_array();
+		json_object_object_add(json_if, "detectedBandwidth", jd);
+		json_object_object_add(jd, "sources", jsrcs);
+		if (qos->detected_default)
+			json_object_int_add(jd, "default", qos->detected_default);
+	} else {
+		vty_out(vty, "  Bandwidth sources:");
+	}
+
+	for (int i = 0; i < QOS_BW_SOURCES; i++) {
+		struct zebra_dbw_result res;
+		bool have;
+
+		if (qos->detected_src[i] == QOS_BW_PROTO_NONE)
+			continue;
+		have = qos_bw_detected(ifp, qos->detected_src[i], &res);
+
+		if (jsrcs) {
+			json_object *js = json_object_new_object();
+
+			json_object_array_add(jsrcs, js);
+			json_object_int_add(js, "priority", i + 1);
+			json_object_string_add(js, "protocol",
+					       qos_bw_proto2str(qos->detected_src[i]));
+			json_object_boolean_add(js, "available", have);
+			if (have) {
+				json_object_int_add(js, "bandwidth", res.out_kbps * 1000);
+				json_object_int_add(js, "nexthops", res.nexthops);
+			}
+		} else {
+			vty_out(vty, "%s %u. %s %s", i ? "," : "", i + 1,
+				qos_bw_proto2str(qos->detected_src[i]),
+				have ? qos_bps2str(res.out_kbps * 1000, buf, sizeof(buf))
+				     : "not detected");
+		}
+	}
+
+	if (!jd)
+		vty_out(vty, "; default %s\n",
+			qos->detected_default ? qos_bps2str(qos->detected_default, buf, sizeof(buf))
+					      : "none");
+}
+
 static void qos_show_interface(struct vty *vty, struct interface *ifp, json_object *json)
 {
 	struct zebra_if *zif = ifp->info;
@@ -1710,13 +1916,16 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 	json_object *json_if = NULL, *json_classes = NULL;
 	char buf1[32], buf2[32], buf3[32], parent[16], defcls[16];
 	bool have_stats = false;
+	struct qos_bw_info bwi;
+	char obuf[64];
 	uint64_t bw;
 	unsigned int i, in_kernel = 0;
 
-	if (!qos || (!qos->service_policy[0] && !qos->bandwidth))
+	if (!qos || (!qos->service_policy[0] && !qos->bandwidth && !qos->detected))
 		return;
 
-	bw = qos->bandwidth ? qos->bandwidth : qos_if_bandwidth(ifp, qos);
+	qos_if_bandwidth_info(ifp, qos, &bwi);
+	bw = bwi.bps;
 	hw = qos->installed;
 
 	if (hw) {
@@ -1734,6 +1943,9 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		json_object_object_add(json, ifp->name, json_if);
 		json_object_int_add(json_if, "qosBandwidth", bw);
 		json_object_boolean_add(json_if, "qosBandwidthDerived", !qos->bandwidth);
+		json_object_string_add(json_if, "qosBandwidthSource", qos_bw_origin2json(&bwi));
+		if (qos->detected)
+			qos_show_detected(vty, ifp, qos, json_if);
 		if (qos->service_policy[0])
 			json_object_string_add(json_if, "servicePolicyOutput", qos->service_policy);
 		json_object_boolean_add(json_if, "installed", !!hw);
@@ -1752,8 +1964,10 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		json_object_object_add(json_if, "classes", json_classes);
 	} else {
 		vty_out(vty, "Interface %s\n", ifp->name);
-		vty_out(vty, "  QoS bandwidth: %s%s\n", qos_bps2str(bw, buf1, sizeof(buf1)),
-			qos->bandwidth ? "" : " (derived)");
+		vty_out(vty, "  QoS bandwidth: %s (%s)\n", qos_bps2str(bw, buf1, sizeof(buf1)),
+			qos_bw_origin2str(&bwi, obuf, sizeof(obuf)));
+		if (qos->detected)
+			qos_show_detected(vty, ifp, qos, NULL);
 		vty_out(vty, "  Service policy (output): %s\n",
 			qos->service_policy[0] ? qos->service_policy : "none");
 
@@ -2365,6 +2579,8 @@ void zebra_qos_init(void)
 	install_element(VIEW_NODE, &show_qos_interface_cmd);
 	install_element(VIEW_NODE, &show_class_map_interface_cmd);
 
+	hook_register(zebra_dbw_changed, qos_dbw_changed);
+
 	zebra_acl_group_init();
 }
 
@@ -2388,4 +2604,5 @@ void zebra_qos_terminate(void)
 	list_delete(&qos_g.acl_exts);
 
 	zebra_acl_group_terminate();
+	hook_unregister(zebra_dbw_changed, qos_dbw_changed);
 }

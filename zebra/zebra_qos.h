@@ -126,10 +126,28 @@ struct qos_policy_map {
 
 struct qos_hw;
 
+/* Daemons whose detected bandwidth can be used (YANG enum values) */
+enum qos_bw_proto {
+	QOS_BW_PROTO_NONE = 0,
+	QOS_BW_PROTO_OSPF = 1,
+	QOS_BW_PROTO_NHRP = 2,
+};
+
+#define QOS_BW_SOURCES 2
+
 /* Per interface QoS configuration and state, hangs off struct zebra_if */
 struct zebra_if_qos {
 	/* "qos bandwidth", bits per second, 0 when not configured */
 	uint64_t bandwidth;
+
+	/*
+	 * "qos bandwidth detected ...": the daemons to take the bandwidth
+	 * from, by priority (index 0 is tried first), and the bandwidth
+	 * used while none of them has a measurement (bps, 0: none).
+	 */
+	bool detected;
+	uint8_t detected_src[QOS_BW_SOURCES]; /* enum qos_bw_proto */
+	uint64_t detected_default;
 
 	/* "service-policy output NAME" */
 	char service_policy[QOS_NAME_LEN];
