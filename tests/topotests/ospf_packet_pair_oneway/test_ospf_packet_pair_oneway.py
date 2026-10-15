@@ -42,6 +42,11 @@ Verified:
   - with packet-pair removed from r2, r1's outbound result expires
   - probes from a host that is not an OSPF neighbor are not measured or
     answered with a report
+  - smoothing: with step detection (default) the smoothed estimate, and
+    the value zebra gets, follow a drop from 20 to 5 Mbit/s and the rise
+    back within a few samples; with "smoothing step-threshold 0" the same
+    rise is still far from complete at that point; "smoothing weight 100"
+    reports the latest sample
   - payload version checking: probes and reports of another version from
     a neighbor are ignored and counted, the neighbor detail says why, and
     the neighbor's real version-1 traffic keeps working; another
@@ -285,6 +290,116 @@ def test_asymmetric_link():
     finally:
         _unshape_towards(tgen, "r2")
         _unshape_towards(tgen, "r1")
+
+
+def _wait_samples(router, nbr_rid, n, timeout=60):
+    "Poll until the round-trip sample count reaches n; return that state."
+    pp = None
+    for _ in range(int(timeout / 0.25)):
+        pp = _pp(router, nbr_rid)
+        if pp and pp.get("samples", 0) >= n:
+            return pp
+        topotest.sleep(0.25)
+    pytest.fail("sample {} never came: {}".format(n, pp))
+
+
+def _zebra_rtt(router, nh):
+    try:
+        data = json.loads(
+            router.vtysh_cmd("show zebra detected-bandwidth interface r1-eth0 json")
+        )
+    except ValueError:
+        return 0
+    nhs = data.get("r1-eth0", {}).get("sources", {}).get("ospf", {})
+    return nhs.get("nexthops", {}).get(nh, {}).get("rttKbps", 0)
+
+
+def _set_smoothing(router, args):
+    router.vtysh_cmd("""
+        configure terminal
+         interface r1-eth0
+          {}
+        """.format(args))
+
+
+def test_smoothing_follows_speed_change():
+    "The smoothed estimate follows real speed changes within a few samples."
+    tgen = get_topogen()
+    _skip_on_failure(tgen)
+    r1 = tgen.gears["r1"]
+    fast, slow = 20000, 5000
+
+    def _settled(kbps):
+        pp = _pp(r1, "2.2.2.2")
+        if not (
+            _near(pp["estimatedSpeedKbps"], kbps)
+            and _near(pp["estimatedSpeedSmoothedKbps"], kbps)
+        ):
+            return "not settled at {}: {}".format(kbps, pp)
+        return None
+
+    _shape_towards(tgen, "r2", fast)
+    try:
+        _expect(partial(_settled, fast), count=30, msg="settle at 20 Mbit/s")
+
+        # With step detection (defaults), both directions are followed
+        # within step-samples (2) plus a sample of slack.
+        for kbps in (slow, fast):
+            before = _pp(r1, "2.2.2.2")
+            _shape_towards(tgen, "r2", kbps)
+            # The first sample may straddle the change.
+            pp = _wait_samples(r1, "2.2.2.2", before["samples"] + 4)
+            logger.info("smoothing on, %d kbps: %s", kbps, pp)
+            assert _near(pp["estimatedSpeedSmoothedKbps"], kbps), pp
+            assert pp["smoothingResets"] > before["smoothingResets"], pp
+            # zebra gets the smoothed value too.
+            _expect(
+                lambda: (
+                    None
+                    if _near(_zebra_rtt(r1, "10.0.12.2"), kbps)
+                    else "zebra rtt {}".format(_zebra_rtt(r1, "10.0.12.2"))
+                ),
+                count=5,
+                msg="zebra follows {}".format(kbps),
+            )
+
+        # Without step detection a rise is only averaged in: 5 -> 20
+        # Mbit/s reaches 8.8 Mbit/s after 3 samples, 10.3 after 4.
+        _set_smoothing(r1, "ip ospf packet-pair smoothing step-threshold 0")
+        assert re.search(
+            r"^ ip ospf packet-pair smoothing step-threshold 0$",
+            r1.vtysh_cmd("show running-config"),
+            re.M,
+        )
+        assert "Smoothing: weight 25%, step detection off" in r1.vtysh_cmd(
+            "show ip ospf interface r1-eth0"
+        )
+        _shape_towards(tgen, "r2", slow)
+        _expect(partial(_settled, slow), count=30, msg="settle at 5 Mbit/s")
+        before = _pp(r1, "2.2.2.2")
+        _shape_towards(tgen, "r2", fast)
+        pp = _wait_samples(r1, "2.2.2.2", before["samples"] + 4)
+        logger.info("smoothing without steps, 5 -> 20 Mbit/s: %s", pp)
+        assert _near(pp["estimatedSpeedKbps"], fast), pp
+        assert pp["estimatedSpeedSmoothedKbps"] < 0.65 * fast, pp
+        assert pp["smoothingResets"] == before["smoothingResets"], pp
+
+        # Weight 100: the smoothed value is the latest sample.
+        _set_smoothing(r1, "ip ospf packet-pair smoothing weight 100")
+        before = _pp(r1, "2.2.2.2")
+        pp = _wait_samples(r1, "2.2.2.2", before["samples"] + 1)
+        logger.info("weight 100: %s", pp)
+        assert pp["estimatedSpeedSmoothedKbps"] == pp["estimatedSpeedKbps"], pp
+        intf = _pp_intf(r1, "r1-eth0")
+        assert (
+            intf["smoothingWeight"] == 100
+            and intf["stepThreshold"] == 30
+            and intf["stepSamples"] == 2
+        ), intf
+    finally:
+        _set_smoothing(r1, "no ip ospf packet-pair smoothing")
+        _unshape_towards(tgen, "r2")
+    assert "packet-pair smoothing" not in r1.vtysh_cmd("show running-config")
 
 
 def test_non_neighbor_ignored():

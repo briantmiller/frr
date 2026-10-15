@@ -87,11 +87,65 @@ struct zebra_privs_t;
 /* Room for headers a daemon prepends on the bypass path. */
 #define PKTPAIR_ENCAP_MAX 64
 
+/*
+ * Smoothing of per-sample estimates across samples.
+ *
+ * Each sample's estimate (median over its pairs) is folded into an
+ * exponentially weighted moving average of the inverse bandwidth, i.e. of
+ * the time per bit, which is what packet pairs actually measure.  Averaging
+ * times rather than rates keeps a single too-fast outlier from dragging
+ * the average up: the result is a weighted harmonic mean.
+ *
+ * A sustained change in link speed would only fade in slowly, so when
+ * step_samples consecutive samples all deviate from the smoothed value by
+ * more than step_threshold percent in the same direction, the smoothed
+ * value is reset to their (harmonic) mean.  A step_threshold of 0
+ * disables this.
+ */
+#define PKTPAIR_SMOOTH_WEIGHT_DEFAULT  25 /* % weight of a new sample */
+#define PKTPAIR_SMOOTH_WEIGHT_MIN      1
+#define PKTPAIR_SMOOTH_WEIGHT_MAX      100
+#define PKTPAIR_STEP_THRESHOLD_DEFAULT 30 /* %, 0 = no step detection */
+#define PKTPAIR_STEP_THRESHOLD_MAX     1000
+#define PKTPAIR_STEP_SAMPLES_DEFAULT   2
+#define PKTPAIR_STEP_SAMPLES_MIN       1
+#define PKTPAIR_STEP_SAMPLES_MAX       16
+
+struct pktpair_smooth_cfg {
+	uint8_t weight;		 /* 1-100 %; 100 = latest sample only */
+	uint16_t step_threshold; /* 0-1000 %                          */
+	uint8_t step_samples;	 /* 1-16                              */
+};
+
+#define PKTPAIR_SMOOTH_CFG_DEFAULT                                             \
+	{                                                                      \
+		.weight = PKTPAIR_SMOOTH_WEIGHT_DEFAULT,                       \
+		.step_threshold = PKTPAIR_STEP_THRESHOLD_DEFAULT,              \
+		.step_samples = PKTPAIR_STEP_SAMPLES_DEFAULT,                  \
+	}
+
+struct pktpair_smoother {
+	double inv;	     /* EWMA of 1/kbps, 0 before the first sample */
+	double step_inv_sum; /* 1/kbps summed over the pending step       */
+	uint8_t step_count;  /* consecutive deviating samples            */
+	int8_t step_dir;     /* +1 faster, -1 slower                     */
+	uint32_t resets;     /* step resets so far                       */
+};
+
+/*
+ * Fold a sample (kbit/s, > 0) into sm and return the smoothed value in
+ * kbit/s.
+ */
+extern uint64_t pktpair_smooth_update(struct pktpair_smoother *sm,
+				      const struct pktpair_smooth_cfg *cfg,
+				      uint64_t sample_kbps);
+
 struct pktpair_cfg {
 	uint16_t interval; /* seconds */
 	uint8_t probes;	   /* pairs per sample */
 	uint8_t dscp;	   /* 0-63, inner IP header */
 	bool respond_only; /* measure and report peers' probes only */
+	struct pktpair_smooth_cfg smooth;
 };
 
 enum pktpair_tx_mode {
@@ -125,7 +179,8 @@ struct pktpair_stats {
 	uint32_t jitter_usec;	 /* mean |RTT(i) - RTT(i-1)|          */
 	uint32_t ipd_avg_usec;	 /* mean reply dispersion             */
 	uint64_t bw_kbps;	 /* median packet-pair estimate       */
-	uint64_t bw_smooth_kbps; /* EWMA over samples                 */
+	uint64_t bw_smooth_kbps; /* smoothed over samples             */
+	struct pktpair_smoother smoother;
 	uint16_t pkt_size;	 /* IP length of each inner probe     */
 	uint16_t pairs_sent;
 	uint16_t pairs_valid; /* both replies, positive gap        */
@@ -137,7 +192,8 @@ struct pktpair_stats {
 /* One-way results for one direction, measured at the receiving end. */
 struct pktpair_oneway {
 	uint64_t bw_kbps;	 /* median over the sample's pairs   */
-	uint64_t bw_smooth_kbps; /* EWMA over samples                */
+	uint64_t bw_smooth_kbps; /* smoothed over samples            */
+	struct pktpair_smoother smoother;
 	uint32_t ipd_avg_usec;	 /* mean arrival gap within pairs    */
 	uint32_t jitter_usec;	 /* mean |OWD(i) - OWD(i-1)|         */
 	uint16_t pkt_size;
@@ -286,6 +342,11 @@ extern void pktpair_show_peer(struct vty *vty, struct json_object *json,
  * ignored because peers use another version.  Text output is printed
  * only when there were such messages.
  */
+/* The smoothing configuration, as a text line or JSON keys. */
+extern void pktpair_show_smoothing(struct vty *vty, struct json_object *json,
+				   const struct pktpair_smooth_cfg *smooth,
+				   const char *indent);
+
 extern void pktpair_show_session(struct vty *vty, struct json_object *json,
 				 struct pktpair_session *s,
 				 const char *indent);

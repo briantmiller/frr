@@ -81,6 +81,8 @@ static int nhrp_if_new_hook(struct interface *ifp)
 	nifp->pp_cfg.interval = PKTPAIR_INTERVAL_DEFAULT;
 	nifp->pp_cfg.probes = PKTPAIR_PROBES_DEFAULT;
 	nifp->pp_cfg.dscp = PKTPAIR_DSCP_DEFAULT;
+	nifp->pp_cfg.smooth =
+		(struct pktpair_smooth_cfg)PKTPAIR_SMOOTH_CFG_DEFAULT;
 	for (afi = 0; afi < AFI_MAX; afi++) {
 		struct nhrp_afi_data *ad = &nifp->afi[afi];
 		ad->holdtime = NHRPD_DEFAULT_HOLDTIME;

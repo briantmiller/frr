@@ -999,8 +999,9 @@ a BFD profile to these sessions.
    between consecutive RTTs), the inter-packet delay (dispersion) of the
    two replies, and the estimated bottleneck speed of the round-trip
    path, computed as ``probe_bits / dispersion`` and reported as the
-   median over the pairs of a sample plus a smoothed value across
-   samples. Results are shown by ``show ip ospf neighbor detail [json]``.
+   median over the pairs of a sample plus a value smoothed across
+   samples (see ``ip ospf packet-pair smoothing``). Results are shown by
+   ``show ip ospf neighbor detail [json]``.
 
    On Linux the probes are sent on an ``AF_PACKET`` socket with
    ``PACKET_QDISC_BYPASS`` set, so they skip the egress queueing
@@ -1052,6 +1053,29 @@ a BFD profile to these sessions.
    receive interrupt coalescing and, for shapers that are still on the
    path, to a token-bucket burst larger than two packets, so they are
    most meaningful on links whose speed is set by serialization.
+
+.. clicmd:: ip ospf packet-pair smoothing {weight (1-100)|step-threshold (0-1000)|step-samples (1-16)}
+
+   Smooth the per-sample speed estimates (outbound, inbound and round
+   trip) across samples. The smoothed value is what is shown as
+   "smoothed" and what is reported to zebra.
+
+   Each new sample enters a moving average with ``weight`` percent
+   (default 25; 100 uses the latest sample only). The average is taken
+   over the time per bit rather than over the speed, i.e. it is a weighted
+   harmonic mean, so a single sample that came out too fast (for example
+   because receive interrupt coalescing squeezed a pair together) moves it
+   much less than averaging speeds would.
+
+   A real change in link speed would only fade in slowly, so when
+   ``step-samples`` consecutive samples (default 2) all deviate from the
+   smoothed value by more than ``step-threshold`` percent (default 30) in
+   the same direction, it is reset to their mean. With the default
+   settings a speed change is followed within about two samples; with
+   ``step-threshold 0`` resets are disabled and a fourfold increase is
+   only about half way there after four samples. Resets are counted in
+   ``smoothingResets`` in the JSON output. Options omitted from the
+   command revert to their defaults.
 
 .. clicmd:: ip ospf packet-pair responder
 

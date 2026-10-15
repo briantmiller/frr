@@ -1124,6 +1124,59 @@ DEFPY(if_no_nhrp_packet_pair, if_no_nhrp_packet_pair_cmd,
 	nifp->pp_cfg.probes = PKTPAIR_PROBES_DEFAULT;
 	nifp->pp_cfg.dscp = PKTPAIR_DSCP_DEFAULT;
 	nifp->pp_cfg.respond_only = false;
+	nifp->pp_cfg.smooth =
+		(struct pktpair_smooth_cfg)PKTPAIR_SMOOTH_CFG_DEFAULT;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_smoothing, if_nhrp_packet_pair_smoothing_cmd,
+      "ip nhrp packet-pair smoothing {weight (1-100)$weight|step-threshold (0-1000)$thr|step-samples (1-16)$samples}",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Weight of each new sample\n"
+      "Percent (default 25, 100 = latest sample only)\n"
+      "Reset to a new level when samples deviate by more than\n"
+      "Percent (default 30, 0 = never reset)\n"
+      "Consecutive deviating samples needed for a reset\n"
+      "Samples (default 2)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.smooth.weight = weight_str ? weight
+					      : PKTPAIR_SMOOTH_WEIGHT_DEFAULT;
+	nifp->pp_cfg.smooth.step_threshold =
+		thr_str ? thr : PKTPAIR_STEP_THRESHOLD_DEFAULT;
+	nifp->pp_cfg.smooth.step_samples =
+		samples_str ? samples : PKTPAIR_STEP_SAMPLES_DEFAULT;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_no_nhrp_packet_pair_smoothing, if_no_nhrp_packet_pair_smoothing_cmd,
+      "no ip nhrp packet-pair smoothing [{weight (1-100)|step-threshold (0-1000)|step-samples (1-16)}]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Weight of each new sample\n"
+      "Percent (default 25, 100 = latest sample only)\n"
+      "Reset to a new level when samples deviate by more than\n"
+      "Percent (default 30, 0 = never reset)\n"
+      "Consecutive deviating samples needed for a reset\n"
+      "Samples (default 2)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.smooth =
+		(struct pktpair_smooth_cfg)PKTPAIR_SMOOTH_CFG_DEFAULT;
 
 	nhrp_pp_update(ifp);
 	return CMD_SUCCESS;
@@ -1477,4 +1530,6 @@ void nhrp_config_init(void)
 	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_cmd);
 	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_cmd);
 	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_responder_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_smoothing_cmd);
+	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_smoothing_cmd);
 }

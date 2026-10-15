@@ -222,6 +222,14 @@ tests_lib_test_heavy_wq_LDADD = $(ALL_TESTS_LDADD) -lm
 tests_lib_test_heavy_wq_SOURCES = tests/lib/test_heavy_wq.c tests/helpers/c/main.c
 
 
+check_PROGRAMS += tests/lib/test_pktpair_smooth
+tests_lib_test_pktpair_smooth_CFLAGS = $(TESTS_CFLAGS)
+tests_lib_test_pktpair_smooth_CPPFLAGS = $(TESTS_CPPFLAGS)
+tests_lib_test_pktpair_smooth_LDADD = $(ALL_TESTS_LDADD)
+tests_lib_test_pktpair_smooth_SOURCES = tests/lib/test_pktpair_smooth.c
+EXTRA_DIST += tests/lib/test_pktpair_smooth.py
+
+
 check_PROGRAMS += tests/lib/test_idalloc
 tests_lib_test_idalloc_CFLAGS = $(TESTS_CFLAGS)
 tests_lib_test_idalloc_LDADD = $(ALL_TESTS_LDADD)

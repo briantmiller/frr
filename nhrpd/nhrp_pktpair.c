@@ -547,10 +547,29 @@ void nhrp_pp_stop(struct interface *ifp)
 /* Configuration and display                                          */
 /* ------------------------------------------------------------------ */
 
+static void pp_smoothing_config_write(struct vty *vty,
+				      const struct pktpair_smooth_cfg *sm)
+{
+	if (sm->weight == PKTPAIR_SMOOTH_WEIGHT_DEFAULT &&
+	    sm->step_threshold == PKTPAIR_STEP_THRESHOLD_DEFAULT &&
+	    sm->step_samples == PKTPAIR_STEP_SAMPLES_DEFAULT)
+		return;
+
+	vty_out(vty, " ip nhrp packet-pair smoothing");
+	if (sm->weight != PKTPAIR_SMOOTH_WEIGHT_DEFAULT)
+		vty_out(vty, " weight %u", sm->weight);
+	if (sm->step_threshold != PKTPAIR_STEP_THRESHOLD_DEFAULT)
+		vty_out(vty, " step-threshold %u", sm->step_threshold);
+	if (sm->step_samples != PKTPAIR_STEP_SAMPLES_DEFAULT)
+		vty_out(vty, " step-samples %u", sm->step_samples);
+	vty_out(vty, "\n");
+}
+
 void nhrp_pp_config_write(struct vty *vty, struct interface *ifp)
 {
 	struct nhrp_interface *nifp = ifp->info;
 
+	pp_smoothing_config_write(vty, &nifp->pp_cfg.smooth);
 	if (!nifp->pp_enabled)
 		return;
 
@@ -644,6 +663,7 @@ void nhrp_pp_show(struct vty *vty, struct interface *ifp,
 		json_object_int_add(ji, "intervalSec", nifp->pp_cfg.interval);
 		json_object_int_add(ji, "pairsPerSample", nifp->pp_cfg.probes);
 		json_object_int_add(ji, "dscp", nifp->pp_cfg.dscp);
+		pktpair_show_smoothing(vty, ji, &nifp->pp_cfg.smooth, NULL);
 		pktpair_show_session(vty, ji, nifp->pp, NULL);
 		ctx.json_peers = json_object_new_object();
 		nhrp_cache_foreach(ifp, pp_show_peer, &ctx);
@@ -673,6 +693,7 @@ void nhrp_pp_show(struct vty *vty, struct interface *ifp,
 		vty_out(vty,
 			"  Probes use the IP stack, egress qdiscs apply (%s)\n",
 			reason ? reason : "unknown");
+	pktpair_show_smoothing(vty, NULL, &nifp->pp_cfg.smooth, "  ");
 	pktpair_show_session(vty, NULL, nifp->pp, "  ");
 	nhrp_cache_foreach(ifp, pp_show_peer, &ctx);
 	vty_out(vty, "\n");

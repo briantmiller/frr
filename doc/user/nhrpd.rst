@@ -147,7 +147,8 @@ Configuring NHRP
    tunnel traffic. Peers only need to answer ICMP echo requests. The
    estimated speed is the probe size divided by the gap between the two
    replies of a pair, reported as the median over a sample and smoothed
-   across samples. Options omitted from the command revert to their
+   across samples (see ``ip nhrp packet-pair smoothing``). Options
+   omitted from the command revert to their
    defaults. IPv4 only.
 
    Probes are sent with ``PACKET_QDISC_BYPASS``, so local egress QoS does
@@ -190,6 +191,29 @@ Configuring NHRP
    clients, pairs are spaced more closely so a sample still fits in the
    interval.
 
+
+.. clicmd:: ip nhrp packet-pair smoothing {weight (1-100)|step-threshold (0-1000)|step-samples (1-16)}
+
+   Smooth the per-sample speed estimates (outbound, inbound and round
+   trip) across samples. The smoothed value is what is shown as
+   "smoothed" and what is reported to zebra.
+
+   Each new sample enters a moving average with ``weight`` percent
+   (default 25; 100 uses the latest sample only). The average is taken
+   over the time per bit rather than over the speed, i.e. it is a weighted
+   harmonic mean, so a single sample that came out too fast (for example
+   because receive interrupt coalescing squeezed a pair together) moves it
+   much less than averaging speeds would.
+
+   A real change in link speed would only fade in slowly, so when
+   ``step-samples`` consecutive samples (default 2) all deviate from the
+   smoothed value by more than ``step-threshold`` percent (default 30) in
+   the same direction, it is reset to their mean. With the default
+   settings a speed change is followed within about two samples; with
+   ``step-threshold 0`` resets are disabled and a fourfold increase is
+   only about half way there after four samples. Resets are counted in
+   ``smoothingResets`` in the JSON output. Options omitted from the
+   command revert to their defaults.
 
 .. clicmd:: ip nhrp packet-pair responder
 
