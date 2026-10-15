@@ -751,6 +751,10 @@ static int lib_interface_qos_detected_bw_create(struct nb_cb_create_args *args)
 		return NB_ERR_INCONSISTENCY;
 
 	qos->detected = true;
+	qos->detected_percent = 100;
+	qos->detected_hyst_inc = 0;
+	qos->detected_hyst_dec = 0;
+	qos->held_bps = 0;
 	zebra_qos_config_changed();
 
 	return NB_OK;
@@ -768,6 +772,10 @@ static int lib_interface_qos_detected_bw_destroy(struct nb_cb_destroy_args *args
 		qos->detected = false;
 		memset(qos->detected_src, 0, sizeof(qos->detected_src));
 		qos->detected_default = 0;
+		qos->detected_percent = 100;
+		qos->detected_hyst_inc = 0;
+		qos->detected_hyst_dec = 0;
+		qos->held_bps = 0;
 	}
 	zebra_qos_config_changed();
 
@@ -790,8 +798,10 @@ static int lib_interface_qos_detected_bw_source_destroy(struct nb_cb_destroy_arg
 
 	qos = qos_nb_if(args->dnode);
 	prio = yang_dnode_get_uint8(args->dnode, "priority");
-	if (qos && prio >= 1 && prio <= QOS_BW_SOURCES)
+	if (qos && prio >= 1 && prio <= QOS_BW_SOURCES) {
 		qos->detected_src[prio - 1] = QOS_BW_PROTO_NONE;
+		qos->held_bps = 0;
+	}
 	zebra_qos_config_changed();
 
 	return NB_OK;
@@ -814,9 +824,61 @@ static int lib_interface_qos_detected_bw_source_protocol_modify(struct nb_cb_mod
 		return NB_ERR_INCONSISTENCY;
 
 	qos->detected_src[prio - 1] = yang_dnode_get_enum(args->dnode, NULL);
+	qos->held_bps = 0;
 	zebra_qos_config_changed();
 
 	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_percent_modify(struct nb_cb_modify_args *args)
+{
+	struct zebra_if_qos *qos;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	qos->detected_percent = yang_dnode_get_uint8(args->dnode, NULL);
+	qos->held_bps = 0;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int qos_detected_bw_hysteresis_modify(struct nb_cb_modify_args *args, bool increase)
+{
+	struct zebra_if_qos *qos;
+	uint8_t value;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	qos = qos_nb_if(args->dnode);
+	if (!qos)
+		return NB_ERR_INCONSISTENCY;
+
+	value = yang_dnode_get_uint8(args->dnode, NULL);
+	if (increase)
+		qos->detected_hyst_inc = value;
+	else
+		qos->detected_hyst_dec = value;
+	qos->held_bps = 0;
+	zebra_qos_config_changed();
+
+	return NB_OK;
+}
+
+static int lib_interface_qos_detected_bw_hysteresis_increase_modify(struct nb_cb_modify_args *args)
+{
+	return qos_detected_bw_hysteresis_modify(args, true);
+}
+
+static int lib_interface_qos_detected_bw_hysteresis_decrease_modify(struct nb_cb_modify_args *args)
+{
+	return qos_detected_bw_hysteresis_modify(args, false);
 }
 
 static int lib_interface_qos_detected_bw_default_modify(struct nb_cb_modify_args *args)
@@ -1267,6 +1329,24 @@ const struct frr_yang_module_info frr_qos_info = {
 			.cbs = {
 				.modify = lib_interface_qos_detected_bw_source_protocol_modify,
 			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/percent",
+			.cbs = {
+				.modify = lib_interface_qos_detected_bw_percent_modify,
+			},
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/hysteresis/increase",
+			.cbs = {
+				.modify = lib_interface_qos_detected_bw_hysteresis_increase_modify,
+			},
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/hysteresis/decrease",
+			.cbs = {
+				.modify = lib_interface_qos_detected_bw_hysteresis_decrease_modify,
+			},
 		},
 		{
 			.xpath = "/frr-interface:lib/interface/frr-qos:qos/detected-bandwidth/default",

@@ -148,6 +148,23 @@ struct zebra_if_qos {
 	bool detected;
 	uint8_t detected_src[QOS_BW_SOURCES]; /* enum qos_bw_proto */
 	uint64_t detected_default;
+	/* use this share of the detected bandwidth, 1..100 */
+	uint8_t detected_percent;
+	/*
+	 * ignore increases / decreases smaller than these percentages of the
+	 * value in use
+	 */
+	uint8_t detected_hyst_inc;
+	uint8_t detected_hyst_dec;
+
+	/*
+	 * The detected bandwidth in use (bps, after detected_percent) and the
+	 * source it came from; 0 when the bandwidth in use is not a
+	 * detected one.  Smaller changes than detected_hyst_inc/dec from the
+	 * same source keep this value.
+	 */
+	uint64_t held_bps;
+	uint8_t held_proto;
 
 	/* "service-policy output NAME" */
 	char service_policy[QOS_NAME_LEN];

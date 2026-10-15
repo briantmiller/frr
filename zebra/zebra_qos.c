@@ -1245,12 +1245,22 @@ enum qos_bw_origin {
 	QOS_BW_FROM_LINK,      /* link speed */
 };
 
+static const char *qos_bps2str(uint64_t bps, char *buf, size_t len);
+
 struct qos_bw_info {
 	uint64_t bps;
 	enum qos_bw_origin origin;
 	/* QOS_BW_FROM_DETECTED: which source, from how many next hops */
 	enum qos_bw_proto proto;
 	unsigned int nexthops;
+	/* the source's measurement, before "percent" is applied */
+	uint64_t measured;
+	/* "percent" and "hysteresis increase/decrease" in effect */
+	uint8_t percent;
+	uint8_t hyst_inc;
+	uint8_t hyst_dec;
+	/* bps is the earlier value, the change was within the hysteresis */
+	bool held;
 };
 
 static const char *qos_bw_proto2str(enum qos_bw_proto proto)
@@ -1294,6 +1304,43 @@ static bool qos_bw_detected(struct interface *ifp, enum qos_bw_proto proto,
 	return res->out_kbps != 0;
 }
 
+/*
+ * Keep the detected bandwidth in use while a new value from the same
+ * source is within "hysteresis" percent of it: measurements vary a little
+ * from one report to the next, and every change rewrites the classes.
+ * The comparison is against the value in use, not the last report, so a
+ * slow drift is followed once it adds up to the threshold.
+ */
+static void qos_bw_hold(const struct zebra_if_qos *qos, struct qos_bw_info *info)
+{
+	bool up;
+	uint64_t diff;
+	uint8_t hyst;
+
+	if (!qos->held_bps || qos->held_proto != info->proto || info->bps == qos->held_bps)
+		return;
+
+	up = info->bps > qos->held_bps;
+	hyst = up ? info->hyst_inc : info->hyst_dec;
+	diff = up ? info->bps - qos->held_bps : qos->held_bps - info->bps;
+	if (diff * 100 < (uint64_t)hyst * qos->held_bps) {
+		info->bps = qos->held_bps;
+		info->held = true;
+	}
+}
+
+/* Remember the bandwidth being installed, for qos_bw_hold() */
+static void qos_bw_commit(struct zebra_if_qos *qos, const struct qos_bw_info *info)
+{
+	if (info->origin == QOS_BW_FROM_DETECTED) {
+		qos->held_bps = info->bps;
+		qos->held_proto = info->proto;
+	} else {
+		qos->held_bps = 0;
+		qos->held_proto = QOS_BW_PROTO_NONE;
+	}
+}
+
 static void qos_if_bandwidth_info(struct interface *ifp, const struct zebra_if_qos *qos,
 				  struct qos_bw_info *info)
 {
@@ -1312,10 +1359,17 @@ static void qos_if_bandwidth_info(struct interface *ifp, const struct zebra_if_q
 
 			if (!qos_bw_detected(ifp, qos->detected_src[i], &res))
 				continue;
-			info->bps = res.out_kbps * 1000;
 			info->origin = QOS_BW_FROM_DETECTED;
 			info->proto = qos->detected_src[i];
 			info->nexthops = res.nexthops;
+			info->measured = res.out_kbps * 1000;
+			info->percent = qos->detected_percent ? qos->detected_percent : 100;
+			info->hyst_inc = qos->detected_hyst_inc;
+			info->hyst_dec = qos->detected_hyst_dec;
+			info->bps = info->measured * info->percent / 100;
+			if (!info->bps)
+				info->bps = 1;
+			qos_bw_hold(qos, info);
 			return;
 		}
 
@@ -1344,10 +1398,25 @@ static const char *qos_bw_origin2str(const struct qos_bw_info *info, char *buf, 
 	switch (info->origin) {
 	case QOS_BW_FROM_STATIC:
 		return "configured";
-	case QOS_BW_FROM_DETECTED:
-		snprintf(buf, len, "detected by %s, %u next hop%s", qos_bw_proto2str(info->proto),
-			 info->nexthops, info->nexthops == 1 ? "" : "s");
+	case QOS_BW_FROM_DETECTED: {
+		char mbuf[32];
+		int n;
+
+		n = snprintf(buf, len, "detected by %s, %u next hop%s",
+			     qos_bw_proto2str(info->proto), info->nexthops,
+			     info->nexthops == 1 ? "" : "s");
+		if (info->percent < 100 && n >= 0 && (size_t)n < len)
+			n += snprintf(buf + n, len - n, ", %u%% of %s", info->percent,
+				      qos_bps2str(info->measured, mbuf, sizeof(mbuf)));
+		if (info->held && n >= 0 && (size_t)n < len) {
+			bool up = info->measured * info->percent / 100 > info->bps;
+
+			snprintf(buf + n, len - n, ", held, %s below %u%%",
+				 up ? "increase" : "decrease",
+				 up ? info->hyst_inc : info->hyst_dec);
+		}
 		return buf;
+	}
 	case QOS_BW_FROM_DEFAULT:
 		return "default, no detected bandwidth";
 	case QOS_BW_FROM_INTERFACE:
@@ -1421,6 +1490,7 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 	}
 
 	qos_if_bandwidth_info(ifp, qos, &bwi);
+	qos_bw_commit(qos, &bwi);
 	bw = bwi.bps;
 	if (!bw) {
 		if (qos->detected)
@@ -1433,7 +1503,7 @@ static struct qos_hw *qos_hw_build(struct interface *ifp, struct zebra_if_qos *q
 		return NULL;
 	}
 	if (IS_ZEBRA_DEBUG_TC) {
-		char obuf[64];
+		char obuf[128];
 
 		zlog_debug("%s: %s: bandwidth %" PRIu64 " bps (%s)", __func__, ifp->name, bw,
 			   qos_bw_origin2str(&bwi, obuf, sizeof(obuf)));
@@ -1869,6 +1939,9 @@ static void qos_show_detected(struct vty *vty, struct interface *ifp,
 		json_object_object_add(jd, "sources", jsrcs);
 		if (qos->detected_default)
 			json_object_int_add(jd, "default", qos->detected_default);
+		json_object_int_add(jd, "percent", qos->detected_percent);
+		json_object_int_add(jd, "hysteresisIncrease", qos->detected_hyst_inc);
+		json_object_int_add(jd, "hysteresisDecrease", qos->detected_hyst_dec);
 	} else {
 		vty_out(vty, "  Bandwidth sources:");
 	}
@@ -1901,10 +1974,16 @@ static void qos_show_detected(struct vty *vty, struct interface *ifp,
 		}
 	}
 
-	if (!jd)
+	if (!jd) {
+		if (qos->detected_percent && qos->detected_percent < 100)
+			vty_out(vty, "; using %u%%", qos->detected_percent);
+		if (qos->detected_hyst_inc || qos->detected_hyst_dec)
+			vty_out(vty, "; hysteresis increase %u%%, decrease %u%%",
+				qos->detected_hyst_inc, qos->detected_hyst_dec);
 		vty_out(vty, "; default %s\n",
 			qos->detected_default ? qos_bps2str(qos->detected_default, buf, sizeof(buf))
 					      : "none");
+	}
 }
 
 static void qos_show_interface(struct vty *vty, struct interface *ifp, json_object *json)
@@ -1917,7 +1996,7 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 	char buf1[32], buf2[32], buf3[32], parent[16], defcls[16];
 	bool have_stats = false;
 	struct qos_bw_info bwi;
-	char obuf[64];
+	char obuf[128];
 	uint64_t bw;
 	unsigned int i, in_kernel = 0;
 
@@ -1944,6 +2023,10 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		json_object_int_add(json_if, "qosBandwidth", bw);
 		json_object_boolean_add(json_if, "qosBandwidthDerived", !qos->bandwidth);
 		json_object_string_add(json_if, "qosBandwidthSource", qos_bw_origin2json(&bwi));
+		if (bwi.origin == QOS_BW_FROM_DETECTED) {
+			json_object_int_add(json_if, "qosBandwidthMeasured", bwi.measured);
+			json_object_boolean_add(json_if, "qosBandwidthHeld", bwi.held);
+		}
 		if (qos->detected)
 			qos_show_detected(vty, ifp, qos, json_if);
 		if (qos->service_policy[0])

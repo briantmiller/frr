@@ -1109,7 +1109,7 @@ DEFPY_YANG (no_interface_qos_bandwidth,
 
 DEFPY_YANG (interface_qos_bandwidth_detected,
 	    interface_qos_bandwidth_detected_cmd,
-	    "qos bandwidth detected <ospf|nhrp>$first [<ospf|nhrp>$second] [default RATE$def]",
+	    "qos bandwidth detected <ospf|nhrp>$first [<ospf|nhrp>$second] [percent (1-100)$pct] [hysteresis <(1-50)$hyst|{increase (0-50)$hinc|decrease (0-50)$hdec}>] [default RATE$def]",
 	    QOS_STR
 	    "Bandwidth available to the output service-policy\n"
 	    "Use the bandwidth protocol daemons detect, in this order of priority\n"
@@ -1117,11 +1117,19 @@ DEFPY_YANG (interface_qos_bandwidth_detected,
 	    "Bandwidth detected by nhrpd\n"
 	    "Bandwidth detected by ospfd, used when the first source has none\n"
 	    "Bandwidth detected by nhrpd, used when the first source has none\n"
+	    "Use a share of the detected bandwidth\n"
+	    "Percentage of the detected bandwidth (default 100)\n"
+	    "Ignore small changes of the detected bandwidth\n"
+	    "Smallest increase and decrease applied, in percent of the bandwidth in use (default 0)\n"
+	    "Ignore small increases of the detected bandwidth\n"
+	    "Smallest increase applied, in percent of the bandwidth in use (default 0)\n"
+	    "Ignore small decreases of the detected bandwidth\n"
+	    "Smallest decrease applied, in percent of the bandwidth in use (default 0)\n"
 	    "Bandwidth while no source has detected any\n"
 	    RATE_STR)
 {
 	const char *base = "./frr-qos:qos/detected-bandwidth";
-	char xpath1[64], xpath2[64], xpath_def[64];
+	char xpath1[64], xpath2[64], xpath_def[64], xpath_pct[64], xpath_inc[80], xpath_dec[80];
 	char value[32];
 	uint64_t bps;
 
@@ -1143,6 +1151,21 @@ DEFPY_YANG (interface_qos_bandwidth_detected,
 		snprintf(xpath2, sizeof(xpath2), "%s/source[priority='2']/protocol", base);
 		nb_cli_enqueue_change(vty, xpath2, NB_OP_MODIFY, second);
 	}
+	if (pct_str) {
+		snprintf(xpath_pct, sizeof(xpath_pct), "%s/percent", base);
+		nb_cli_enqueue_change(vty, xpath_pct, NB_OP_MODIFY, pct_str);
+	}
+	/* "hysteresis N" is the same for increases and decreases */
+	if (hyst_str)
+		hinc_str = hdec_str = hyst_str;
+	if (hinc_str) {
+		snprintf(xpath_inc, sizeof(xpath_inc), "%s/hysteresis/increase", base);
+		nb_cli_enqueue_change(vty, xpath_inc, NB_OP_MODIFY, hinc_str);
+	}
+	if (hdec_str) {
+		snprintf(xpath_dec, sizeof(xpath_dec), "%s/hysteresis/decrease", base);
+		nb_cli_enqueue_change(vty, xpath_dec, NB_OP_MODIFY, hdec_str);
+	}
 	if (def) {
 		snprintf(value, sizeof(value), "%" PRIu64, bps);
 		snprintf(xpath_def, sizeof(xpath_def), "%s/default", base);
@@ -1154,7 +1177,7 @@ DEFPY_YANG (interface_qos_bandwidth_detected,
 
 DEFPY_YANG (no_interface_qos_bandwidth_detected,
 	    no_interface_qos_bandwidth_detected_cmd,
-	    "no qos bandwidth detected [<ospf|nhrp> [<ospf|nhrp>]] [default RATE]",
+	    "no qos bandwidth detected [<ospf|nhrp> [<ospf|nhrp>]] [percent (1-100)] [hysteresis <(1-50)|{increase (0-50)|decrease (0-50)}>] [default RATE]",
 	    NO_STR
 	    QOS_STR
 	    "Bandwidth available to the output service-policy\n"
@@ -1163,6 +1186,14 @@ DEFPY_YANG (no_interface_qos_bandwidth_detected,
 	    "Bandwidth detected by nhrpd\n"
 	    "Bandwidth detected by ospfd\n"
 	    "Bandwidth detected by nhrpd\n"
+	    "Use a share of the detected bandwidth\n"
+	    "Percentage of the detected bandwidth\n"
+	    "Ignore small changes of the detected bandwidth\n"
+	    "Smallest increase and decrease applied, in percent of the bandwidth in use\n"
+	    "Ignore small increases of the detected bandwidth\n"
+	    "Smallest increase applied, in percent of the bandwidth in use\n"
+	    "Ignore small decreases of the detected bandwidth\n"
+	    "Smallest decrease applied, in percent of the bandwidth in use\n"
 	    "Bandwidth while no source has detected any\n"
 	    RATE_STR)
 {
@@ -1176,6 +1207,7 @@ static void cli_show_interface_qos_detected(struct vty *vty, const struct lyd_no
 {
 	const char *src[2] = {};
 	const struct lyd_node *child;
+	uint8_t inc, dec;
 	char buf[32];
 
 	LY_LIST_FOR (lyd_child(dnode), child) {
@@ -1192,6 +1224,19 @@ static void cli_show_interface_qos_detected(struct vty *vty, const struct lyd_no
 	for (int i = 0; i < 2; i++)
 		if (src[i])
 			vty_out(vty, " %s", src[i]);
+	if (yang_dnode_get_uint8(dnode, "percent") != 100)
+		vty_out(vty, " percent %u", yang_dnode_get_uint8(dnode, "percent"));
+	inc = yang_dnode_get_uint8(dnode, "hysteresis/increase");
+	dec = yang_dnode_get_uint8(dnode, "hysteresis/decrease");
+	if (inc && inc == dec) {
+		vty_out(vty, " hysteresis %u", inc);
+	} else if (inc || dec) {
+		vty_out(vty, " hysteresis");
+		if (inc)
+			vty_out(vty, " increase %u", inc);
+		if (dec)
+			vty_out(vty, " decrease %u", dec);
+	}
 	if (yang_dnode_exists(dnode, "default"))
 		vty_out(vty, " default %s",
 			qos_rate2str(yang_dnode_get_uint64(dnode, "default"), buf, sizeof(buf)));
