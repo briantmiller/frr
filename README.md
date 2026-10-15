@@ -108,3 +108,166 @@ To report security issues, please use our security mailing list:
 ```
 security [at] lists.frrouting.org
 ```
+
+QoS using Linux HTB or HFSC
+--------
+
+This feature allows for configuration of the Linux queueing disciplines such 
+as HTB or HFSC.  The following example will configure a parent and child policy-map
+and attach it to an interface with a specific bandwidth. 
+
+```
+interface eth0
+ ip address 10.0.0.1/30
+ qos bandwidth 10m
+ service-policy output PARENT
+exit
+access-list VOICE seq 5 deny 10.1.1.0/24
+access-list VOICE seq 10 permit 10.0.0.0/8
+access-list MGMT seq 5 permit ip 10.0.0.0 0.0.0.255 any
+access-list WEB seq 5 permit ip 10.0.1.0 0.0.0.255 any
+!
+ipv6 access-list VOICE seq 5 permit 2001:db8:99::/48
+!
+ip access-list extended WEBX
+ 10 permit tcp 10.0.1.0 0.0.0.255 any
+exit
+!
+class-map match-any VOICE
+ match ip dscp ef
+exit
+!
+class-map match-all MGMT
+ match access-group name MGMT
+ match ip dscp cs6
+exit
+!
+class-map match-all WEB
+ match access-group name WEBX
+exit
+!
+class-map match-all BULK
+ match ip dscp cs1
+exit
+!
+policy-map CHILD
+ class BULK
+  bandwidth percent 30
+  queue-limit 200 packets
+ exit
+ class class-default
+  bandwidth percent 70
+ exit
+exit
+!
+policy-map PARENT
+ class VOICE
+  bandwidth 5mbps
+  max-bandwidth percent 50
+  priority 0
+  queue-limit 64 packets
+ exit
+ class MGMT
+  bandwidth percent 5
+  priority 1
+ exit
+ class WEB
+  bandwidth percent 20
+  priority 2
+  service-policy CHILD
+ exit
+ class class-default
+  bandwidth percent 10
+  max-bandwidth 15mbps
+ exit
+exit
+!
+```
+
+Bandwidth detection and QoS
+--------
+
+This feature uses packet-pair probes to measure the interface bandwidth to a neighbor, 
+specifically an OSPF or NHRp neighbor. Once measured, this value can be used to configure
+the HTB or HFSC bandwidth on the interface. The following configuration will send probes
+to the remote OSPF neighbor and automatically set the outgoing bandwidth to the probed
+value. The probes are sent very 5 seconds with 20 probes each. The bandwidth is calculated
+at 95% of the measured value and only increase the bandwidth if the measured amount is 
+greater than 10% of the existing value. However, it will lower the bandwidth immediately
+if it decreases. If no OSPF neighbor is found or the probes fail, it will default to 5Mbps.
+
+Note that probes are sent using the PACKET_QDISC_BYPASS sockopt. This will ensure the probes
+are not affected by the installed queueing discipline.
+
+```
+interface eth0
+ ip address 10.0.0.2/30
+ ip ospf area 0
+ ip ospf dead-interval 8
+ ip ospf hello-interval 2
+ ip ospf packet-pair interval 5 probes 20
+ link-type vlan parent wan2 id 100
+ qos bandwidth detected ospf percent 95 hysteresis increase 10 default 5mbps
+ service-policy output PARENT
+exit
+!
+router ospf
+exit
+!
+access-list VOICE seq 5 deny 10.1.1.0/24
+access-list VOICE seq 10 permit 10.0.0.0/8
+access-list MGMT seq 5 permit ip 10.0.0.0 0.0.0.255 any
+access-list WEB seq 5 permit ip 10.0.2.0 0.0.0.255 any
+!
+ipv6 access-list VOICE seq 5 permit 2001:db8:99::/48
+!
+class-map match-any VOICE
+ match ip dscp ef
+exit
+!
+class-map match-all MGMT
+ match access-group name MGMT
+ match ip dscp cs6
+exit
+!
+class-map match-all WEB
+ match access-group name WEB
+exit
+!
+class-map match-all BULK
+ match ip dscp cs1
+exit
+!
+policy-map CHILD
+ class BULK
+  bandwidth percent 30
+  queue-limit 200 packets
+ exit
+ class class-default
+  bandwidth percent 70
+ exit
+exit
+!
+policy-map PARENT
+ class VOICE
+  bandwidth 5mbps
+  max-bandwidth percent 50
+  priority 0
+  queue-limit 64 packets
+ exit
+ class MGMT
+  bandwidth percent 5
+  priority 1
+ exit
+ class WEB
+  bandwidth percent 20
+  priority 2
+  service-policy CHILD
+ exit
+ class class-default
+  bandwidth percent 10
+  max-bandwidth 15mbps
+ exit
+exit
+``` 
+
