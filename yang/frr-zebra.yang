@@ -2126,6 +2126,32 @@ module frr-zebra {
            servers of the interface using DHCP (RFC 2131).";
       }
 
+      container ipv4-dhcp-dns-servers {
+        presence
+          "Use statically configured DNS servers instead of the DNS
+           servers offered by DHCP on this interface.";
+        description
+          "Static DNS servers that override the DNS servers supplied by
+           the DHCP server.  They are used while the interface holds a
+           DHCP lease, in the order primary, secondary, tertiary.";
+        leaf primary {
+          type inet:ipv4-address-no-zone;
+          mandatory true;
+          description
+            "First DNS server.";
+        }
+        leaf secondary {
+          type inet:ipv4-address-no-zone;
+          description
+            "Second DNS server.";
+        }
+        leaf tertiary {
+          type inet:ipv4-address-no-zone;
+          description
+            "Third DNS server.";
+        }
+      }
+
       list ipv4-addrs {
         key "ip prefix-length";
         description

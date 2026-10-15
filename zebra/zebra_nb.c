@@ -365,6 +365,34 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers",
+			.cbs = {
+				.create = lib_interface_zebra_ipv4_dhcp_dns_servers_create,
+				.destroy = lib_interface_zebra_ipv4_dhcp_dns_servers_destroy,
+				.apply_finish = lib_interface_zebra_ipv4_dhcp_dns_servers_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers/primary",
+			.cbs = {
+				.modify = lib_interface_zebra_ipv4_dhcp_dns_servers_server_modify,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers/secondary",
+			.cbs = {
+				.modify = lib_interface_zebra_ipv4_dhcp_dns_servers_server_modify,
+				.destroy = lib_interface_zebra_ipv4_dhcp_dns_servers_server_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers/tertiary",
+			.cbs = {
+				.modify = lib_interface_zebra_ipv4_dhcp_dns_servers_server_modify,
+				.destroy = lib_interface_zebra_ipv4_dhcp_dns_servers_server_destroy,
+			}
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs",
 			.cbs = {
 				.create = lib_interface_zebra_ipv4_addrs_create,

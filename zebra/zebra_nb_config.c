@@ -975,6 +975,95 @@ int lib_interface_zebra_ipv4_dhcp_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers
+ */
+int lib_interface_zebra_ipv4_dhcp_dns_servers_create(struct nb_cb_create_args *args)
+{
+	/* Servers are stored by the leaf callbacks, applied in apply_finish */
+	return NB_OK;
+}
+
+int lib_interface_zebra_ipv4_dhcp_dns_servers_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, false);
+	if (ifp) {
+		zebra_dhcp_if_dns_static_clear(ifp);
+		zebra_dhcp_dns_static_apply();
+	}
+
+	return NB_OK;
+}
+
+void lib_interface_zebra_ipv4_dhcp_dns_servers_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	zebra_dhcp_dns_static_apply();
+}
+
+static int dhcp_dns_server_index(const struct lyd_node *dnode)
+{
+	const char *name = dnode->schema->name;
+
+	if (strmatch(name, "primary"))
+		return 0;
+	if (strmatch(name, "secondary"))
+		return 1;
+	return 2;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers/
+ *        {primary,secondary,tertiary}
+ */
+int lib_interface_zebra_ipv4_dhcp_dns_servers_server_modify(struct nb_cb_modify_args *args)
+{
+	struct interface *ifp;
+	struct in_addr addr;
+	uint32_t a;
+
+	yang_dnode_get_ipv4(&addr, args->dnode, NULL);
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		a = ntohl(addr.s_addr);
+		if (a == INADDR_ANY || a == INADDR_BROADCAST || IN_MULTICAST(a) ||
+		    IN_EXPERIMENTAL(a)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "invalid DNS server address %pI4", &addr);
+			return NB_ERR_VALIDATION;
+		}
+		break;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		break;
+	case NB_EV_APPLY:
+		ifp = nb_running_get_entry(args->dnode, NULL, true);
+		zebra_dhcp_if_dns_static_set(ifp, dhcp_dns_server_index(args->dnode), &addr);
+		break;
+	}
+
+	return NB_OK;
+}
+
+int lib_interface_zebra_ipv4_dhcp_dns_servers_server_destroy(struct nb_cb_destroy_args *args)
+{
+	struct interface *ifp;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	ifp = nb_running_get_entry(args->dnode, NULL, false);
+	if (ifp)
+		zebra_dhcp_if_dns_static_set(ifp, dhcp_dns_server_index(args->dnode), NULL);
+
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs
  */
 int lib_interface_zebra_ipv4_addrs_create(struct nb_cb_create_args *args)

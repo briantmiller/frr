@@ -1234,6 +1234,63 @@ static void lib_interface_zebra_ipv4_dhcp_cli_write(struct vty *vty,
 	vty_out(vty, " ip address dhcp\n");
 }
 
+DEFPY_YANG (ip_dhcp_dns_server,
+	ip_dhcp_dns_server_cmd,
+	"ip dhcp dns-server A.B.C.D$primary [A.B.C.D$secondary [A.B.C.D$tertiary]]",
+	"Interface Internet Protocol config commands\n"
+	"DHCP client configuration\n"
+	"Use these DNS servers instead of the ones offered by DHCP\n"
+	"Primary DNS server\n"
+	"Secondary DNS server\n"
+	"Tertiary DNS server\n")
+{
+	nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers", NB_OP_CREATE, NULL);
+	nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers/primary", NB_OP_MODIFY,
+			      primary_str);
+	if (secondary_str)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers/secondary",
+				      NB_OP_MODIFY, secondary_str);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers/secondary",
+				      NB_OP_DESTROY, NULL);
+	if (tertiary_str)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers/tertiary",
+				      NB_OP_MODIFY, tertiary_str);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers/tertiary",
+				      NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (no_ip_dhcp_dns_server,
+	no_ip_dhcp_dns_server_cmd,
+	"no ip dhcp dns-server [A.B.C.D [A.B.C.D [A.B.C.D]]]",
+	NO_STR
+	"Interface Internet Protocol config commands\n"
+	"DHCP client configuration\n"
+	"Use these DNS servers instead of the ones offered by DHCP\n"
+	"Primary DNS server\n"
+	"Secondary DNS server\n"
+	"Tertiary DNS server\n")
+{
+	nb_cli_enqueue_change(vty, "./frr-zebra:zebra/ipv4-dhcp-dns-servers", NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+static void lib_interface_zebra_ipv4_dhcp_dns_servers_cli_write(struct vty *vty,
+								const struct lyd_node *dnode,
+								bool show_defaults)
+{
+	vty_out(vty, " ip dhcp dns-server %s", yang_dnode_get_string(dnode, "primary"));
+	if (yang_dnode_exists(dnode, "secondary"))
+		vty_out(vty, " %s", yang_dnode_get_string(dnode, "secondary"));
+	if (yang_dnode_exists(dnode, "tertiary"))
+		vty_out(vty, " %s", yang_dnode_get_string(dnode, "tertiary"));
+	vty_out(vty, "\n");
+}
+
 #ifdef HAVE_NETLINK
 DEFPY_YANG (ip_address_peer,
 	ip_address_peer_cmd,
@@ -3152,6 +3209,10 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 			.cbs.cli_show = lib_interface_zebra_ipv4_dhcp_cli_write,
 		},
 		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-dhcp-dns-servers",
+			.cbs.cli_show = lib_interface_zebra_ipv4_dhcp_dns_servers_cli_write,
+		},
+		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/ipv4-addrs",
 			.cbs.cli_show = lib_interface_zebra_ipv4_addrs_cli_write,
 		},
@@ -3415,6 +3476,8 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &bandwidth_if_cmd);
 	install_element(INTERFACE_NODE, &ip_address_cmd);
 	install_element(INTERFACE_NODE, &ip_address_dhcp_cmd);
+	install_element(INTERFACE_NODE, &ip_dhcp_dns_server_cmd);
+	install_element(INTERFACE_NODE, &no_ip_dhcp_dns_server_cmd);
 	install_element(INTERFACE_NODE, &ip_address_peer_cmd);
 	install_element(INTERFACE_NODE, &ipv6_address_cmd);
 	install_element(INTERFACE_NODE, &link_params_cmd);

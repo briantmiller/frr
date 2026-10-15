@@ -30,6 +30,26 @@ extern bool zebra_dhcp_supported(void);
 extern void zebra_dhcp_if_enable(struct interface *ifp);
 extern void zebra_dhcp_if_disable(struct interface *ifp);
 
+/*
+ * Configuration: "ip dhcp dns-server A.B.C.D [A.B.C.D [A.B.C.D]]".
+ *
+ * zebra_dhcp_if_dns_static_set
+ *    Store static DNS server number idx (0 = primary) of ifp; a NULL addr
+ *    clears it.  Takes effect on the next zebra_dhcp_dns_static_apply().
+ *
+ * zebra_dhcp_if_dns_static_clear
+ *    Remove all static DNS servers of ifp.
+ *
+ * zebra_dhcp_dns_static_apply
+ *    Rewrite the resolver configuration after static servers changed.
+ *    While an interface holds a DHCP lease, its static servers (if any)
+ *    are used instead of the servers offered by DHCP.
+ */
+extern void zebra_dhcp_if_dns_static_set(struct interface *ifp, unsigned int idx,
+					 const struct in_addr *addr);
+extern void zebra_dhcp_if_dns_static_clear(struct interface *ifp);
+extern void zebra_dhcp_dns_static_apply(void);
+
 /* Interface state notifications from zebra/interface.c. */
 extern void zebra_dhcp_if_up(struct interface *ifp);
 extern void zebra_dhcp_if_down(struct interface *ifp);

@@ -623,6 +623,36 @@ static bool dhcp_if_has_lease(const struct zebra_dhcp_if *dif)
 	return dif->lease.valid && dif->addr_installed;
 }
 
+/* True when "ip dhcp dns-server" is configured on the interface. */
+static bool dhcp_if_dns_is_static(const struct interface *ifp)
+{
+	const struct zebra_if *zif = ifp->info;
+
+	return zif && zif->dhcp_dns_static[0].s_addr != INADDR_ANY;
+}
+
+/*
+ * DNS servers in effect for an interface: the statically configured ones
+ * if any, otherwise those offered with the DHCP lease.  Returns the number
+ * of servers copied to out (at most DHCP_MAX_DNS).
+ */
+static unsigned int dhcp_if_dns_servers(const struct zebra_dhcp_if *dif, struct in_addr *out)
+{
+	const struct zebra_if *zif = dif->ifp->info;
+	unsigned int n = 0;
+
+	if (dhcp_if_dns_is_static(dif->ifp)) {
+		for (unsigned int i = 0; i < ZEBRA_DHCP_DNS_STATIC_MAX; i++)
+			if (zif->dhcp_dns_static[i].s_addr != INADDR_ANY)
+				out[n++] = zif->dhcp_dns_static[i];
+		return n;
+	}
+
+	for (unsigned int i = 0; i < dif->lease.dns_count; i++)
+		out[n++] = dif->lease.dns[i];
+	return n;
+}
+
 /*
  * Rebuild the resolver configuration from the DNS servers of every bound
  * interface in the default VRF (the system resolver is not VRF aware).
@@ -643,20 +673,23 @@ static void dhcp_dns_update(void)
 	FOR_ALL_INTERFACES (vrf, ifp) {
 		struct zebra_dhcp_if *dif = dhcp_if_get(ifp);
 
+		struct in_addr ifdns[DHCP_MAX_DNS];
+		unsigned int ifcount;
+
 		if (!dif || !dhcp_if_has_lease(dif))
 			continue;
 
-		for (unsigned int i = 0; i < dif->lease.dns_count; i++) {
+		ifcount = dhcp_if_dns_servers(dif, ifdns);
+		for (unsigned int i = 0; i < ifcount; i++) {
 			unsigned int j;
 
 			for (j = 0; j < nservers; j++)
-				if (servers[j].s_addr == dif->lease.dns[i].s_addr)
+				if (servers[j].s_addr == ifdns[i].s_addr)
 					break;
 			if (j == nservers && nservers < array_size(servers))
-				servers[nservers++] = dif->lease.dns[i];
+				servers[nservers++] = ifdns[i];
 		}
-		if (dif->lease.domain[0] && dif->lease.dns_count &&
-		    !strstr(search, dif->lease.domain)) {
+		if (dif->lease.domain[0] && ifcount && !strstr(search, dif->lease.domain)) {
 			if (search[0])
 				strlcat(search, " ", sizeof(search));
 			strlcat(search, dif->lease.domain, sizeof(search));
@@ -668,10 +701,10 @@ static void dhcp_dns_update(void)
 		return;
 	}
 
-	len = snprintf(buf, sizeof(buf),
-		       DHCP_RESOLV_HEADER "# Changes to this file will be overwritten.\n");
+	len = snprintfrr(buf, sizeof(buf),
+			 DHCP_RESOLV_HEADER "# Changes to this file will be overwritten.\n");
 	if (search[0])
-		len += snprintf(buf + len, sizeof(buf) - len, "search %s\n", search);
+		len += snprintfrr(buf + len, sizeof(buf) - len, "search %s\n", search);
 	for (unsigned int i = 0; i < nservers && (size_t)len < sizeof(buf); i++)
 		len += snprintfrr(buf + len, sizeof(buf) - len, "nameserver %pI4\n", &servers[i]);
 	if ((size_t)len >= sizeof(buf))
@@ -1653,6 +1686,30 @@ void zebra_dhcp_if_disable(struct interface *ifp)
 	zebra_dhcp_if_free(zif);
 }
 
+void zebra_dhcp_if_dns_static_set(struct interface *ifp, unsigned int idx,
+				  const struct in_addr *addr)
+{
+	struct zebra_if *zif = ifp->info;
+
+	if (!zif || idx >= ZEBRA_DHCP_DNS_STATIC_MAX)
+		return;
+
+	zif->dhcp_dns_static[idx].s_addr = addr ? addr->s_addr : INADDR_ANY;
+}
+
+void zebra_dhcp_if_dns_static_clear(struct interface *ifp)
+{
+	struct zebra_if *zif = ifp->info;
+
+	if (zif)
+		memset(zif->dhcp_dns_static, 0, sizeof(zif->dhcp_dns_static));
+}
+
+void zebra_dhcp_dns_static_apply(void)
+{
+	dhcp_dns_update();
+}
+
 void zebra_dhcp_if_up(struct interface *ifp)
 {
 	struct zebra_dhcp_if *dif = dhcp_if_get(ifp);
@@ -1730,13 +1787,23 @@ static void dhcp_show_if(struct vty *vty, struct zebra_dhcp_if *dif, json_object
 	char buf[64], tbuf[64];
 	json_object *jif = NULL, *jdns;
 	struct tm tm;
+	struct in_addr dns[DHCP_MAX_DNS];
+	bool is_static = dhcp_if_dns_is_static(ifp);
+	unsigned int ndns;
 
 	if (have)
 		masklen2ip(l->prefixlen, &mask);
+	ndns = dhcp_if_dns_servers(dif, dns);
 
 	if (json) {
 		jif = json_object_new_object();
 		json_object_string_add(jif, "vrf", ifp->vrf->name);
+		if (is_static) {
+			jdns = json_object_new_array();
+			for (unsigned int i = 0; i < ndns; i++)
+				json_array_string_addf(jdns, "%pI4", &dns[i]);
+			json_object_object_add(jif, "staticDnsServers", jdns);
+		}
 		json_object_string_add(jif, "state", dhcp_state_names[dif->state]);
 		json_object_boolean_add(jif, "leaseValid", have);
 		if (have) {
@@ -1746,9 +1813,15 @@ static void dhcp_show_if(struct vty *vty, struct zebra_dhcp_if *dif, json_object
 			if (l->router.s_addr)
 				json_object_string_addf(jif, "gateway", "%pI4", &l->router);
 			jdns = json_object_new_array();
+			for (unsigned int i = 0; i < ndns; i++)
+				json_array_string_addf(jdns, "%pI4", &dns[i]);
+			json_object_object_add(jif, "dnsServers", jdns);
+			json_object_string_add(jif, "dnsServersSource",
+					       is_static ? "static" : "dhcp");
+			jdns = json_object_new_array();
 			for (unsigned int i = 0; i < l->dns_count; i++)
 				json_array_string_addf(jdns, "%pI4", &l->dns[i]);
-			json_object_object_add(jif, "dnsServers", jdns);
+			json_object_object_add(jif, "offeredDnsServers", jdns);
 			if (l->domain[0])
 				json_object_string_add(jif, "domainName", l->domain);
 			json_object_string_addf(jif, "dhcpServer", "%pI4", &l->server_id);
@@ -1783,6 +1856,12 @@ static void dhcp_show_if(struct vty *vty, struct zebra_dhcp_if *dif, json_object
 
 	if (!have) {
 		vty_out(vty, "  No lease\n");
+		if (is_static) {
+			vty_out(vty, "  Static DNS servers:");
+			for (unsigned int i = 0; i < ndns; i++)
+				vty_out(vty, " %pI4", &dns[i]);
+			vty_out(vty, "\n");
+		}
 	} else {
 		vty_out(vty, "  IP address:        %pI4/%u\n", &l->addr, l->prefixlen);
 		vty_out(vty, "  Subnet mask:       %pI4\n", &mask);
@@ -1791,11 +1870,19 @@ static void dhcp_show_if(struct vty *vty, struct zebra_dhcp_if *dif, json_object
 		else
 			vty_out(vty, "  Default gateway:   (none)\n");
 		vty_out(vty, "  DNS servers:      ");
-		if (!l->dns_count)
+		if (!ndns)
 			vty_out(vty, " (none)");
-		for (unsigned int i = 0; i < l->dns_count; i++)
-			vty_out(vty, " %pI4", &l->dns[i]);
-		vty_out(vty, "\n");
+		for (unsigned int i = 0; i < ndns; i++)
+			vty_out(vty, " %pI4", &dns[i]);
+		vty_out(vty, "%s\n", is_static ? " (static)" : "");
+		if (is_static) {
+			vty_out(vty, "  DHCP DNS servers: ");
+			if (!l->dns_count)
+				vty_out(vty, " (none)");
+			for (unsigned int i = 0; i < l->dns_count; i++)
+				vty_out(vty, " %pI4", &l->dns[i]);
+			vty_out(vty, " (overridden)\n");
+		}
 		if (l->domain[0])
 			vty_out(vty, "  Domain name:       %s\n", l->domain);
 		vty_out(vty, "  DHCP server:       %pI4\n", &l->server_id);

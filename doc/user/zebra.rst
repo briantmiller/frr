@@ -220,6 +220,24 @@ Standard Commands
 
    This command is currently only supported on Linux.
 
+.. clicmd:: ip dhcp dns-server A.B.C.D [A.B.C.D [A.B.C.D]]
+
+   Use up to three statically configured DNS servers, in the given order,
+   instead of the DNS servers offered by the DHCP server on this interface.
+   The static servers are written to the resolver configuration while the
+   interface holds a DHCP lease, exactly as offered servers would be; the
+   domain name offered by DHCP is still used.  Entering the command again
+   replaces the previous list.  Removing it reverts to the DHCP offered
+   servers.  The command may be configured before or after
+   :clicmd:`ip address dhcp`.
+
+   .. code-block:: frr
+
+      interface eth0
+       ip address dhcp
+       ip dhcp dns-server 192.0.2.53 198.51.100.53
+      exit
+
 .. clicmd:: show dhcp lease [json]
 
    Display the DHCP client state and the current lease (address, subnet mask,

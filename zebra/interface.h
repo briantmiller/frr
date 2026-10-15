@@ -91,6 +91,9 @@ enum zebra_if_flags {
 /* `zebra' daemon local interface structure. */
 struct zebra_dhcp_if;
 
+/* Static DNS servers per interface (the resolver uses at most 3) */
+#define ZEBRA_DHCP_DNS_STATIC_MAX 3
+
 struct zebra_if {
 	/* back pointer to the interface */
 	struct interface *ifp;
@@ -123,6 +126,12 @@ struct zebra_if {
 
 	/* DHCPv4 client state ("ip address dhcp"), NULL when disabled */
 	struct zebra_dhcp_if *dhcp;
+
+	/*
+	 * Static DNS servers overriding the DHCP offered ones
+	 * ("ip dhcp dns-server"), in priority order; 0.0.0.0 when unset.
+	 */
+	struct in_addr dhcp_dns_static[ZEBRA_DHCP_DNS_STATIC_MAX];
 
 	/* Installed addresses chains tree. */
 	struct route_table *ipv4_subnets;
