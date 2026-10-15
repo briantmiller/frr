@@ -34,6 +34,24 @@ struct zebra_link_vlan_cfg {
 	uint16_t pvid;			      /* 0 == none */
 };
 
+/* Bond settings that are not one number, see zebra_link_cfg_set_bond_primary */
+struct zebra_link_bondx {
+	bool has_primary;
+	char primary[IFNAMSIZ];
+	bool primary_applied; /* we gave the kernel a primary, to be cleared again */
+	bool primary_dirty;   /* configured, not applied yet (maybe that interface is missing) */
+
+	unsigned int n_arp;
+	struct in_addr arp[ZEBRA_LINK_BOND_MAX_TARGETS];
+	bool arp_applied;
+	bool arp_dirty;
+
+	unsigned int n_ns;
+	struct in6_addr ns[ZEBRA_LINK_BOND_MAX_TARGETS];
+	bool ns_applied;
+	bool ns_dirty;
+};
+
 struct zebra_link_cfg {
 	/* Desired kernel link */
 	bool has_link;
@@ -73,9 +91,19 @@ struct zebra_link_cfg {
 	uint64_t opt_applied_mask[ZLO_SCOPE_MAX]; /* settings pushed to the kernel */
 	uint64_t opt_reset[ZLO_SCOPE_MAX];	  /* removed: set the default again */
 	unsigned int opt_inflight[ZLO_SCOPE_MAX];
+	struct zebra_link_bondx *bondx;
 };
 
 static struct event *t_link_cfg_kick;
+
+/* Anything configured, or still to be removed from the kernel, in bondx? */
+static bool bondx_active(const struct zebra_link_cfg *cfg)
+{
+	const struct zebra_link_bondx *x = cfg->bondx;
+
+	return x && (x->has_primary || x->primary_applied || x->n_arp || x->arp_applied ||
+		     x->n_ns || x->ns_applied);
+}
 
 static inline bool ifp_is_real(const struct interface *ifp)
 {
@@ -106,7 +134,9 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	    cfg->master_inflight || cfg->has_mtu || cfg->mtu_inflight || cfg->vl || cfg->brport_inflight ||
 	    cfg->isolated_set || cfg->opt[ZLO_SCOPE_BRIDGE] || cfg->opt[ZLO_SCOPE_PORT] ||
 	    cfg->opt_reset[ZLO_SCOPE_BRIDGE] || cfg->opt_reset[ZLO_SCOPE_PORT] ||
-	    cfg->opt_inflight[ZLO_SCOPE_BRIDGE] || cfg->opt_inflight[ZLO_SCOPE_PORT])
+	    cfg->opt_inflight[ZLO_SCOPE_BRIDGE] || cfg->opt_inflight[ZLO_SCOPE_PORT] ||
+	    cfg->opt[ZLO_SCOPE_BOND] || cfg->opt_reset[ZLO_SCOPE_BOND] ||
+	    cfg->opt_inflight[ZLO_SCOPE_BOND] || bondx_active(cfg))
 		return;
 
 	XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
@@ -154,6 +184,8 @@ static bool link_matches_kind(struct interface *ifp, enum zebra_link_kind kind)
 		return IS_ZEBRA_IF_VXLAN(ifp);
 	case ZEBRA_LINK_BAREUDP:
 		return IS_ZEBRA_IF_BAREUDP(ifp);
+	case ZEBRA_LINK_BOND:
+		return IS_ZEBRA_IF_BOND(ifp);
 	case ZEBRA_LINK_NONE:
 	case ZEBRA_LINK_KIND_MAX:
 		break;
@@ -247,13 +279,84 @@ static void brport_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
 }
 
 /*
+ * Add the bond settings that are not one number to the request: whatever is
+ * configured, and an empty value for what was configured and has been removed.
+ */
+static void bond_fill_extras(struct interface *ifp, struct zebra_link_cfg *cfg,
+			     struct zebra_link_opts_req *req)
+{
+	struct zebra_link_bondx *x = cfg->bondx;
+	struct interface *pifp;
+	unsigned int i;
+
+	if (!x)
+		return;
+
+	/* Only what changed since it was last sent (or what is new in the kernel) */
+	if (x->has_primary) {
+		pifp = x->primary_dirty ? link_cfg_lookup(ifp, x->primary) : NULL;
+		if (pifp && ifp_is_real(pifp)) {
+			req->has_primary = true;
+			req->primary_ifindex = pifp->ifindex;
+			x->primary_applied = true;
+			/* If that interface does not exist yet it stays dirty and is applied when it appears */
+			x->primary_dirty = false;
+		}
+	} else if (x->primary_applied) {
+		req->has_primary = true;
+		req->primary_ifindex = 0;
+		x->primary_applied = false;
+	}
+
+	if ((x->n_arp || x->arp_applied) && x->arp_dirty) {
+		req->has_arp_targets = true;
+		req->n_arp_targets = x->n_arp;
+		for (i = 0; i < x->n_arp; i++)
+			req->arp_targets[i] = x->arp[i].s_addr;
+		x->arp_applied = x->n_arp != 0;
+		x->arp_dirty = false;
+	}
+
+	if ((x->n_ns || x->ns_applied) && x->ns_dirty) {
+		req->has_ns_targets = true;
+		req->n_ns_targets = x->n_ns;
+		for (i = 0; i < x->n_ns; i++)
+			memcpy(req->ns_targets[i], &x->ns[i], 16);
+		x->ns_applied = x->n_ns != 0;
+		x->ns_dirty = false;
+	}
+}
+
+/* Is the primary slave configured, not applied yet, and does it exist now? */
+static bool bond_primary_ready(struct interface *ifp, const struct zebra_link_cfg *cfg)
+{
+	const struct zebra_link_bondx *x = cfg->bondx;
+	struct interface *pifp;
+
+	if (!x || !x->has_primary || !x->primary_dirty)
+		return false;
+	pifp = link_cfg_lookup(ifp, x->primary);
+	return pifp && ifp_is_real(pifp);
+}
+
+static void opts_queue(struct interface *ifp, struct zebra_link_cfg *cfg,
+		       const struct zebra_link_opts_req *req)
+{
+	cfg->opt_inflight[req->scope]++;
+	if (dplane_link_opts_set(ifp, req) != ZEBRA_DPLANE_REQUEST_QUEUED) {
+		cfg->opt_inflight[req->scope]--;
+		zlog_warn("%s: unable to queue settings for %s", __func__, ifp->name);
+	}
+}
+
+/*
  * Push the settings of one scope.  Everything configured is sent (they are
  * idempotent), plus the kernel default for settings that were removed.
  */
 static void opts_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
 		       enum zebra_link_opt_scope scope, ifindex_t bridge_ifindex)
 {
-	const struct zebra_link_optset *set = cfg->opt[scope];
+	struct zebra_link_optset *set = cfg->opt[scope];
 	const struct zebra_link_opt_def *t;
 	struct zebra_link_opts_req *req;
 	unsigned int i, count;
@@ -268,25 +371,76 @@ static void opts_apply(struct interface *ifp, struct zebra_link_cfg *cfg,
 
 	for (i = 0; i < count; i++) {
 		if (set && (set->mask & (1ULL << i))) {
+			/*
+			 * Bond settings are sent one by one and a refused one is
+			 * not retried, so send only what changed since last time.
+			 */
+			if (scope == ZLO_SCOPE_BOND && (set->sent_mask & (1ULL << i)) &&
+			    set->sent[i] == set->val[i])
+				continue;
+			if (scope == ZLO_SCOPE_BOND) {
+				set->sent_mask |= 1ULL << i;
+				set->sent[i] = set->val[i];
+			}
 			req->item[req->count].idx = i;
 			req->item[req->count++].val = set->val[i];
 		} else if ((cfg->opt_reset[scope] & (1ULL << i)) && t[i].def != ZLO_NODEFAULT) {
+			if (set)
+				set->sent_mask &= ~(1ULL << i);
 			req->item[req->count].idx = i;
 			req->item[req->count++].val = t[i].def;
 		}
 	}
+
+	if (scope == ZLO_SCOPE_BOND)
+		bond_fill_extras(ifp, cfg, req);
 
 	if (set)
 		cfg->opt_applied_mask[scope] |= set->mask;
 	cfg->opt_applied_mask[scope] &= ~cfg->opt_reset[scope];
 	cfg->opt_reset[scope] = 0;
 
-	if (req->count) {
-		cfg->opt_inflight[scope]++;
-		if (dplane_link_opts_set(ifp, req) != ZEBRA_DPLANE_REQUEST_QUEUED) {
-			cfg->opt_inflight[scope]--;
-			zlog_warn("%s: unable to queue settings for %s", __func__, ifp->name);
+	if (scope == ZLO_SCOPE_BOND) {
+		/*
+		 * The kernel stops at the first bond attribute it refuses, so one
+		 * the bond cannot take in its current mode would hide all the
+		 * ones after it.  Send them one by one, in the order the kernel
+		 * itself applies them.
+		 */
+		struct zebra_link_opts_req one;
+
+		for (i = 0; i < req->count; i++) {
+			memset(&one, 0, sizeof(one));
+			one.scope = scope;
+			one.count = 1;
+			one.item[0] = req->item[i];
+			opts_queue(ifp, cfg, &one);
 		}
+		if (req->has_arp_targets) {
+			memset(&one, 0, sizeof(one));
+			one.scope = scope;
+			one.has_arp_targets = true;
+			one.n_arp_targets = req->n_arp_targets;
+			memcpy(one.arp_targets, req->arp_targets, sizeof(one.arp_targets));
+			opts_queue(ifp, cfg, &one);
+		}
+		if (req->has_ns_targets) {
+			memset(&one, 0, sizeof(one));
+			one.scope = scope;
+			one.has_ns_targets = true;
+			one.n_ns_targets = req->n_ns_targets;
+			memcpy(one.ns_targets, req->ns_targets, sizeof(one.ns_targets));
+			opts_queue(ifp, cfg, &one);
+		}
+		if (req->has_primary) {
+			memset(&one, 0, sizeof(one));
+			one.scope = scope;
+			one.has_primary = true;
+			one.primary_ifindex = req->primary_ifindex;
+			opts_queue(ifp, cfg, &one);
+		}
+	} else if (req->count) {
+		opts_queue(ifp, cfg, req);
 	}
 	XFREE(MTYPE_ZEBRA_LINK_CFG, req);
 
@@ -404,6 +558,13 @@ static void link_cfg_realize(struct interface *ifp)
 	    IS_ZEBRA_IF_BRIDGE(ifp) && !cfg->opt_inflight[ZLO_SCOPE_BRIDGE] &&
 	    cfg->opt_applied_gen[ZLO_SCOPE_BRIDGE] != cfg->opt_gen[ZLO_SCOPE_BRIDGE])
 		opts_apply(ifp, cfg, ZLO_SCOPE_BRIDGE, 0);
+
+	/* --- bond settings (this interface is a bond) --- */
+	if ((cfg->opt[ZLO_SCOPE_BOND] || cfg->opt_reset[ZLO_SCOPE_BOND] || bondx_active(cfg)) &&
+	    ifp_is_real(ifp) && IS_ZEBRA_IF_BOND(ifp) && !cfg->opt_inflight[ZLO_SCOPE_BOND] &&
+	    (cfg->opt_applied_gen[ZLO_SCOPE_BOND] != cfg->opt_gen[ZLO_SCOPE_BOND] ||
+	     bond_primary_ready(ifp, cfg)))
+		opts_apply(ifp, cfg, ZLO_SCOPE_BOND, 0);
 
 	/* --- bridge port settings (this interface is enslaved to a bridge) --- */
 	if ((cfg->opt[ZLO_SCOPE_PORT] || cfg->opt_reset[ZLO_SCOPE_PORT]) && ifp_is_real(ifp) &&
@@ -720,6 +881,104 @@ void zebra_link_cfg_unset_opt(struct interface *ifp, enum zebra_link_opt_scope s
 	link_cfg_release_if_empty(ifp);
 }
 
+/* ---- bond settings that are not one number ---- */
+
+static struct zebra_link_bondx *bondx_get(struct zebra_link_cfg *cfg)
+{
+	if (!cfg->bondx)
+		cfg->bondx = XCALLOC(MTYPE_ZEBRA_LINK_CFG, sizeof(*cfg->bondx));
+	return cfg->bondx;
+}
+
+/* Free bondx when it holds nothing, then re-evaluate the interface */
+static void bondx_changed(struct interface *ifp, struct zebra_link_cfg *cfg)
+{
+	cfg->opt_gen[ZLO_SCOPE_BOND]++;
+	if (cfg->bondx && !bondx_active(cfg))
+		XFREE(MTYPE_ZEBRA_LINK_CFG, cfg->bondx);
+
+	link_cfg_realize(ifp);
+	link_cfg_release_if_empty(ifp);
+}
+
+void zebra_link_cfg_set_bond_primary(struct interface *ifp, const char *name)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, true);
+	struct zebra_link_bondx *x;
+
+	if (!cfg)
+		return;
+	x = bondx_get(cfg);
+	strlcpy(x->primary, name, sizeof(x->primary));
+	x->has_primary = true;
+	x->primary_dirty = true;
+	bondx_changed(ifp, cfg);
+}
+
+void zebra_link_cfg_unset_bond_primary(struct interface *ifp)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, false);
+
+	if (!cfg || !cfg->bondx || !cfg->bondx->has_primary)
+		return;
+	cfg->bondx->has_primary = false;
+	cfg->bondx->primary[0] = '\0';
+	cfg->bondx->primary_dirty = false;
+	bondx_changed(ifp, cfg);
+}
+
+void zebra_link_cfg_bond_arp_target(struct interface *ifp, const struct in_addr *addr, bool add)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, add);
+	struct zebra_link_bondx *x;
+	unsigned int i;
+
+	if (!cfg)
+		return;
+	if (!add && !cfg->bondx)
+		return;
+	x = bondx_get(cfg);
+
+	for (i = 0; i < x->n_arp; i++)
+		if (x->arp[i].s_addr == addr->s_addr)
+			break;
+
+	if (add && i == x->n_arp && x->n_arp < ZEBRA_LINK_BOND_MAX_TARGETS)
+		x->arp[x->n_arp++] = *addr;
+	else if (!add && i < x->n_arp) {
+		memmove(&x->arp[i], &x->arp[i + 1], (x->n_arp - i - 1) * sizeof(x->arp[0]));
+		x->n_arp--;
+	}
+	x->arp_dirty = true;
+	bondx_changed(ifp, cfg);
+}
+
+void zebra_link_cfg_bond_ns_target(struct interface *ifp, const struct in6_addr *addr, bool add)
+{
+	struct zebra_link_cfg *cfg = link_cfg_get(ifp, add);
+	struct zebra_link_bondx *x;
+	unsigned int i;
+
+	if (!cfg)
+		return;
+	if (!add && !cfg->bondx)
+		return;
+	x = bondx_get(cfg);
+
+	for (i = 0; i < x->n_ns; i++)
+		if (IPV6_ADDR_SAME(&x->ns[i], addr))
+			break;
+
+	if (add && i == x->n_ns && x->n_ns < ZEBRA_LINK_BOND_MAX_TARGETS)
+		x->ns[x->n_ns++] = *addr;
+	else if (!add && i < x->n_ns) {
+		memmove(&x->ns[i], &x->ns[i + 1], (x->n_ns - i - 1) * sizeof(x->ns[0]));
+		x->n_ns--;
+	}
+	x->ns_dirty = true;
+	bondx_changed(ifp, cfg);
+}
+
 const struct zebra_link_params *zebra_link_cfg_get_link(const struct interface *ifp)
 {
 	const struct zebra_if *zif = ifp->info;
@@ -771,6 +1030,18 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 		/* The settings went with the interface; apply them again on return */
 		cfg->opt_applied_gen[ZLO_SCOPE_BRIDGE] = 0;
 		cfg->opt_applied_gen[ZLO_SCOPE_PORT] = 0;
+		cfg->opt_applied_gen[ZLO_SCOPE_BOND] = 0;
+		if (cfg->opt[ZLO_SCOPE_BOND])
+			cfg->opt[ZLO_SCOPE_BOND]->sent_mask = 0;
+		if (cfg->bondx) {
+			/* Nothing of it is in the kernel any more */
+			cfg->bondx->primary_applied = false;
+			cfg->bondx->primary_dirty = cfg->bondx->has_primary;
+			cfg->bondx->arp_applied = false;
+			cfg->bondx->arp_dirty = cfg->bondx->n_arp != 0;
+			cfg->bondx->ns_applied = false;
+			cfg->bondx->ns_dirty = cfg->bondx->n_ns != 0;
+		}
 		cfg->opt_applied_bridge = 0;
 		memset(cfg->opt_applied_mask, 0, sizeof(cfg->opt_applied_mask));
 		memset(cfg->opt_reset, 0, sizeof(cfg->opt_reset));
@@ -793,6 +1064,8 @@ void zebra_link_cfg_if_free(struct interface *ifp)
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->vl);
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->opt[ZLO_SCOPE_BRIDGE]);
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->opt[ZLO_SCOPE_PORT]);
+		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->opt[ZLO_SCOPE_BOND]);
+		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg->bondx);
 		XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
 	}
 }
@@ -867,9 +1140,20 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 				link_cfg_kick();
 		}
 		/* Not retried by itself, like the vlans */
-		if (!ok)
+		if (!ok && scope == ZLO_SCOPE_BOND) {
+			unsigned int cnt;
+			const struct zebra_link_opt_def *t = zebra_link_opt_table(scope, &cnt);
+
+			zlog_warn("Failed to apply bond setting %s on %s (the bond may need to be down, without slaves, or in another mode)",
+				  r->count && r->item[0].idx < cnt ? t[r->item[0].idx].name
+				  : r->has_primary		    ? "primary"
+				  : r->has_arp_targets		    ? "arp-ip-target"
+								    : "ns-ip6-target",
+				  name);
+		} else if (!ok) {
 			zlog_warn("Failed to apply %s settings on %s",
 				  scope == ZLO_SCOPE_BRIDGE ? "bridge" : "bridge port", name);
+		}
 	} else if (op == DPLANE_OP_LINK_DELETE) {
 		if (!ok)
 			zlog_warn("Failed to delete link %s in the kernel", name);

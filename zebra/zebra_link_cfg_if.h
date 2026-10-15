@@ -75,6 +75,18 @@ extern void zebra_link_cfg_set_opt(struct interface *ifp, enum zebra_link_opt_sc
 extern void zebra_link_cfg_unset_opt(struct interface *ifp, enum zebra_link_opt_scope scope,
 				     unsigned int idx);
 
+/*
+ * Bond settings that are not a single number: the primary slave and the
+ * ARP / NS monitoring targets (scope ZLO_SCOPE_BOND).  Applied in place like
+ * the other settings; the primary is applied once that interface exists.
+ */
+extern void zebra_link_cfg_set_bond_primary(struct interface *ifp, const char *name);
+extern void zebra_link_cfg_unset_bond_primary(struct interface *ifp);
+extern void zebra_link_cfg_bond_arp_target(struct interface *ifp, const struct in_addr *addr,
+					   bool add);
+extern void zebra_link_cfg_bond_ns_target(struct interface *ifp, const struct in6_addr *addr,
+					  bool add);
+
 /* Lookups for show/config-write */
 extern const struct zebra_link_params *
 zebra_link_cfg_get_link(const struct interface *ifp);

@@ -633,6 +633,94 @@ def test_mtu(tgen):
     conf(r1, "no interface mt0", "no interface mt1")
 
 
+def bond_sysfs(r1, name, setting):
+    "Value of /sys/class/net/NAME/bonding/SETTING, or None"
+    out = r1.cmd("cat /sys/class/net/{}/bonding/{} 2>/dev/null".format(name, setting)).strip()
+    return out if out else None
+
+
+def wait_bond(r1, name, setting, expect, timeout=15):
+    "Wait until the bonding setting reads EXPECT (a string, None for empty/absent)."
+
+    def check():
+        got = bond_sysfs(r1, name, setting)
+        return None if got == expect else "{}: {!r} != {!r}".format(setting, got, expect)
+
+    _, result = topotest.run_and_expect(check, None, count=timeout * 2, wait=0.5)
+    return result
+
+
+def test_bond(tgen):
+    "link-type bond: mode, settings applied in place, mode change re-creates, targets, primary"
+    r1 = tgen.gears["r1"]
+    if not kind_supported(r1, "bond"):
+        pytest.skip("kernel lacks bonding support")
+
+    conf(r1, "interface bd0", "link-type bond mode active-backup")
+    assert wait_link(r1, "bd0", {"linkinfo": {"info_kind": "bond"}}) is None
+    assert wait_bond(r1, "bd0", "mode", "active-backup 1") is None
+
+    # settings are applied in place
+    conf(r1, "interface bd0", "bond miimon 100", "bond use-carrier off", "bond fail-over-mac active")
+    assert wait_bond(r1, "bd0", "miimon", "100") is None
+    assert wait_bond(r1, "bd0", "use_carrier", "0") is None
+    assert wait_bond(r1, "bd0", "fail_over_mac", "active 1") is None
+
+    conf(r1, "interface bd0", "bond miimon 200")
+    assert wait_bond(r1, "bd0", "miimon", "200") is None
+
+    # a setting the mode does not have is refused, and does not stop the others
+    conf(r1, "interface bd0", "bond lacp-rate fast", "bond min-links 1")
+    assert wait_bond(r1, "bd0", "min_links", "1") is None
+    assert wait_bond(r1, "bd0", "lacp_rate", "slow 0") is None
+
+    # removing a setting puts the kernel default back
+    conf(r1, "interface bd0", "no bond use-carrier", "no bond fail-over-mac")
+    assert wait_bond(r1, "bd0", "use_carrier", "1") is None
+    assert wait_bond(r1, "bd0", "fail_over_mac", "none 0") is None
+
+    # a different mode is a different bond; the settings are applied again to
+    # the new one, and now lacp-rate is accepted
+    conf(r1, "interface bd0", "link-type bond mode 802-3ad")
+    assert wait_bond(r1, "bd0", "mode", "802.3ad 4") is None
+    assert wait_bond(r1, "bd0", "lacp_rate", "fast 1") is None
+    assert wait_bond(r1, "bd0", "miimon", "200") is None
+    conf(r1, "interface bd0", "bond xmit-hash-policy layer3-4", "bond ad-actor-sys-prio 300")
+    assert wait_bond(r1, "bd0", "xmit_hash_policy", "layer3+4 1") is None
+    assert wait_bond(r1, "bd0", "ad_actor_sys_prio", "300") is None
+
+    # ARP monitoring with targets, in a mode that has it
+    conf(r1, "interface bd0", "link-type bond mode active-backup", "no bond miimon")
+    conf(
+        r1,
+        "interface bd0",
+        "bond arp-interval 1000",
+        "bond arp-ip-target 10.255.9.1",
+        "bond arp-ip-target 10.255.9.2",
+    )
+    assert wait_bond(r1, "bd0", "arp_interval", "1000") is None
+    assert wait_bond(r1, "bd0", "arp_ip_target", "10.255.9.1 10.255.9.2") is None
+    conf(r1, "interface bd0", "no bond arp-ip-target 10.255.9.1")
+    assert wait_bond(r1, "bd0", "arp_ip_target", "10.255.9.2") is None
+
+    # the primary slave is applied once that interface exists
+    conf(r1, "interface bd0", "bond primary bp0")
+    conf(r1, "interface bp0", "link-type veth peer bp1")
+    assert wait_bond(r1, "bd0", "primary", "bp0") is None
+    conf(r1, "interface bd0", "no bond primary")
+    assert wait_bond(r1, "bd0", "primary", None) is None
+
+    out = r1.vtysh_cmd("show running-config")
+    assert " link-type bond mode active-backup" in out
+    assert " bond arp-interval 1000" in out
+    assert " bond arp-ip-target 10.255.9.2" in out
+
+    for name in ("bd0", "bp0"):
+        conf(r1, "interface " + name, "no link-type")
+        assert wait_link(r1, name, None) is None
+    conf(r1, "no interface bd0", "no interface bp0")
+
+
 def test_removal(tgen):
     r1 = tgen.gears["r1"]
     # no link-type deletes the kernel link; then the interface can be removed.

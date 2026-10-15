@@ -2298,6 +2298,256 @@ module frr-zebra {
            untagged or private).";
       }
 
+      container bond-options {
+        description
+          "Settings of this interface when it is a Linux bond: the files in
+           /sys/class/net/BOND/bonding/ other than mode (see link-type bond).
+           Applied in place; an option that is not configured is left alone.
+           Removing an option sets the kernel default again. The kernel
+           refuses some changes in some situations (a mode that does not use
+           the option, a bond that is up or has slaves); that is logged and
+           not retried until the configuration changes.";
+
+        leaf miimon {
+          type uint32 {
+            range "0..2147483647";
+          }
+          description
+            "MII link monitoring interval in milliseconds, 0 to disable (kernel default 0).";
+        }
+
+        leaf updelay {
+          type uint32 {
+            range "0..2147483647";
+          }
+          description
+            "Time in milliseconds to wait before enabling a slave after a link up is detected (multiple of miimon).";
+        }
+
+        leaf downdelay {
+          type uint32 {
+            range "0..2147483647";
+          }
+          description
+            "Time in milliseconds to wait before disabling a slave after a link failure is detected (multiple of miimon).";
+        }
+
+        leaf use-carrier {
+          type boolean;
+          description
+            "Use the interface carrier state for MII monitoring (kernel default on).";
+        }
+
+        leaf arp-interval {
+          type uint32 {
+            range "0..2147483647";
+          }
+          description
+            "ARP monitoring interval in milliseconds, 0 to disable (kernel default 0).";
+        }
+
+        leaf arp-validate {
+          type enumeration {
+            enum none;
+            enum active;
+            enum backup;
+            enum all;
+            enum filter;
+            enum filter-active;
+            enum filter-backup;
+          }
+          description
+            "Which ARP replies are validated (kernel default none).";
+        }
+
+        leaf arp-all-targets {
+          type enumeration {
+            enum any;
+            enum all;
+          }
+          description
+            "Whether any or all ARP targets must answer for a slave to be up (kernel default any).";
+        }
+
+        leaf primary-reselect {
+          type enumeration {
+            enum always;
+            enum better;
+            enum failure;
+          }
+          description
+            "When the primary slave is made active again (kernel default always).";
+        }
+
+        leaf fail-over-mac {
+          type enumeration {
+            enum none;
+            enum active;
+            enum follow;
+          }
+          description
+            "MAC address handling on failover in active-backup mode (kernel default none).";
+        }
+
+        leaf xmit-hash-policy {
+          type enumeration {
+            enum layer2;
+            enum layer3-4;
+            enum layer2-3;
+            enum encap2-3;
+            enum encap3-4;
+            enum vlan-srcmac;
+          }
+          description
+            "Transmit hash policy for balance-xor, 802.3ad and balance-tlb (kernel default layer2).";
+        }
+
+        leaf resend-igmp {
+          type uint32 {
+            range "0..255";
+          }
+          description
+            "Number of IGMP reports sent after a failover (kernel default 1).";
+        }
+
+        leaf num-grat-arp {
+          type uint8 {
+            range "0..255";
+          }
+          description
+            "Number of gratuitous ARPs / unsolicited NAs sent after a failover (kernel default 1).";
+        }
+
+        leaf all-slaves-active {
+          type boolean;
+          description
+            "Deliver duplicate frames received on inactive slaves (kernel default off).";
+        }
+
+        leaf min-links {
+          type uint32 {
+            range "0..4294967295";
+          }
+          description
+            "Minimum number of slaves with link up for the bond to be up (kernel default 0).";
+        }
+
+        leaf lp-interval {
+          type uint32 {
+            range "1..2147483647";
+          }
+          description
+            "Seconds between learning packets sent on each slave in balance-tlb and balance-alb (kernel default 1).";
+        }
+
+        leaf packets-per-slave {
+          type uint32 {
+            range "0..65535";
+          }
+          description
+            "Packets sent on a slave before moving to the next one in balance-rr (kernel default 1).";
+        }
+
+        leaf lacp-rate {
+          type enumeration {
+            enum slow;
+            enum fast;
+          }
+          description
+            "LACPDU rate requested from the partner in 802.3ad (kernel default slow).";
+        }
+
+        leaf lacp-active {
+          type boolean;
+          description
+            "Send LACPDUs periodically in 802.3ad (kernel default on).";
+        }
+
+        leaf ad-select {
+          type enumeration {
+            enum stable;
+            enum bandwidth;
+            enum count;
+          }
+          description
+            "Aggregator selection policy in 802.3ad (kernel default stable).";
+        }
+
+        leaf ad-actor-sys-prio {
+          type uint16 {
+            range "1..65535";
+          }
+          description
+            "LACP system priority in 802.3ad (kernel default 65535).";
+        }
+
+        leaf ad-user-port-key {
+          type uint16 {
+            range "0..1023";
+          }
+          description
+            "Upper 10 bits of the LACP port key in 802.3ad (kernel default 0).";
+        }
+
+        leaf ad-actor-system {
+          type yang:mac-address;
+          description
+            "LACP system MAC address in 802.3ad.";
+        }
+
+        leaf tlb-dynamic-lb {
+          type boolean;
+          description
+            "Dynamic load balancing in balance-tlb (kernel default on).";
+        }
+
+        leaf peer-notif-delay {
+          type uint32 {
+            range "0..300000";
+          }
+          description
+            "Delay in milliseconds between a failover and the peer notifications (kernel default 0).";
+        }
+
+        leaf missed-max {
+          type uint8 {
+            range "1..255";
+          }
+          description
+            "Number of missed ARP monitor intervals before a slave is considered down (kernel default 2).";
+        }
+
+        leaf coupled-control {
+          type boolean;
+          description
+            "Coupled mux control state machine in 802.3ad (kernel default on).";
+        }
+
+        leaf primary {
+          type string {
+            length "1..15";
+          }
+          description
+            "Name of the primary slave: preferred active slave in
+             active-backup, balance-tlb and balance-alb. Applied once that
+             interface exists.";
+        }
+
+        leaf-list arp-ip-target {
+          type inet:ipv4-address;
+          max-elements 16;
+          description
+            "IPv4 addresses probed by ARP monitoring (see arp-interval).";
+        }
+
+        leaf-list ns-ip6-target {
+          type inet:ipv6-address;
+          max-elements 16;
+          description
+            "IPv6 addresses probed by NS monitoring (see arp-interval).";
+        }
+      }
+
       container bridge-options {
         description
           "Settings of this interface when it is a Linux bridge. Applied in
@@ -2717,6 +2967,35 @@ module frr-zebra {
               presence "Create a bridge.";
               description
                 "A Linux bridge. Its settings are in bridge-options.";
+            }
+          }
+
+          case bond {
+            container bond {
+              presence "Create a bond.";
+              description
+                "A Linux bonding device. The mode is part of the definition
+                 because the kernel allows changing it only while the bond is
+                 down and has no slaves; a different mode creates a new bond.
+                 The other settings are in bond-options.";
+
+              leaf mode {
+                type enumeration {
+                  enum balance-rr;
+                  enum active-backup;
+                  enum balance-xor;
+                  enum broadcast;
+                  enum "802-3ad" {
+                    description
+                      "IEEE 802.3ad dynamic link aggregation (LACP).";
+                  }
+                  enum balance-tlb;
+                  enum balance-alb;
+                }
+                description
+                  "Bonding mode (/sys/class/net/BOND/bonding/mode). Without
+                   it the kernel default, balance-rr, is used.";
+              }
             }
           }
 

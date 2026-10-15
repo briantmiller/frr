@@ -434,6 +434,53 @@ const struct frr_yang_module_info frr_zebra_info = {
 				.destroy = lib_interface_zebra_mtu_destroy,
 			}
 		},
+/* One entry per bond setting, from the table in zebra_link_opts.h */
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/" name, \
+			.cbs = {                                                                   \
+				.modify = lib_interface_zebra_bond_options_modify,                 \
+				.destroy = lib_interface_zebra_bond_options_destroy,               \
+			}                                                                          \
+		},
+		ZEBRA_BOND_OPT_LIST(X)
+#undef X
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/primary",
+			.cbs = {
+				.modify = lib_interface_zebra_bond_options_primary_modify,
+				.destroy = lib_interface_zebra_bond_options_primary_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/arp-ip-target",
+			.cbs = {
+				.create = lib_interface_zebra_bond_options_arp_ip_target_create,
+				.destroy = lib_interface_zebra_bond_options_arp_ip_target_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/ns-ip6-target",
+			.cbs = {
+				.create = lib_interface_zebra_bond_options_ns_ip6_target_create,
+				.destroy = lib_interface_zebra_bond_options_ns_ip6_target_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bond",
+			.cbs = {
+				.create = lib_interface_zebra_link_type_create,
+				.destroy = lib_interface_zebra_link_type_destroy,
+				.apply_finish = lib_interface_zebra_link_type_apply_finish,
+			}
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bond/mode",
+			.cbs = {
+				.modify = lib_interface_zebra_link_type_param_modify,
+				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
+		},
 /* One entry per setting, from the table in zebra_link_opts.h */
 #define X(sym, name, ...)                                                                          \
 		{                                                                                  \

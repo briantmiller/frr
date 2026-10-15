@@ -497,7 +497,7 @@ static void lib_interface_zebra_link_detect_cli_write(
  */
 static void link_type_enqueue_destroy_others(struct vty *vty, const char *keep)
 {
-	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy", "vxlan", "bareudp" };
+	static const char *const kinds[] = { "bridge", "veth", "vlan", "gre", "dummy", "vxlan", "bareudp", "bond" };
 	char xpath[XPATH_MAXLEN];
 	size_t i;
 
@@ -748,13 +748,44 @@ DEFPY_YANG (link_type_bareudp,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG (link_type_bond,
+	link_type_bond_cmd,
+	"link-type bond [mode <balance-rr|active-backup|balance-xor|broadcast|802-3ad|balance-tlb|balance-alb>$mode]",
+	"Create this interface in the kernel\n"
+	"Linux bond\n"
+	"Bonding mode (the settings are in 'bond ...' commands)\n"
+	"Round-robin\n"
+	"Active-backup\n"
+	"XOR hash\n"
+	"Broadcast on all slaves\n"
+	"IEEE 802.3ad dynamic link aggregation (LACP)\n"
+	"Adaptive transmit load balancing\n"
+	"Adaptive load balancing\n")
+{
+	link_type_enqueue_destroy_others(vty, "bond");
+	link_type_enqueue_container(vty, "bond");
+	/* The command is the full definition: a mode not given is removed */
+	link_type_enqueue_leaf(vty, "bond", "mode", mode);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG (no_link_type,
 	no_link_type_cmd,
-	"no link-type [<bridge|dummy|bareudp [dstport (1-65535) ethertype <ipv4|ipv6|mpls-unicast|mpls-multicast> [{srcport-min (1-65535)|multiproto}]]|vxlan [vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
+	"no link-type [<bridge|dummy|bond [mode <balance-rr|active-backup|balance-xor|broadcast|802-3ad|balance-tlb|balance-alb>]|bareudp [dstport (1-65535) ethertype <ipv4|ipv6|mpls-unicast|mpls-multicast> [{srcport-min (1-65535)|multiproto}]]|vxlan [vni (1-16777215) [{local A.B.C.D|remote A.B.C.D|dev IFNAME|dstport (1-65535)|ttl (1-255)|tos (0-255)|learning <on|off>}]]|veth peer IFNAME|vlan parent IFNAME id (1-4094) [encapsulation <dot1q|q-in-q>]|gre [local A.B.C.D] [dev IFNAME] remote <A.B.C.D|any> [key (0-4294967295)] [ttl (1-255)] [tos (0-255)]>]",
 	NO_STR
 	"Do not create this interface in the kernel\n"
 	"Linux bridge\n"
 	"Dummy interface\n"
+	"Linux bond\n"
+	"Bonding mode\n"
+	"Round-robin\n"
+	"Active-backup\n"
+	"XOR hash\n"
+	"Broadcast on all slaves\n"
+	"IEEE 802.3ad dynamic link aggregation (LACP)\n"
+	"Adaptive transmit load balancing\n"
+	"Adaptive load balancing\n"
 	"Bare UDP tunnel\n"
 	"UDP destination port\n"
 	"Port\n"
@@ -821,6 +852,16 @@ static void lib_interface_zebra_link_type_bridge_cli_write(struct vty *vty,
 							    bool show_defaults)
 {
 	vty_out(vty, " link-type bridge\n");
+}
+
+static void lib_interface_zebra_link_type_bond_cli_write(struct vty *vty,
+							 const struct lyd_node *dnode,
+							 bool show_defaults)
+{
+	vty_out(vty, " link-type bond");
+	if (yang_dnode_exists(dnode, "mode"))
+		vty_out(vty, " mode %s", yang_dnode_get_string(dnode, "mode"));
+	vty_out(vty, "\n");
 }
 
 static void lib_interface_zebra_link_type_dummy_cli_write(struct vty *vty,
@@ -1004,6 +1045,65 @@ static int link_opt_cli(struct vty *vty, int argc, struct cmd_token *argv[],
 }
 
 #define X(sym, name, kind, w, mn, mx, def, attr, enums, vs, vh, hlp)                               \
+	DEFUN_YANG(bond_opt_##sym, bond_opt_##sym##_cmd, "[no] bond " name " ![" vs "]",          \
+		   NO_STR "Setting of this interface as a bond\n" hlp "\n" vh)                    \
+	{                                                                                          \
+		return link_opt_cli(vty, argc, argv, ZLO_SCOPE_BOND, "bond-options", name);        \
+	}
+ZEBRA_BOND_OPT_LIST(X)
+#undef X
+
+DEFPY_YANG (bond_primary,
+	bond_primary_cmd,
+	"[no] bond primary ![IFNAME$primary]",
+	NO_STR
+	"Setting of this interface as a bond\n"
+	"Primary slave: the preferred active slave\n"
+	"Name of the slave interface\n")
+{
+	if (no)
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/bond-options/primary", NB_OP_DESTROY, NULL);
+	else
+		nb_cli_enqueue_change(vty, "./frr-zebra:zebra/bond-options/primary", NB_OP_MODIFY, primary);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (bond_arp_ip_target,
+	bond_arp_ip_target_cmd,
+	"[no] bond arp-ip-target A.B.C.D$target",
+	NO_STR
+	"Setting of this interface as a bond\n"
+	"IPv4 address probed by ARP monitoring (up to 16)\n"
+	"IPv4 address\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "./frr-zebra:zebra/bond-options/arp-ip-target[.='%s']",
+		 target_str);
+	nb_cli_enqueue_change(vty, xpath, no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG (bond_ns_ip6_target,
+	bond_ns_ip6_target_cmd,
+	"[no] bond ns-ip6-target X:X::X:X$target",
+	NO_STR
+	"Setting of this interface as a bond\n"
+	"IPv6 address probed by NS monitoring (up to 16)\n"
+	"IPv6 address\n")
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "./frr-zebra:zebra/bond-options/ns-ip6-target[.='%s']",
+		 target_str);
+	nb_cli_enqueue_change(vty, xpath, no ? NB_OP_DESTROY : NB_OP_CREATE, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+#define X(sym, name, kind, w, mn, mx, def, attr, enums, vs, vh, hlp)                               \
 	DEFUN_YANG(bridge_opt_##sym, bridge_opt_##sym##_cmd, "[no] bridge " name " ![" vs "]",    \
 		   NO_STR "Setting of this interface as a bridge\n" hlp "\n" vh)                   \
 	{                                                                                          \
@@ -1038,6 +1138,34 @@ static void link_opt_cli_write(struct vty *vty, const struct lyd_node *dnode,
 
 	vty_out(vty, " %s %s %s\n", keyword, t[idx].name,
 		zebra_link_opt_format(&t[idx], val, buf, sizeof(buf)));
+}
+
+static void lib_interface_zebra_bond_options_cli_write(struct vty *vty,
+						       const struct lyd_node *dnode,
+						       bool show_defaults)
+{
+	link_opt_cli_write(vty, dnode, ZLO_SCOPE_BOND, "bond");
+}
+
+static void lib_interface_zebra_bond_primary_cli_write(struct vty *vty,
+						       const struct lyd_node *dnode,
+						       bool show_defaults)
+{
+	vty_out(vty, " bond primary %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+static void lib_interface_zebra_bond_arp_ip_target_cli_write(struct vty *vty,
+							      const struct lyd_node *dnode,
+							      bool show_defaults)
+{
+	vty_out(vty, " bond arp-ip-target %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+static void lib_interface_zebra_bond_ns_ip6_target_cli_write(struct vty *vty,
+							      const struct lyd_node *dnode,
+							      bool show_defaults)
+{
+	vty_out(vty, " bond ns-ip6-target %s\n", yang_dnode_get_string(dnode, NULL));
 }
 
 static void lib_interface_zebra_bridge_options_cli_write(struct vty *vty,
@@ -3817,6 +3945,29 @@ const struct frr_yang_module_info frr_zebra_cli_info = {
 		},
 #define X(sym, name, ...)                                                                          \
 		{                                                                                  \
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/" name, \
+			.cbs.cli_show = lib_interface_zebra_bond_options_cli_write,                \
+		},
+		ZEBRA_BOND_OPT_LIST(X)
+#undef X
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/primary",
+			.cbs.cli_show = lib_interface_zebra_bond_primary_cli_write,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/arp-ip-target",
+			.cbs.cli_show = lib_interface_zebra_bond_arp_ip_target_cli_write,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bond-options/ns-ip6-target",
+			.cbs.cli_show = lib_interface_zebra_bond_ns_ip6_target_cli_write,
+		},
+		{
+			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/link-type/bond",
+			.cbs.cli_show = lib_interface_zebra_link_type_bond_cli_write,
+		},
+#define X(sym, name, ...)                                                                          \
+		{                                                                                  \
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/bridge-options/" name, \
 			.cbs.cli_show = lib_interface_zebra_bridge_options_cli_write,              \
 		},
@@ -4103,6 +4254,13 @@ void zebra_cli_init(void)
 	install_element(INTERFACE_NODE, &link_type_dummy_cmd);
 	install_element(INTERFACE_NODE, &link_type_vxlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_bareudp_cmd);
+	install_element(INTERFACE_NODE, &link_type_bond_cmd);
+	install_element(INTERFACE_NODE, &bond_primary_cmd);
+	install_element(INTERFACE_NODE, &bond_arp_ip_target_cmd);
+	install_element(INTERFACE_NODE, &bond_ns_ip6_target_cmd);
+#define X(sym, ...) install_element(INTERFACE_NODE, &bond_opt_##sym##_cmd);
+	ZEBRA_BOND_OPT_LIST(X)
+#undef X
 	install_element(INTERFACE_NODE, &link_type_veth_cmd);
 	install_element(INTERFACE_NODE, &link_type_vlan_cmd);
 	install_element(INTERFACE_NODE, &link_type_gre_cmd);

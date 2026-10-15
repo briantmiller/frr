@@ -13,6 +13,26 @@ static const char *const zlo_enum_br_multicast_router[] = { "disabled", "auto", 
 static const char *const zlo_enum_port_state[] = { "disabled", "listening", "learning", "forwarding", "blocking", NULL };
 static const char *const zlo_enum_port_multicast_router[] = { "disabled", "learning", "permanent", "temp", NULL };
 
+static const char *const zlo_enum_bond_arp_validate[] = { "none", "active", "backup", "all", "filter", "filter-active", "filter-backup", NULL };
+static const char *const zlo_enum_bond_arp_all_targets[] = { "any", "all", NULL };
+static const char *const zlo_enum_bond_primary_reselect[] = { "always", "better", "failure", NULL };
+static const char *const zlo_enum_bond_fail_over_mac[] = { "none", "active", "follow", NULL };
+static const char *const zlo_enum_bond_xmit_hash_policy[] = { "layer2", "layer3-4", "layer2-3", "encap2-3", "encap3-4", "vlan-srcmac", NULL };
+static const char *const zlo_enum_bond_lacp_rate[] = { "slow", "fast", NULL };
+static const char *const zlo_enum_bond_ad_select[] = { "stable", "bandwidth", "count", NULL };
+
+const char *const zebra_link_bond_mode_names[] = { "balance-rr", "active-backup", "balance-xor", "broadcast", "802-3ad", "balance-tlb", "balance-alb", NULL };
+
+int zebra_link_bond_mode_find(const char *name)
+{
+	int i;
+
+	for (i = 0; zebra_link_bond_mode_names[i]; i++)
+		if (!strcmp(zebra_link_bond_mode_names[i], name))
+			return i;
+	return -1;
+}
+
 static const struct zebra_link_opt_def bridge_opts[] = {
 #define X(sym, name, kind, width, min, max, def, attr, enums, vs, vh, hlp) \
 	{ name, kind, width, min, max, def, attr, enums },
@@ -27,12 +47,23 @@ static const struct zebra_link_opt_def brport_opts[] = {
 #undef X
 };
 
+static const struct zebra_link_opt_def bond_opts[] = {
+#define X(sym, name, kind, width, min, max, def, attr, enums, vs, vh, hlp) \
+	{ name, kind, width, min, max, def, attr, enums },
+	ZEBRA_BOND_OPT_LIST(X)
+#undef X
+};
+
 const struct zebra_link_opt_def *zebra_link_opt_table(enum zebra_link_opt_scope scope,
 						      unsigned int *count)
 {
 	if (scope == ZLO_SCOPE_BRIDGE) {
 		*count = array_size(bridge_opts);
 		return bridge_opts;
+	}
+	if (scope == ZLO_SCOPE_BOND) {
+		*count = array_size(bond_opts);
+		return bond_opts;
 	}
 	*count = array_size(brport_opts);
 	return brport_opts;
