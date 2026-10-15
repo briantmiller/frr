@@ -19,8 +19,13 @@ DESCRIPTION
 the running configuration is read with ``vtysh -c "show running-config"``.
 
 **to-conf** converts a JSON document to FRR configuration commands, which can
-be applied with ``vtysh -f``.  Statements with ``"no": true`` produce the
-negated command.
+be applied with ``vtysh -f``.
+
+The JSON follows the command line: every word of a command is one level of
+nesting and the last word is the value, and a command that enters a sub-mode
+holds the commands of that mode, e.g.
+``{"config": {"interface": {"eth0": {"ip": {"address": "192.0.2.1/24"}}}}}``.
+A ``"no"`` key negates the commands under it.
 
 The commands it knows are read from frr.xref, the command catalog produced by
 the FRR build.  frr.xref must come from the same build as |PROGRAM|.
@@ -40,10 +45,6 @@ OPTIONS
 
    Passed to vtysh as ``-N NAME``.
 
-.. option:: -l, --lines
-
-   to-json: emit plain configuration lines instead of cmd/params objects.
-
 .. option:: -c, --compact
 
    to-json: compact JSON output.
@@ -54,8 +55,8 @@ OPTIONS
 
 .. option:: --self-test[=N]
 
-   Round-trip N random valid lines of every configuration command through
-   JSON and report the result.
+   Round-trip N random valid lines of every configuration command, inside
+   the commands that lead to its mode, through JSON and report the result.
 
 .. option:: -h, --help
 

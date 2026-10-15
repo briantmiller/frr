@@ -114,6 +114,9 @@ override_dh_auto_install:
 	find debian/tmp -name '*.la' -o -name '*.a' -o -name 'lib*.so' | xargs rm -f
 	rm -rf debian/tmp/usr/include
 	-rm debian/tmp/usr/lib/frr/ssd
+# frr-confjson's man page goes to its own package (frr-confjson.manpages);
+# frr.install takes all of usr/share/man/
+	-rm -f debian/tmp/usr/share/man/man1/frr-confjson.1
 
 override_dh_auto_build:
 	dh_auto_build -- $(MAKE_SILENT)
