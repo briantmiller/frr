@@ -729,6 +729,7 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.cbs = {
 				.modify = lib_interface_zebra_link_type_param_modify,
 				.destroy = lib_interface_zebra_link_type_param_destroy,
+			}
 		},
 		{
 			.xpath = "/frr-interface:lib/interface/frr-zebra:zebra/detected-bandwidth-aggregate",
