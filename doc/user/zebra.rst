@@ -426,6 +426,672 @@ outgoing interface
 
    Resolve PBR nexthop via ip neigh tracking
 
+.. _zebra-qos:
+
+Class Based QoS
+===============
+
+*Zebra* can shape traffic leaving an interface with a class based queueing
+configuration modelled after Cisco class-based weighted fair queueing (CBWFQ).
+On Linux the configuration is programmed as an ``htb`` queueing discipline
+(or ``hfsc``, see :ref:`zebra-qos-hfsc`), one class per policy-map class and
+``flower`` filters for classification. The kernel needs ``sch_htb`` (or
+``sch_hfsc``), ``cls_flower`` and ``act_gact`` (filter chains with ``goto
+chain`` actions are used).
+
+Traffic is classified with *class-maps*, the classes are given bandwidth
+guarantees, ceilings, priorities and queue limits in a *policy-map*, and the
+policy-map is attached to the output side of an interface:
+
+.. code-block:: frr
+
+   access-list VOICE seq 5 deny 10.1.1.0/24
+   access-list VOICE seq 10 permit 10.0.0.0/8
+   access-list WEB seq 5 permit ip any host 192.0.2.80
+   !
+   class-map match-any VOICE
+    match access-group name VOICE
+    match ip dscp ef cs5
+   exit
+   !
+   class-map match-all WEB-AF
+    match access-group name WEB
+    match ip dscp af11 af12
+   exit
+   !
+   class-map match-all BULK
+    match ip dscp cs1
+   exit
+   !
+   policy-map CHILD
+    class BULK
+     bandwidth percent 30
+     queue-limit 200 packets
+    exit
+    class class-default
+     bandwidth percent 70
+    exit
+   exit
+   !
+   policy-map PARENT
+    class VOICE
+     bandwidth 5mbps
+     max-bandwidth percent 50
+     priority 0
+     queue-limit 64 packets
+    exit
+    class WEB-AF
+     bandwidth percent 20
+     priority 2
+     service-policy CHILD
+    exit
+    class class-default
+     bandwidth percent 10
+     max-bandwidth 15mbps
+    exit
+   exit
+   !
+   interface eth0
+    qos bandwidth 20mbps
+    service-policy output PARENT
+   exit
+
+Rates are given in bits per second and accept the ``k``, ``m`` and ``g`` SI
+suffixes, optionally followed by ``bps`` or ``bit`` (``512k``, ``20mbps``,
+``1.5g``).
+
+Class-maps
+----------
+
+.. clicmd:: class-map [match-any|match-all] NAME
+
+   Create a class-map and enter its configuration node. With ``match-all``
+   (the default) a packet must satisfy every match statement, with
+   ``match-any`` at least one of them. ``class-default`` is reserved.
+
+.. clicmd:: match access-group name ACCESSLIST
+
+   Match packets permitted by the access-list of that name. An extended
+   access-list (:clicmd:`ip access-list extended NAME`) of that name takes
+   precedence; otherwise the IPv4 and/or IPv6 access-lists of that name are
+   used. An IPv4 and an IPv6 access-list may share the name, the class then
+   matches both families. Access-lists are evaluated with first-match
+   semantics, so ``deny`` entries exclude packets. A ``match-all`` class-map
+   can reference at most one access-list. A class referencing an access-list
+   that does not exist matches nothing. Changing the access-list updates
+   every interface using it.
+
+   Standard entries match the *source* address of the packet, like a Cisco
+   standard access-list:
+
+   .. code-block:: frr
+
+      access-list STD permit 10.0.0.0/8
+      access-list STD permit 172.16.0.0 0.0.255.255
+      ipv6 access-list STD permit 2001:db8::/32
+
+   Extended entries match the source and/or the destination address. Each
+   side is ``any``, ``host ADDRESS`` or ``ADDRESS WILDCARD``; wildcard bits
+   that are set are ignored and may be non-contiguous:
+
+   .. code-block:: frr
+
+      ! from 172.16.0.0/24 to 192.0.2.84 - 192.0.2.87
+      access-list EXT seq 10 permit ip 172.16.0.0 0.0.0.255 192.0.2.84 0.0.0.3
+      ! anything towards one server, but not from one client
+      access-list EXT seq 5 deny ip host 172.16.0.1 host 192.0.2.90
+      access-list EXT seq 15 permit ip any host 192.0.2.90
+      ! host .1 of any 172.16.X.0/24
+      access-list EXT seq 20 permit ip 172.16.0.1 0.0.255.0 any
+      ! IPv6: from one host to 2001:db8:2::/64
+      ipv6 access-list EXT seq 5 permit ipv6 host 2001:db8:1::1 2001:db8:2:: ::ffff:ffff:ffff:ffff
+      !
+      class-map match-any EXT
+       match access-group name EXT
+      exit
+
+   Only addresses are matched by these access-lists. To match protocols,
+   ports, TCP flags, VLAN tags, MPLS labels and other header fields, use an
+   extended access-list.
+
+.. clicmd:: match ip dscp DSCP...
+
+   Match packets (IPv4 and IPv6) carrying any of the given DSCP values. Values
+   are numbers (0-63) or names (``default``, ``cs0``-``cs7``, ``af11``-``af43``,
+   ``ef``). All DSCP values of a class-map form a single match statement: in a
+   ``match-all`` class-map a packet must be permitted by the access-list *and*
+   carry one of the DSCP values.
+
+.. clicmd:: match any
+
+   Match every packet.
+
+Extended access-lists
+---------------------
+
+Extended access-lists follow the syntax of Cisco IOS ``ip access-list
+extended`` and extend it with every match key of the Linux tc flower
+classifier (see ``man tc-flower``), from Ethernet addresses and VLAN tags to
+MPLS label stacks, ARP fields, tunnel metadata and connection tracking
+state. They are used by class-maps (``match access-group name NAME``) and
+for interface access control (:clicmd:`ip access-group NAME <in|out>`), each
+entry is installed as one or more tc flower filters.
+
+.. clicmd:: ip access-list extended NAME
+
+   Create the access-list and enter its configuration node.
+
+.. clicmd:: [SEQ] <permit|deny> PROTOCOL ...
+
+   Add an entry. Without a sequence number the entry is appended with the
+   highest sequence number plus 10. Entries are evaluated in sequence order
+   and the first matching entry decides: ``permit`` selects the packet for
+   the class, ``deny`` excludes it (the evaluation continues with the next
+   match statement of the class-map). The entry is checked when it is
+   entered and stored in a canonical form (port and protocol names become
+   numbers, options are put in a fixed order), which ``show running-config``
+   displays.
+
+.. clicmd:: [SEQ] remark LINE
+
+   Add a comment.
+
+.. clicmd:: no SEQ
+
+.. clicmd:: no <permit|deny|remark> LINE
+
+   Remove an entry by sequence number or by its text.
+
+An entry is ``permit`` or ``deny`` followed by::
+
+   PROTOCOL SOURCE [PORTS] DESTINATION [PORTS] [ICMP-MESSAGE] [OPTION...]
+   arp|rarp|mpls|mpls-multicast|pppoe|cfm [OPTION...]
+   ethertype <any|0xHHHH|NAME> [OPTION...]
+
+``PROTOCOL`` is ``ip`` (any IPv4 packet), ``ipv6``, an IP protocol name
+(``tcp``, ``udp``, ``sctp``, ``icmp``, ``icmpv6``, ``igmp``, ``gre``, ``esp``,
+``ahp``, ``ospf``, ``pim``, ``l2tp``...) or number. The address family of an
+IP protocol follows from the addresses; with ``any`` on both sides it is
+IPv4, ``::/0`` selects IPv6 (``tcp ::/0 any eq 80``). ``SOURCE`` and ``DESTINATION`` are
+``any``, ``host ADDRESS``, ``PREFIX/LEN`` or ``ADDRESS WILDCARD`` (bits set in
+the wildcard are ignored and may be non-contiguous). For ``tcp``, ``udp`` and
+``sctp`` each address may be followed by ``eq PORT``, ``neq PORT``, ``lt
+PORT``, ``gt PORT`` or ``range PORT PORT``; ports are numbers or the usual
+names (``www``, ``domain``, ``bgp``...). For ``icmp`` and ``icmpv6`` the
+destination may be followed by a message name (``echo``, ``echo-reply``,
+``unreachable``, ``packet-too-big``...) or a type and optional code.
+
+The non IP protocols select the ethertype: ``arp``, ``rarp``, ``mpls``
+(unicast), ``mpls-multicast``, ``pppoe`` (session stage), ``cfm`` (802.1ag)
+or any other ``ethertype``; ``ethertype any`` matches every frame.
+
+Options, in any order (masked values are ``VALUE/MASK``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 30 35
+
+   * - Option
+     - tc flower key
+     - Notes
+   * - ``dscp DSCP``, ``precedence PREC``, ``ecn ECN``, ``ip-tos TOS[/MASK]``
+     - ``ip_tos``
+     - IP only; may be combined when they do not overlap
+   * - ``ttl OP VALUE``, ``hop-limit OP VALUE``
+     - ``ip_ttl``
+     - ``eq``, ``neq``, ``lt``, ``gt``, ``range``
+   * - ``fragments``, ``ip-flags [no]frag/[no]firstfrag``
+     - ``ip_flags``
+     - ``fragments``: non-initial fragments, like Cisco
+   * - ``established``, ``syn``, ``ack``, ``fin``, ``rst``, ``psh``, ``urg``,
+       ``ece``, ``cwr``, ``ns``, ``match-all +FLAG -FLAG...``,
+       ``tcp-flags VALUE/MASK``
+     - ``tcp_flags``
+     - ``established``: ACK or RST set
+   * - ``icmp-type TYPE[/MASK]``, ``icmp-code CODE[/MASK]``
+     - ``type``, ``code``
+     -
+   * - ``spi SPI``
+     - ``spi``
+     - ``esp`` or ``ahp``
+   * - ``l2tpv3-sid SID``
+     - ``l2tpv3_sid``
+     - ``l2tp``
+   * - ``src-mac MAC[/MASK]``, ``dst-mac MAC[/MASK]``
+     - ``src_mac``, ``dst_mac``
+     -
+   * - ``vlan-id ID``, ``vlan-prio PRIO``, ``vlan-tpid 802.1q|802.1ad``
+     - ``vlan_id``, ``vlan_prio``, ``vlan_ethtype``
+     - the outer tag; the filter protocol becomes the TPID
+   * - ``cvlan-id ID``, ``cvlan-prio PRIO``
+     - ``cvlan_id``, ``cvlan_prio``, ``cvlan_ethtype``
+     - the inner tag of 802.1ad (QinQ) frames
+   * - ``num-of-vlans N``
+     - ``num_of_vlans``
+     -
+   * - ``mpls-label``, ``mpls-tc``, ``mpls-bos``, ``mpls-ttl``
+     - ``mpls_label``, ``mpls_tc``, ``mpls_bos``, ``mpls_ttl``
+     - the top label stack entry
+   * - ``lse depth N [label L] [tc T] [bos B] [ttl T]``
+     - ``mpls lse``
+     - any label stack entry, may be repeated
+   * - ``pppoe-sid SID``, ``ppp-proto PROTO``
+     - ``pppoe_sid``, ``ppp_proto``
+     - ``pppoe``
+   * - ``arp-op request|reply|OP``, ``arp-sip PREFIX``, ``arp-tip PREFIX``,
+       ``arp-sha MAC[/MASK]``, ``arp-tha MAC[/MASK]``
+     - ``arp_op``, ``arp_sip``, ``arp_tip``, ``arp_sha``, ``arp_tha``
+     - ``arp`` and ``rarp``
+   * - ``cfm-mdl LEVEL``, ``cfm-op OPCODE``
+     - ``cfm mdl``, ``cfm op``
+     - ``cfm``
+   * - ``enc-key-id``, ``enc-src-ip``, ``enc-dst-ip``, ``enc-dst-port``,
+       ``enc-tos``, ``enc-ttl``, ``enc-flags``
+     - ``enc_key_id``, ``enc_src_ip``, ``enc_dst_ip``, ``enc_dst_port``,
+       ``enc_tos``, ``enc_ttl``, ``enc_flags``
+     - tunnel metadata of decapsulated packets
+   * - ``geneve-opts``, ``vxlan-opts``, ``erspan-opts``, ``gtp-opts``,
+       ``pfcp-opts``
+     - same names with ``_``
+     - same syntax as tc, one kind per entry
+   * - ``ct-state +trk+est...``, ``ct-zone``, ``ct-mark``, ``ct-label``
+     - ``ct_state``, ``ct_zone``, ``ct_mark``, ``ct_label``
+     - ``+FLAG`` needs ``+trk``; ``ct-label`` takes 32 hex digits
+   * - ``indev IFNAME``, ``l2-miss 0|1``
+     - ``indev``, ``l2_miss``
+     -
+
+``log``, ``log-input`` and ``time-range`` are not supported.
+
+.. code-block:: frr
+
+   ip access-list extended VOICE
+    10 remark SIP and RTP from the phones, not from the lab
+    20 deny ip 10.9.0.0 0.0.255.255 any
+    30 permit udp 10.1.0.0 0.0.255.255 any range 16384 32767
+    40 permit tcp any any eq 5060 established
+    50 permit ip any any vlan-id 20 vlan-prio 5
+   exit
+   !
+   ip access-list extended L2
+    10 permit arp arp-op request
+    20 permit mpls lse depth 1 label 100 lse depth 2 tc 5
+    30 permit ipv6 2001:db8::/32 any dscp ef hop-limit gt 1
+   exit
+   !
+   class-map match-any VOICE
+    match access-group name VOICE
+   exit
+
+A flower filter matches one value (under a mask) or one range per key, so
+some entries become several filters, shown with the part they add in
+braces by :clicmd:`show class-map interface IFNAME [json]`:
+
+- ``neq``, ``lt`` and ``gt`` on ports become one or two port ranges,
+- ``ttl``/``hop-limit`` other than ``eq`` becomes masked TTL values,
+- ``established`` becomes one filter for ACK and one for RST,
+- in a ``match-all`` class-map with ``match ip dscp``, every ``permit``
+  entry is repeated for each DSCP value. Non IP entries never match then.
+
+An entry needing more than 32 filters prevents the policy from being
+installed; ``show qos interface`` gives the reason.
+
+Interface access control
+------------------------
+
+.. clicmd:: ip access-group NAME <in|out>
+
+   Filter the traffic received (``in``) or sent (``out``) on the interface
+   with the extended access-list ``NAME``. One access-list per direction;
+   configuring another one replaces it.
+
+   The entries are evaluated in sequence order and the first matching entry
+   decides: ``permit`` accepts the packet, which continues to be processed
+   normally (outgoing packets still go through the service-policy), ``deny``
+   drops it. As with a Cisco IPv4 ``ip access-group`` and IPv6
+   ``ipv6 traffic-filter``, the list ends with an implicit deny of the IP
+   families it has entries for:
+
+   - an access-list with IPv4 entries drops the IPv4 packets no entry
+     permits, one with IPv6 entries the IPv6 packets;
+   - traffic of a family the list does not mention, and non IP traffic (ARP,
+     MPLS, ...), is accepted unless an entry denies it. Add
+     ``deny ethertype any`` at the end to drop everything not permitted.
+
+   An access-list that is not configured, or has no permit or deny entries,
+   accepts everything. Changes of the access-list take effect immediately.
+
+   .. code-block:: frr
+
+      ip access-list extended EDGE-IN
+       10 deny ip 10.0.0.0 0.255.255.255 any
+       20 permit tcp any any eq 22
+       30 permit tcp any eq www any established
+       40 permit icmp any any echo
+       50 permit arp
+      exit
+      !
+      ip access-list extended EDGE-OUT
+       10 deny ipv6 2001:db8:bad::/48 any
+       20 permit ipv6 any any
+      exit
+      !
+      interface eth0
+       ip access-group EDGE-IN in
+       ip access-group EDGE-OUT out
+      exit
+
+   EDGE-IN accepts SSH, replies from web servers, pings and ARP, drops
+   other IPv4 and leaves IPv6 alone; EDGE-OUT only filters IPv6.
+
+   The access-lists are installed as tc flower filters with gact ``pass``
+   and ``drop`` actions on the ingress and egress hooks of a ``clsact``
+   qdisc, which zebra creates when needed. The kernel needs ``cls_flower``
+   and ``act_gact``. How zebra keeps the filtering safe:
+
+   - The rules are in chain ``0xbee0001`` or ``0xbee0002``; a filter in
+     chain 0 (preference 1, handle ``0xbeef``) jumps to the active one. A
+     new version of the access-list is written to the other chain, the jump
+     is switched over only once the kernel accepted every filter, and the
+     old chain is emptied only once the kernel confirmed the switch, so
+     packets always see either the complete old or the complete new rules.
+   - If the kernel refuses a filter, or the access-list cannot be turned
+     into filters (e.g. an entry needing more than 32), the previous version
+     stays in force; :clicmd:`show ip access-group [interface IFNAME] [json]`
+     says why and lists the refused version.
+   - When zebra starts, it takes over the filters a previous run left: they
+     stay in force until the configured access-list replaces them. They are
+     removed from interfaces that have no access-group (any more) only 60
+     seconds after startup, when the configuration has arrived. If zebra
+     cannot tell which chain they are in, it keeps them and says so.
+   - When zebra stops, the filters stay in the kernel: the interfaces remain
+     protected. Remove the access-groups first to stop filtering.
+   - If the ``clsact`` qdisc is deleted by someone else, zebra installs the
+     access-groups again. An interface with an ``ingress`` qdisc cannot have
+     access-groups; zebra reports it instead of installing them.
+
+   Zebra takes over the filter hooks of the interface: after the jump of
+   the chain 0 filter the evaluation ends in the access-list's chain (a
+   packet no entry matched is accepted), so filters of other tools at a
+   larger preference on the same hook are not evaluated any more.
+
+.. clicmd:: show ip access-group [interface IFNAME] [json]
+
+   Show the access-groups of all interfaces or of one: the access-list of
+   each direction, whether it is installed (or why not), and its filters in
+   evaluation order with the number of packets and bytes each one matched:
+
+   .. code-block:: frr
+
+      Interface eth0
+        Inbound access-list EDGE-IN: installed
+          clsact ingress hook, chain 0xbee0001, 7 filters, in evaluation order:
+            Seq    Pref Action  Proto   Match                                        Packets    Bytes
+            10     1    deny    ipv4    ip 10.0.0.0 0.255.255.255 any                12         768
+            20     2    permit  ipv4    tcp any any eq 22                            1520       98400
+            30     3    permit  ipv4    tcp any eq 80 any established {tcp-flags 0x10/0x10} 8800 11264000
+            30     4    permit  ipv4    tcp any eq 80 any established {tcp-flags 0x4/0x4} 3 120
+            40     5    permit  ipv4    icmp any any echo                            4          336
+            50     6    permit  arp     arp                                          20         560
+            -      7    deny    ipv4    implicit deny ip                             130        9100
+        Outbound access-list EDGE-OUT: installed
+          ...
+
+   ``missing`` instead of counters means the filter is not in the kernel:
+   the access-list is not enforced. When the kernel refused a version of the
+   access-list, its filters are listed below the active ones, the refused
+   filter marked ``refused``. The ``json`` output has the same information
+   (``installed``, ``state``, ``reason``, ``filters`` with ``packets`` and
+   ``bytes``, and ``refused``).
+
+Policy-maps
+-----------
+
+.. clicmd:: policy-map NAME [hfsc|htb]
+
+   Create a policy-map and enter its configuration node. A policy-map is an
+   HTB policy-map unless created with ``hfsc``, see :ref:`zebra-qos-hfsc`.
+   Without the keyword an existing policy-map keeps its type. The type of a
+   policy-map can only be changed while its classes have no settings of the
+   other type.
+
+.. clicmd:: class NAME
+
+   Add the class-map ``NAME`` (or ``class-default``) to the policy-map and
+   enter the class configuration node. Classes are evaluated in the order
+   they are added. ``class-default`` always comes last and receives all
+   traffic not matched by another class; it is created implicitly (sharing
+   the unallocated bandwidth) when not configured.
+
+.. clicmd:: bandwidth <percent (1-100)|RATE>
+
+   HTB only. Guaranteed rate of the class (HTB ``rate``). A percentage refers to the
+   rate of the parent, i.e. the interface QoS bandwidth for a top level
+   policy or the guaranteed rate of the parent class for a child policy.
+   Classes without a bandwidth equally share whatever the other classes of
+   the same policy-map leave unallocated.
+
+.. clicmd:: max-bandwidth <percent (1-100)|RATE>
+
+   HTB only. Ceiling of the class (HTB ``ceil``), the most it may use when borrowing
+   unused bandwidth. A percentage refers to the interface QoS bandwidth.
+   Defaults to the interface QoS bandwidth.
+
+.. clicmd:: priority (0-7)
+
+   HTB only. HTB priority of the class, 0 is the highest. Classes with a higher
+   priority are offered excess bandwidth first and see lower latency.
+   Classes without a priority use 7.
+
+.. clicmd:: queue-limit (1-4294967295) [packets]
+
+   Queue length of the class, implemented as a ``pfifo`` below the leaf
+   class. Without it the kernel default queue (``txqueuelen``) is used.
+   Ignored for classes with a child service-policy.
+
+.. clicmd:: service-policy NAME
+
+   Apply the policy-map ``NAME`` as a child policy to the traffic of this
+   class (hierarchical QoS). The class becomes an inner class and the
+   classes of the child policy its children. Up to 7 levels are supported,
+   loops are ignored. The child policy-map must be of the same type (HTB or
+   HFSC) as the parent, otherwise the service-policy is not installed and
+   ``show qos interface`` says why.
+
+.. _zebra-qos-hfsc:
+
+HFSC policy-maps
+^^^^^^^^^^^^^^^^
+
+``policy-map NAME hfsc`` creates a policy-map implemented with the
+Hierarchical Fair Service Curve (``hfsc``) queueing discipline. Instead of
+rates and priorities, its classes are given *service curves*, which can
+decouple delay from bandwidth: a class can be guaranteed a low delay
+without being given a large share of the link.
+
+.. code-block:: frr
+
+   policy-map HPARENT hfsc
+    class VOICE
+     rt m1 4mbps d 10ms m2 2mbps
+     ls m2 percent 20
+     queue-limit 64 packets
+    exit
+    class WEB
+     sc m2 percent 40
+     ul m2 percent 75
+     service-policy HCHILD
+    exit
+    class class-default
+     ls m2 percent 30
+    exit
+   exit
+
+.. clicmd:: rt [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Real-time service curve: the class is guaranteed rate ``m1`` for the
+   first ``DELAY`` of a backlog period, ``m2`` afterwards, independent of
+   link-sharing. With ``m1`` above ``m2`` a burst is sent faster than the
+   long term rate, which bounds its delay. Without ``m1`` and ``d`` the
+   curve is linear. ``DELAY`` takes a ``us``, ``ms`` (default) or ``s``
+   suffix. Only leaf classes are scheduled with real-time curves.
+
+.. clicmd:: ls [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Link-share service curve: how the bandwidth not used by real-time
+   traffic is shared between sibling classes, in proportion to their
+   link-share curves.
+
+.. clicmd:: sc [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Sets the real-time and the link-share curve at once. ``rt`` and ``ls``,
+   when configured, take precedence over it.
+
+.. clicmd:: ul [m1 <percent (1-100)|RATE> d DELAY] m2 <percent (1-100)|RATE>
+
+   Upper-limit service curve: the most link-sharing gives the class. It
+   only applies together with a link-share curve.
+
+In HFSC policy-maps all percentages refer to the interface QoS bandwidth.
+A class without a link-share curve (and without ``sc``) is given one with
+an equal share of what its siblings leave of the parent's link-share rate
+when it has no real-time curve, has a child policy or has an upper limit;
+a leaf class with only a real-time curve is not part of link-sharing and
+cannot borrow. The root class has a link-share and an upper-limit curve
+of the interface QoS bandwidth. Rates are limited to 34 Gbit/s by the
+kernel interface.
+
+``bandwidth``, ``max-bandwidth`` and ``priority`` cannot be used in an
+HFSC policy-map, and the service curves cannot be used in an HTB one.
+``queue-limit`` and ``service-policy`` work for both.
+
+When the interface QoS bandwidth or the values of the curves change, the
+HFSC classes are updated in place. Adding or removing a curve of a class
+re-installs the hierarchy, as the kernel cannot remove a curve from an
+existing class.
+
+Interface commands
+------------------
+
+.. clicmd:: qos bandwidth RATE
+
+   Bandwidth available to the output service-policy, used as the rate and
+   ceiling of the HTB root class and as the reference for percentages. When
+   not configured, the interface ``bandwidth`` or the link speed is used.
+
+.. clicmd:: service-policy [output] NAME
+
+   Apply the policy-map ``NAME`` to traffic leaving the interface.
+
+When a policy-map, class-map or access-list (standard or extended) used by
+an interface changes, the HTB qdisc of the interface is deleted and installed
+again. When only rates, ceilings or priorities change, e.g. after ``qos
+bandwidth`` was modified, the existing HTB classes are updated in place
+without disturbing traffic.
+
+.. clicmd:: show qos interface [IFNAME] [json]
+
+   Show the QoS bandwidth, service-policy and the classes installed on the
+   interface (rate, ceiling and priority for HTB; the ``rt``, ``ls`` and
+   ``ul`` curves as ``m2`` or ``m1/d/m2`` for HFSC), followed by the
+   statistics of every class read from the kernel. A warning is printed
+   when classes zebra installed are missing from the kernel, e.g. because
+   the kernel lacks ``sch_hfsc``. Statistics columns:
+
+   ``Current`` / ``Pps``
+      Current rate of the class. Zebra creates its classes with a kernel
+      rate estimator (1 second interval, averaged over about 4 seconds), so
+      the value follows changes in the traffic with a few seconds of delay.
+
+   ``%Rate``
+      Current rate as a percentage of the guaranteed rate (``bandwidth``;
+      for HFSC the real-time ``m2``, else the link-share ``m2``).
+      Above 100% the class is borrowing bandwidth other classes do not use.
+
+   ``%Ceil``
+      Current rate as a percentage of the ceiling (``max-bandwidth``; for
+      HFSC the upper-limit ``m2``, else the interface QoS bandwidth). A
+      class close to 100% is being shaped.
+
+   ``Packets`` / ``Bytes`` / ``Drops`` / ``Backlog``
+      Counters since the classes were installed, and the bytes and packets
+      currently queued in the class.
+
+   .. code-block:: frr
+
+      Class      Current      Pps       %Rate  %Ceil  Packets      Bytes          Drops     Backlog     Name
+      beef:1     10.73Mbps    930       54%    54%    6558         9455236        0         0b/0p       PARENT
+      beef:2     0bps         0         0%     0%     0            0              0         0b/0p       PARENT/VOICE
+      beef:7     10.73Mbps    930       537%   72%    6558         9455236        0         102424b/72p PARENT/class-default
+
+   Counters restart from zero when the hierarchy is re-installed (policy-map,
+   class-map or access-list changes), but not when only rates change. The
+   ``json`` output carries the same information per class (``currentRate``,
+   ``currentPps``, ``rateUtilization``, ``ceilUtilization``, ``bytes``,
+   ``packets``, ``drops``, ``overlimits``, ``backlogBytes``,
+   ``backlogPackets``).
+
+   Zebra owned qdiscs use the handle ``beef:``, so the kernel state can also
+   be inspected with ``tc -s class show dev IFNAME`` and
+   ``tc filter show dev IFNAME``.
+
+.. clicmd:: show class-map interface IFNAME [json]
+
+   Show, for every class of the service-policy applied to the interface
+   (including the classes of child policies and the ``class-default``
+   classes), the class-map and its match type, the HTB class and its
+   statistics, and the tc flower filters generated for the class-map, in the
+   order the kernel evaluates them:
+
+   .. code-block:: frr
+
+      Interface r1-eth0, service-policy output PARENT
+
+        Class-map VOICE (match-any)
+          Policy-map PARENT, HTB class beef:2, parent beef:1
+          Class: 1250 packets, 312500 bytes, 0 drops, 0 overlimits, current 1.20Mbps
+          Filters attached to beef:, in evaluation order:
+            Chain Pref Proto   Match                Action        Packets    Bytes        Origin
+            0     1    ipv4    src 10.1.1.0/24      goto chain 1  15         3600         access-list VOICE seq 5 deny
+            0     2    ipv4    src 10.0.0.0/8       classify      1210       302500       access-list VOICE seq 10 permit
+            0     3    ipv6    src 2001:db8::/32    classify      0          0            ipv6 access-list VOICE seq 5 permit
+            0     4    all     any                  goto chain 1  40         10000        no match: next statement
+            1     1    ipv4    dscp ef              classify      40         10000        match ip dscp ef
+            1     2    ipv6    dscp ef              classify      0          0            match ip dscp ef
+            1     3    all     any                  goto chain 2  0          0            no match: next statement
+
+   ``Chain`` / ``Pref``
+      Position of the filter: the kernel starts with chain 0 and evaluates
+      the filters of a chain by increasing preference.
+
+   ``Action``
+      ``classify`` puts matching packets into the class. ``goto chain N``
+      continues the evaluation in chain N: it implements access-list
+      ``deny`` entries and the move from one match statement to the next.
+
+   ``Packets`` / ``Bytes``
+      Packets that matched the filter. ``missing`` means the filter is not
+      in the kernel (its installation failed, e.g. because the kernel lacks
+      ``cls_flower`` or ``act_gact``); a warning is printed below the
+      output in that case.
+
+   ``Proto``
+      The filter protocol: the ethertype, or the VLAN TPID (``802.1Q``,
+      ``802.1ad``) for entries matching VLAN tags.
+
+   ``Match``
+      The keys of the filter. For extended access-lists this is the entry,
+      followed in braces by what the filter adds when the entry was
+      expanded into several filters.
+
+   ``Origin``
+      The access-list entry or match statement the filter was generated
+      from.
+
+   Filter counters start when the hierarchy is installed. Classifying
+   filters carry a ``gact pass`` action, which does not change the result
+   but gives them counters.
+
 .. _administrative-distance:
 
 Administrative Distance

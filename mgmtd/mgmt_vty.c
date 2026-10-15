@@ -28,6 +28,7 @@
 #include "ripngd/ripng_nb.h"
 #include "staticd/static_vty.h"
 #include "zebra/zebra_cli.h"
+#include "zebra/zebra_qos_cli.h"
 
 DEFPY(show_mgmt_be_adapter,
       show_mgmt_be_adapter_cmd,
@@ -637,6 +638,7 @@ void mgmt_vty_init(void)
 	 * here one by one.
 	 */
 	zebra_cli_init();
+	zebra_qos_cli_init();
 #ifdef HAVE_RIPD
 	rip_cli_init();
 #endif

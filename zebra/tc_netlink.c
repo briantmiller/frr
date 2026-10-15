@@ -12,6 +12,8 @@
 #include <linux/rtnetlink.h>
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
+#include <linux/tc_act/tc_gact.h>
+#include <linux/gen_stats.h>
 #include <netinet/if_ether.h>
 #include <sys/socket.h>
 
@@ -38,7 +40,19 @@
 #define TC_MINOR_NOCLASS (0xffffu)
 
 #define TIME_UNITS_PER_SEC (1000000)
-#define xmittime(r, s) (TIME_UNITS_PER_SEC * ((double)(s) / (double)(r)))
+
+/* largest DRR quantum HTB accepts without complaining */
+#define TC_HTB_QUANTUM_MAX (200000)
+/* default rate2quantum of the zebra HTB qdisc */
+#define TC_HTB_R2Q (10)
+
+/*
+ * Rate estimator parameters, as iproute2 computes them for "est 1sec 4sec":
+ * interval is log2(interval / 250ms) - 2, ewma_log gives a time constant
+ * of about 4 seconds.
+ */
+#define TC_EST_INTERVAL_1SEC (0)
+#define TC_EST_EWMA_LOG_4SEC (2)
 
 static uint32_t tc_get_freq(void)
 {
@@ -58,6 +72,50 @@ static uint32_t tc_get_freq(void)
 	return freq == 0 ? TC_FREQ_DEFAULT : freq;
 }
 
+/*
+ * Number of psched ticks per microsecond, computed the same way iproute2
+ * does (tc_core_init()).  HTB expects buffer sizes expressed in ticks.
+ */
+static double tc_get_tick_in_usec(void)
+{
+	static double tick_in_usec;
+	uint32_t t2us, us2t, clock_res;
+	double clock_factor;
+	FILE *fp;
+
+	if (tick_in_usec > 0)
+		return tick_in_usec;
+
+	tick_in_usec = 1;
+
+	fp = fopen("/proc/net/psched", "r");
+	if (!fp)
+		return tick_in_usec;
+
+	if (fscanf(fp, "%08x%08x%08x", &t2us, &us2t, &clock_res) == 3 && us2t) {
+		if (clock_res == 1000000000)
+			t2us = us2t;
+		clock_factor = (double)clock_res / TIME_UNITS_PER_SEC;
+		tick_in_usec = (double)t2us / us2t * clock_factor;
+	}
+	fclose(fp);
+
+	return tick_in_usec;
+}
+
+/* time (in psched ticks) needed to send @size bytes at @rate bytes/sec */
+static uint32_t tc_calc_xmittime(uint64_t rate, uint64_t size)
+{
+	double ticks;
+
+	if (rate == 0)
+		return 0;
+
+	ticks = TIME_UNITS_PER_SEC * ((double)size / (double)rate) * tc_get_tick_in_usec();
+
+	return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
+}
+
 static void tc_calc_rate_table(struct tc_ratespec *ratespec, uint32_t *table,
 			       uint32_t mtu)
 {
@@ -73,7 +131,7 @@ static void tc_calc_rate_table(struct tc_ratespec *ratespec, uint32_t *table,
 	}
 
 	for (int i = 0; i < 256; i++)
-		table[i] = xmittime(ratespec->rate, (i + 1) << cell_log);
+		table[i] = tc_calc_xmittime(ratespec->rate, (i + 1) << cell_log);
 
 	ratespec->cell_align = -1;
 	ratespec->cell_log = cell_log;
@@ -182,44 +240,79 @@ static ssize_t netlink_qdisc_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 	req->t.tcm_family = AF_UNSPEC;
 	req->t.tcm_ifindex = dplane_ctx_get_ifindex(ctx);
 	req->t.tcm_info = 0;
-	req->t.tcm_handle = 0;
-	req->t.tcm_parent = TC_H_ROOT;
+
+	/*
+	 * A zero handle/parent pair is the zebra owned root qdisc, anything
+	 * else is an explicitly addressed (e.g. leaf class) qdisc.
+	 */
+	if (dplane_ctx_tc_qdisc_get_handle(ctx) || dplane_ctx_tc_qdisc_get_parent(ctx)) {
+		req->t.tcm_handle = dplane_ctx_tc_qdisc_get_handle(ctx);
+		req->t.tcm_parent = dplane_ctx_tc_qdisc_get_parent(ctx);
+	} else {
+		req->t.tcm_handle = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA, 0);
+		req->t.tcm_parent = TC_H_ROOT;
+	}
 
 	if (cmd == RTM_NEWQDISC) {
-		req->t.tcm_handle = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA, 0);
-
 		kind_str = dplane_ctx_tc_qdisc_get_kind_str(ctx);
 
 		if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
 			return 0;
 
-		nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
-
-		if (!nest)
-			return 0;
-
 		switch (dplane_ctx_tc_qdisc_get_kind(ctx)) {
 		case TC_QDISC_HTB: {
+			uint32_t defcls = dplane_ctx_tc_qdisc_get_defcls(ctx);
 			struct tc_htb_glob htb_glob = {
-				.rate2quantum = 10,
+				.rate2quantum = TC_HTB_R2Q,
 				.version = 3,
-				.defcls = TC_MINOR_NOCLASS};
+				.defcls = defcls ? defcls : TC_MINOR_NOCLASS};
+
+			nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
+			if (!nest)
+				return 0;
+
 			if (!nl_attr_put(&req->n, datalen, TCA_HTB_INIT, &htb_glob,
 					 sizeof(htb_glob))) {
 				return 0;
 			}
-			break;
-		}
-		case TC_QDISC_NOQUEUE:
-			break;
-		default:
-			break;
-			/* not implemented */
-		}
 
-		nl_attr_nest_end(&req->n, nest);
+			nl_attr_nest_end(&req->n, nest);
+			break;
+		}
+		case TC_QDISC_HFSC: {
+			/* hfsc options are a plain struct, not nested */
+			struct tc_hfsc_qopt qopt = {
+				.defcls = dplane_ctx_tc_qdisc_get_defcls(ctx),
+			};
+
+			if (!nl_attr_put(&req->n, datalen, TCA_OPTIONS, &qopt, sizeof(qopt)))
+				return 0;
+			break;
+		}
+		case TC_QDISC_PFIFO: {
+			/* fifo options are a plain struct, not nested */
+			struct tc_fifo_qopt fifo = {
+				.limit = dplane_ctx_tc_qdisc_get_limit(ctx),
+			};
+
+			if (fifo.limit &&
+			    !nl_attr_put(&req->n, datalen, TCA_OPTIONS, &fifo, sizeof(fifo)))
+				return 0;
+			break;
+		}
+		case TC_QDISC_CLSACT:
+			/* no options: replacing an existing clsact is then a no-op */
+			break;
+		case TC_QDISC_NOQUEUE:
+		case TC_QDISC_UNSPEC:
+			nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
+			if (!nest)
+				return 0;
+			nl_attr_nest_end(&req->n, nest);
+			break;
+		}
 	} else {
-		/* ifindex are enough for del/get qdisc */
+		/* ifindex, handle and parent are enough for del/get qdisc */
 	}
 
 	return NLMSG_ALIGN(req->n.nlmsg_len);
@@ -266,18 +359,35 @@ static ssize_t netlink_tclass_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 	req->t.tcm_handle = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
 				      dplane_ctx_tc_class_get_handle(ctx));
-	req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA, 0);
+	req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
+				      dplane_ctx_tc_class_get_parent(ctx));
 	req->t.tcm_info = 0;
 
 	kind_str = dplane_ctx_tc_class_get_kind_str(ctx);
 
 	if (op == DPLANE_OP_TC_CLASS_ADD || op == DPLANE_OP_TC_CLASS_UPDATE) {
-		zlog_debug("netlink tclass encoder: op: %s kind: %s handle: %u",
-			   op == DPLANE_OP_TC_CLASS_UPDATE ? "update" : "add",
-			   kind_str, dplane_ctx_tc_class_get_handle(ctx));
+		if (IS_ZEBRA_DEBUG_TC)
+			zlog_debug("netlink tclass encoder: op: %s kind: %s handle: %x parent: %x",
+				   op == DPLANE_OP_TC_CLASS_UPDATE ? "update" : "add", kind_str,
+				   dplane_ctx_tc_class_get_handle(ctx),
+				   dplane_ctx_tc_class_get_parent(ctx));
 
 		if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
 			return 0;
+
+		if (dplane_ctx_tc_class_get_rate_est(ctx)) {
+			/*
+			 * Rate estimator ("est 1sec 4sec"): HTB classes only
+			 * report a current rate when one is attached.
+			 */
+			struct tc_estimator est = {
+				.interval = TC_EST_INTERVAL_1SEC,
+				.ewma_log = TC_EST_EWMA_LOG_4SEC,
+			};
+
+			if (!nl_attr_put(&req->n, datalen, TCA_RATE, &est, sizeof(est)))
+				return 0;
+		}
 
 		nest = nl_attr_nest(&req->n, datalen, TCA_OPTIONS);
 		if (!nest)
@@ -291,23 +401,45 @@ static ssize_t netlink_tclass_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 				 ceil = dplane_ctx_tc_class_get_ceil(ctx);
 
 			uint64_t buffer, cbuffer;
-
-			/* TODO: fetch mtu from interface */
-			uint32_t mtu = 1500;
+			uint32_t mtu = dplane_ctx_tc_class_get_mtu(ctx);
+			uint32_t quantum = dplane_ctx_tc_class_get_quantum(ctx);
 
 			uint32_t rtab[256];
 			uint32_t ctab[256];
+
+			if (mtu == 0)
+				mtu = 1500;
 
 			ceil = MAX(rate, ceil);
 
 			htb_opt.rate.rate = (rate >> 32 != 0) ? ~0U : rate;
 			htb_opt.ceil.rate = (ceil >> 32 != 0) ? ~0U : ceil;
 
+			/*
+			 * Burst sizes (bytes) as computed by iproute2, which
+			 * HTB wants converted into transmission time (ticks).
+			 */
 			buffer = rate / tc_get_freq() + mtu;
 			cbuffer = ceil / tc_get_freq() + mtu;
 
-			htb_opt.buffer = buffer;
-			htb_opt.cbuffer = cbuffer;
+			htb_opt.buffer = tc_calc_xmittime(rate, buffer);
+			htb_opt.cbuffer = tc_calc_xmittime(ceil, cbuffer);
+
+			htb_opt.prio = dplane_ctx_tc_class_get_prio(ctx);
+
+			/*
+			 * Keep the DRR quantum in the range HTB is happy
+			 * with, otherwise the kernel complains loudly about
+			 * every class with a "big" rate.
+			 */
+			if (!quantum) {
+				uint64_t q = rate / TC_HTB_R2Q;
+
+				q = MAX(q, mtu);
+				q = MIN(q, TC_HTB_QUANTUM_MAX);
+				quantum = q;
+			}
+			htb_opt.quantum = quantum;
 
 			tc_calc_rate_table(&htb_opt.rate, rtab, mtu);
 			tc_calc_rate_table(&htb_opt.ceil, ctab, mtu);
@@ -337,6 +469,32 @@ static ssize_t netlink_tclass_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 				return 0;
 			break;
 		}
+		case TC_QDISC_HFSC: {
+			/*
+			 * Service curves, kernel units: bytes/sec and usec.
+			 * Unset curves (m2 == 0) are left out.
+			 */
+			const struct tc_hfsc_curve *curves[] = {
+				dplane_ctx_tc_class_get_hfsc_rsc(ctx),
+				dplane_ctx_tc_class_get_hfsc_fsc(ctx),
+				dplane_ctx_tc_class_get_hfsc_usc(ctx),
+			};
+			const int types[] = { TCA_HFSC_RSC, TCA_HFSC_FSC, TCA_HFSC_USC };
+
+			for (size_t k = 0; k < array_size(curves); k++) {
+				struct tc_service_curve sc;
+
+				if (!curves[k]->m2)
+					continue;
+
+				sc.m1 = MIN(curves[k]->m1, UINT32_MAX);
+				sc.d = curves[k]->d;
+				sc.m2 = MIN(curves[k]->m2, UINT32_MAX);
+				if (!nl_attr_put(&req->n, datalen, types[k], &sc, sizeof(sc)))
+					return 0;
+			}
+			break;
+		}
 		default:
 			break;
 		}
@@ -357,6 +515,32 @@ static int netlink_tfilter_flower_port_type(uint8_t ip_proto, bool src)
 		return src ? TCA_FLOWER_KEY_SCTP_SRC : TCA_FLOWER_KEY_SCTP_DST;
 	else
 		return -1;
+}
+
+/* Attach a single gact action (TCA_FLOWER_ACT) with the given verdict */
+static bool netlink_tfilter_put_gact(struct nlmsghdr *n, size_t datalen, int action)
+{
+	struct rtattr *act_nest, *prio_nest, *opt_nest;
+	struct tc_gact gact = { .action = action };
+
+	act_nest = nl_attr_nest(n, datalen, TCA_FLOWER_ACT);
+	if (!act_nest)
+		return false;
+	prio_nest = nl_attr_nest(n, datalen, 1);
+	if (!prio_nest)
+		return false;
+	if (!nl_attr_put(n, datalen, TCA_ACT_KIND, "gact", strlen("gact") + 1))
+		return false;
+	opt_nest = nl_attr_nest(n, datalen, TCA_ACT_OPTIONS);
+	if (!opt_nest)
+		return false;
+	if (!nl_attr_put(n, datalen, TCA_GACT_PARMS, &gact, sizeof(gact)))
+		return false;
+	nl_attr_nest_end(n, opt_nest);
+	nl_attr_nest_end(n, prio_nest);
+	nl_attr_nest_end(n, act_nest);
+
+	return true;
 }
 
 static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen,
@@ -383,6 +567,9 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 		if (tc_flower_get_inet_mask(src_p, &addr) != 0)
 			return -1;
 
+		if (filter_bm & TC_FLOWER_SRC_IP_MASK)
+			memcpy(addr.data, dplane_ctx_tc_filter_get_src_mask(ctx), addr.bytelen);
+
 		if (!nl_attr_put(n, datalen,
 				 (addr.family == AF_INET) ? TCA_FLOWER_KEY_IPV4_SRC_MASK
 							  : TCA_FLOWER_KEY_IPV6_SRC_MASK,
@@ -405,6 +592,9 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 
 		if (tc_flower_get_inet_mask(dst_p, &addr) != 0)
 			return -1;
+
+		if (filter_bm & TC_FLOWER_DST_IP_MASK)
+			memcpy(addr.data, dplane_ctx_tc_filter_get_dst_mask(ctx), addr.bytelen);
 
 		if (!nl_attr_put(n, datalen,
 				 (addr.family == AF_INET) ? TCA_FLOWER_KEY_IPV4_DST_MASK
@@ -473,15 +663,51 @@ static int netlink_tfilter_flower_put_options(struct nlmsghdr *n, size_t datalen
 			return 0;
 	}
 
-	classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
-			    dplane_ctx_tc_filter_get_classid(ctx));
-	if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
-		return 0;
+	if (filter_bm & TC_FLOWER_RAW_KEYS) {
+		uint16_t raw_len;
+		const uint8_t *raw = dplane_ctx_tc_filter_get_raw(ctx, &raw_len);
+
+		/* pre-built, 4 byte aligned TCA_FLOWER_KEY_* attributes */
+		if (NLMSG_ALIGN(n->nlmsg_len) + raw_len > datalen)
+			return 0;
+		memcpy((uint8_t *)n + NLMSG_ALIGN(n->nlmsg_len), raw, raw_len);
+		n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + raw_len;
+	}
+
+	if (filter_bm & TC_FLOWER_ACT_GOTO_CHAIN) {
+		/*
+		 * gact "goto chain N": carry on classifying in another chain
+		 * instead of selecting a class.
+		 */
+		if (!netlink_tfilter_put_gact(n, datalen,
+					      TC_ACT_GOTO_CHAIN |
+						      (dplane_ctx_tc_filter_get_goto_chain(ctx) &
+						       TC_ACT_EXT_VAL_MASK)))
+			return 0;
+	} else if (filter_bm & TC_FLOWER_ACT_DROP) {
+		if (!netlink_tfilter_put_gact(n, datalen, TC_ACT_SHOT))
+			return 0;
+	} else if (filter_bm & TC_FLOWER_ACT_PASS) {
+		if (!netlink_tfilter_put_gact(n, datalen, TC_ACT_OK))
+			return 0;
+	} else {
+		classid = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
+				    dplane_ctx_tc_filter_get_classid(ctx));
+		if (!nl_attr_put32(n, datalen, TCA_FLOWER_CLASSID, classid))
+			return 0;
+
+		/* gact "pass" keeps the class and counts the matches */
+		if ((filter_bm & TC_FLOWER_ACT_COUNT) &&
+		    !netlink_tfilter_put_gact(n, datalen, TC_ACT_OK))
+			return 0;
+	}
 
 	if (!nl_attr_put32(n, datalen, TCA_FLOWER_FLAGS, flags))
 		return 0;
 
-	if (!nl_attr_put16(n, datalen, TCA_FLOWER_KEY_ETH_TYPE, protocol))
+	/* "protocol all" filters do not match on the ethertype */
+	if (protocol != htons(ETH_P_ALL) &&
+	    !nl_attr_put16(n, datalen, TCA_FLOWER_KEY_ETH_TYPE, protocol))
 		return 0;
 
 	return 1;
@@ -536,7 +762,16 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 
 	req->t.tcm_info = TC_H_MAKE(priority << 16, protocol);
 	req->t.tcm_handle = dplane_ctx_tc_filter_get_handle(ctx);
-	req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA, 0);
+	/* a minor of the zebra qdisc, or a full handle (clsact hooks) */
+	if (TC_H_MAJ(dplane_ctx_tc_filter_get_parent(ctx)))
+		req->t.tcm_parent = dplane_ctx_tc_filter_get_parent(ctx);
+	else
+		req->t.tcm_parent = TC_H_MAKE(TC_QDISC_MAJOR_ZEBRA,
+					      dplane_ctx_tc_filter_get_parent(ctx));
+
+	if (dplane_ctx_tc_filter_get_chain(ctx) &&
+	    !nl_attr_put32(&req->n, datalen, TCA_CHAIN, dplane_ctx_tc_filter_get_chain(ctx)))
+		return 0;
 
 	kind_str = dplane_ctx_tc_filter_get_kind_str(ctx);
 
@@ -544,7 +779,8 @@ static ssize_t netlink_tfilter_msg_encode(int cmd, struct zebra_dplane_ctx *ctx,
 		if (!nl_attr_put(&req->n, datalen, TCA_KIND, kind_str, strlen(kind_str) + 1))
 			return 0;
 
-		zlog_debug(
+		if (IS_ZEBRA_DEBUG_TC)
+			zlog_debug(
 			"netlink tfilter encoder: op: %s priority: %u protocol: %u kind: %s handle: %u filter_bm: %u ip_proto: %u",
 			op == DPLANE_OP_TC_FILTER_UPDATE ? "update" : "add",
 			priority, protocol, kind_str,
@@ -802,6 +1038,324 @@ int netlink_tfilter_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void 
 
 	tcm = NLMSG_DATA(h);
 	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+
+	return 0;
+}
+
+/*
+ * Synchronously dump the TC classes of one interface and hand their
+ * statistics to @cb.  Used by show commands, which need an answer right
+ * away, so this does not go through the dataplane thread; it uses a
+ * private, short lived socket in zebra's own (default) namespace.
+ */
+static void tc_class_stats_parse(struct nlmsghdr *h, ifindex_t ifindex,
+				 void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+				 void *arg)
+{
+	struct rtattr *tb[TCA_MAX + 1];
+	struct rtattr *st[TCA_STATS_MAX + 1];
+	struct zebra_tc_class_stats stats = {};
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWTCLASS || len < 0 || tcm->tcm_ifindex != ifindex)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+	if (!tb[TCA_STATS2])
+		return;
+
+	netlink_parse_rtattr_nested(st, TCA_STATS_MAX, tb[TCA_STATS2]);
+
+	stats.handle = tcm->tcm_handle;
+	stats.parent = tcm->tcm_parent;
+
+	if (st[TCA_STATS_BASIC] &&
+	    RTA_PAYLOAD(st[TCA_STATS_BASIC]) >= sizeof(struct gnet_stats_basic)) {
+		struct gnet_stats_basic basic;
+
+		memcpy(&basic, RTA_DATA(st[TCA_STATS_BASIC]), sizeof(basic));
+		stats.bytes = basic.bytes;
+		stats.packets = basic.packets;
+	}
+	if (st[TCA_STATS_PKT64] && RTA_PAYLOAD(st[TCA_STATS_PKT64]) >= sizeof(uint64_t))
+		memcpy(&stats.packets, RTA_DATA(st[TCA_STATS_PKT64]), sizeof(uint64_t));
+
+	if (st[TCA_STATS_RATE_EST64] &&
+	    RTA_PAYLOAD(st[TCA_STATS_RATE_EST64]) >= sizeof(struct gnet_stats_rate_est64)) {
+		struct gnet_stats_rate_est64 est;
+
+		memcpy(&est, RTA_DATA(st[TCA_STATS_RATE_EST64]), sizeof(est));
+		stats.rate_valid = true;
+		stats.bps = est.bps * 8;
+		stats.pps = est.pps;
+	} else if (st[TCA_STATS_RATE_EST] &&
+		   RTA_PAYLOAD(st[TCA_STATS_RATE_EST]) >= sizeof(struct gnet_stats_rate_est)) {
+		struct gnet_stats_rate_est est;
+
+		memcpy(&est, RTA_DATA(st[TCA_STATS_RATE_EST]), sizeof(est));
+		stats.rate_valid = true;
+		stats.bps = (uint64_t)est.bps * 8;
+		stats.pps = est.pps;
+	}
+
+	if (st[TCA_STATS_QUEUE] &&
+	    RTA_PAYLOAD(st[TCA_STATS_QUEUE]) >= sizeof(struct gnet_stats_queue)) {
+		struct gnet_stats_queue q;
+
+		memcpy(&q, RTA_DATA(st[TCA_STATS_QUEUE]), sizeof(q));
+		stats.qlen = q.qlen;
+		stats.backlog = q.backlog;
+		stats.drops = q.drops;
+		stats.overlimits = q.overlimits;
+	}
+
+	cb(&stats, arg);
+}
+
+/*
+ * Dump RTM_GETTCLASS/RTM_GETTFILTER objects of @ifindex (and @parent, a full
+ * handle, for filters) on a private socket and hand each message to @msg_cb.
+ */
+static int tc_dump(uint16_t type, ifindex_t ifindex, uint32_t parent,
+		   void (*msg_cb)(struct nlmsghdr *h, void *arg), void *arg)
+{
+	struct {
+		struct nlmsghdr n;
+		struct tcmsg t;
+	} req = {};
+	struct sockaddr_nl snl = { .nl_family = AF_NETLINK };
+	struct timeval tv = { .tv_sec = 2 };
+	uint32_t seq = (uint32_t)time(NULL);
+	char *buf;
+	bool done = false;
+	int sock, ret = -1;
+
+	sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+	if (sock < 0)
+		return -1;
+
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+	req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct tcmsg));
+	req.n.nlmsg_type = type;
+	req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	req.n.nlmsg_seq = seq;
+	req.t.tcm_family = AF_UNSPEC;
+	req.t.tcm_ifindex = ifindex;
+	req.t.tcm_parent = parent;
+
+	if (sendto(sock, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&snl, sizeof(snl)) < 0)
+		goto out;
+
+	buf = XMALLOC(MTYPE_TMP, NL_RCV_PKT_BUF_SIZE);
+
+	while (!done) {
+		ssize_t n = recv(sock, buf, NL_RCV_PKT_BUF_SIZE, 0);
+		struct nlmsghdr *h;
+		unsigned int len;
+
+		if (n <= 0)
+			break;
+
+		len = (unsigned int)n;
+		for (h = (struct nlmsghdr *)buf; NLMSG_OK(h, len); h = NLMSG_NEXT(h, len)) {
+			if (h->nlmsg_seq != seq)
+				continue;
+			if (h->nlmsg_type == NLMSG_DONE) {
+				done = true;
+				ret = 0;
+				break;
+			}
+			if (h->nlmsg_type == NLMSG_ERROR) {
+				done = true;
+				break;
+			}
+			msg_cb(h, arg);
+		}
+	}
+
+	XFREE(MTYPE_TMP, buf);
+out:
+	close(sock);
+	return ret;
+}
+
+struct tc_class_stats_args {
+	ifindex_t ifindex;
+	void (*cb)(const struct zebra_tc_class_stats *stats, void *arg);
+	void *arg;
+};
+
+static void tc_class_stats_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_class_stats_args *a = arg;
+
+	tc_class_stats_parse(h, a->ifindex, a->cb, a->arg);
+}
+
+int kernel_tc_class_stats(ifindex_t ifindex,
+			  void (*cb)(const struct zebra_tc_class_stats *stats, void *arg),
+			  void *arg)
+{
+	struct tc_class_stats_args a = { .ifindex = ifindex, .cb = cb, .arg = arg };
+
+	return tc_dump(RTM_GETTCLASS, ifindex, 0, tc_class_stats_msg, &a);
+}
+
+/*
+ * Counters of the first action of a filter: TCA_*_ACT { 1 { TCA_ACT_STATS
+ * { TCA_STATS_BASIC [TCA_STATS_PKT64] } } }.
+ */
+static bool tc_action_stats_parse(struct rtattr *acts, uint64_t *bytes, uint64_t *packets)
+{
+	struct rtattr *prio[TCA_ACT_MAX_PRIO + 1];
+	struct rtattr *act[TCA_ACT_MAX + 1];
+	struct rtattr *st[TCA_STATS_MAX + 1];
+	struct gnet_stats_basic basic;
+
+	netlink_parse_rtattr_nested(prio, TCA_ACT_MAX_PRIO, acts);
+	if (!prio[1])
+		return false;
+
+	netlink_parse_rtattr_nested(act, TCA_ACT_MAX, prio[1]);
+	if (!act[TCA_ACT_STATS])
+		return false;
+
+	netlink_parse_rtattr_nested(st, TCA_STATS_MAX, act[TCA_ACT_STATS]);
+	if (!st[TCA_STATS_BASIC] || RTA_PAYLOAD(st[TCA_STATS_BASIC]) < sizeof(basic))
+		return false;
+
+	memcpy(&basic, RTA_DATA(st[TCA_STATS_BASIC]), sizeof(basic));
+	*bytes = basic.bytes;
+	*packets = basic.packets;
+	if (st[TCA_STATS_PKT64] && RTA_PAYLOAD(st[TCA_STATS_PKT64]) >= sizeof(uint64_t))
+		memcpy(packets, RTA_DATA(st[TCA_STATS_PKT64]), sizeof(uint64_t));
+
+	return true;
+}
+
+struct tc_filter_stats_args {
+	ifindex_t ifindex;
+	void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg);
+	void *arg;
+};
+
+/* Verdict of a gact first action: TCA_*_ACT { 1 { "gact", OPTIONS { PARMS } } } */
+static bool tc_action_gact_parse(struct rtattr *acts, int32_t *action)
+{
+	struct rtattr *prio[TCA_ACT_MAX_PRIO + 1];
+	struct rtattr *act[TCA_ACT_MAX + 1];
+	struct rtattr *opt[TCA_GACT_MAX + 1];
+	struct tc_gact parms;
+
+	netlink_parse_rtattr_nested(prio, TCA_ACT_MAX_PRIO, acts);
+	if (!prio[1])
+		return false;
+
+	netlink_parse_rtattr_nested(act, TCA_ACT_MAX, prio[1]);
+	if (!act[TCA_ACT_KIND] || strcmp(RTA_DATA(act[TCA_ACT_KIND]), "gact") ||
+	    !act[TCA_ACT_OPTIONS])
+		return false;
+
+	netlink_parse_rtattr_nested(opt, TCA_GACT_MAX, act[TCA_ACT_OPTIONS]);
+	if (!opt[TCA_GACT_PARMS] || RTA_PAYLOAD(opt[TCA_GACT_PARMS]) < sizeof(parms))
+		return false;
+
+	memcpy(&parms, RTA_DATA(opt[TCA_GACT_PARMS]), sizeof(parms));
+	*action = parms.action;
+
+	return true;
+}
+
+static void tc_filter_stats_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_filter_stats_args *a = arg;
+	struct rtattr *tb[TCA_MAX + 1];
+	struct zebra_tc_filter_stats stats = {};
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWTFILTER || len < 0 || tcm->tcm_ifindex != a->ifindex)
+		return;
+
+	/* the per priority "header" entries have no handle */
+	if (!tcm->tcm_handle)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+
+	stats.parent = tcm->tcm_parent;
+	stats.handle = tcm->tcm_handle;
+	stats.priority = TC_H_MAJ(tcm->tcm_info) >> 16;
+	stats.protocol = ntohs(TC_H_MIN(tcm->tcm_info));
+	if (tb[TCA_CHAIN])
+		stats.chain = *(uint32_t *)RTA_DATA(tb[TCA_CHAIN]);
+	if (tb[TCA_KIND])
+		strlcpy(stats.kind, RTA_DATA(tb[TCA_KIND]), sizeof(stats.kind));
+
+	if (tb[TCA_OPTIONS] && strcmp(stats.kind, "flower") == 0) {
+		struct rtattr *opt[TCA_FLOWER_MAX + 1];
+
+		netlink_parse_rtattr_nested(opt, TCA_FLOWER_MAX, tb[TCA_OPTIONS]);
+		if (opt[TCA_FLOWER_ACT]) {
+			stats.stats_valid = tc_action_stats_parse(opt[TCA_FLOWER_ACT],
+								  &stats.bytes, &stats.packets);
+			stats.gact_valid = tc_action_gact_parse(opt[TCA_FLOWER_ACT],
+								&stats.gact_action);
+		}
+	}
+
+	a->cb(&stats, a->arg);
+}
+
+int kernel_tc_filter_stats(ifindex_t ifindex, uint32_t parent,
+			   void (*cb)(const struct zebra_tc_filter_stats *stats, void *arg),
+			   void *arg)
+{
+	struct tc_filter_stats_args a = { .ifindex = ifindex, .cb = cb, .arg = arg };
+
+	return tc_dump(RTM_GETTFILTER, ifindex, parent, tc_filter_stats_msg, &a);
+}
+
+struct tc_qdisc_kind_args {
+	ifindex_t ifindex;
+	uint32_t handle;
+	char *kind;
+	size_t len;
+	bool found;
+};
+
+static void tc_qdisc_kind_msg(struct nlmsghdr *h, void *arg)
+{
+	struct tc_qdisc_kind_args *a = arg;
+	struct rtattr *tb[TCA_MAX + 1];
+	struct tcmsg *tcm = NLMSG_DATA(h);
+	int len = h->nlmsg_len - NLMSG_LENGTH(sizeof(*tcm));
+
+	if (h->nlmsg_type != RTM_NEWQDISC || len < 0 || tcm->tcm_ifindex != a->ifindex ||
+	    tcm->tcm_handle != a->handle)
+		return;
+
+	netlink_parse_rtattr(tb, TCA_MAX, TCA_RTA(tcm), len);
+	if (!tb[TCA_KIND])
+		return;
+
+	strlcpy(a->kind, RTA_DATA(tb[TCA_KIND]), a->len);
+	a->found = true;
+}
+
+int kernel_tc_qdisc_kind(ifindex_t ifindex, uint32_t handle, char *kind, size_t len)
+{
+	struct tc_qdisc_kind_args a = {
+		.ifindex = ifindex,
+		.handle = handle,
+		.kind = kind,
+		.len = len,
+	};
+
+	if (tc_dump(RTM_GETQDISC, ifindex, 0, tc_qdisc_kind_msg, &a) < 0 || !a.found)
+		return -1;
 
 	return 0;
 }

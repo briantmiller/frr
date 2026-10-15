@@ -1,0 +1,508 @@
+// SPDX-License-Identifier: BSD-2-Clause
+module frr-qos {
+  yang-version 1.1;
+  namespace "http://frrouting.org/yang/qos";
+  prefix frr-qos;
+
+  import frr-interface {
+    prefix frr-interface;
+  }
+
+  organization
+    "FRRouting";
+  contact
+    "FRR Users List:       <mailto:frog@lists.frrouting.org>
+     FRR Development List: <mailto:dev@lists.frrouting.org>";
+  description
+    "This module defines class-based queueing (QoS) configuration,
+     modelled after Cisco class-based weighted fair queueing (CBWFQ).
+
+     Traffic is classified with class-maps, class-maps are given
+     bandwidth guarantees, ceilings, priorities and queue limits inside
+     a policy-map, and a policy-map is attached to the output side of
+     an interface.  On Linux the configuration is realised with the
+     HTB queueing discipline, HTB classes and flower filters.
+
+     Copyright 2026 FRRouting
+
+     Redistribution and use in source and binary forms, with or without
+     modification, are permitted provided that the following conditions
+     are met:
+
+     1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+     \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+     LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+     A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+     HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+     LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+     DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+     THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
+
+  revision 2026-10-05 {
+    description
+      "Add HFSC policy-maps and service curves, extended
+       access-lists and interface access-groups.";
+    reference "FRRouting";
+  }
+
+  revision 2026-10-03 {
+    description
+      "Initial revision";
+    reference "FRRouting";
+  }
+
+  typedef qos-map-name {
+    type string {
+      length "1..63";
+      pattern "[^\\s]+";
+    }
+    description
+      "Name of a class-map or policy-map.";
+  }
+
+  typedef bits-per-second {
+    type uint64 {
+      range "1..max";
+    }
+    units "bits/second";
+    description
+      "A data rate in bits per second.";
+  }
+
+  typedef dscp {
+    type uint8 {
+      range "0..63";
+    }
+    description
+      "Differentiated Services Code Point.";
+  }
+
+  grouping rate-spec {
+    description
+      "A rate expressed either as a percentage of a reference rate or
+       as an absolute value.";
+    choice rate {
+      description
+        "How the rate is expressed.";
+      case percent {
+        leaf percent {
+          type uint8 {
+            range "1..100";
+          }
+          units "percent";
+          description
+            "Rate as a percentage of the reference rate.";
+        }
+      }
+      case bps {
+        leaf bps {
+          type bits-per-second;
+          description
+            "Absolute rate.";
+        }
+      }
+    }
+  }
+
+  grouping service-curve {
+    description
+      "HFSC service curve: rate m1 for the first d microseconds of a
+       backlog period, rate m2 afterwards.  Without m1 and d the curve
+       is linear with rate m2.  Percentages refer to the interface QoS
+       bandwidth.";
+
+    container m1 {
+      description
+        "Rate of the first segment of the curve.";
+      uses rate-spec;
+    }
+
+    leaf d {
+      type uint32 {
+        range "1..max";
+      }
+      units "microseconds";
+      description
+        "Length of the first segment of the curve.";
+    }
+
+    container m2 {
+      description
+        "Rate of the second segment of the curve, the long term rate.";
+      uses rate-spec;
+    }
+  }
+
+  container qos {
+    description
+      "Class-based QoS configuration.";
+
+    list extended-access-list {
+      key "name";
+      description
+        "Cisco style extended access-list (\"ip access-list extended
+         NAME\").  Besides the IP header fields of Cisco extended
+         access-lists, entries can match every tc-flower key: Ethernet,
+         VLAN, MPLS, PPPoE, ARP, CFM, tunnel metadata and connection
+         tracking state.  Referenced by class-maps, which install them as
+         tc-flower filters.";
+
+      leaf name {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Access-list name.";
+      }
+
+      list entry {
+        key "sequence";
+        description
+          "Access-list entry, evaluated in sequence order; the first
+           matching entry decides.";
+
+        leaf sequence {
+          type uint32 {
+            range "1..4294967295";
+          }
+          description
+            "Sequence number.";
+        }
+
+        choice value {
+          mandatory true;
+          description
+            "A permit/deny rule or a remark.";
+          case rule {
+            leaf action {
+              type enumeration {
+                enum permit {
+                  value 0;
+                  description
+                    "Matching packets are permitted (selected).";
+                }
+                enum deny {
+                  value 1;
+                  description
+                    "Matching packets are denied (not selected).";
+                }
+              }
+              mandatory true;
+              description
+                "What happens to matching packets.";
+            }
+            leaf match {
+              type string {
+                length "1..1023";
+              }
+              mandatory true;
+              description
+                "Match specification, everything after permit/deny, e.g.
+                 \"tcp 10.0.0.0 0.0.0.255 any eq 80 dscp ef vlan-id 10\".
+                 Stored in canonical form.";
+            }
+          }
+          case remark {
+            leaf remark {
+              type string {
+                length "1..100";
+              }
+              description
+                "Comment.";
+            }
+          }
+        }
+      }
+    }
+
+    list class-map {
+      key "name";
+      description
+        "Traffic classifier.";
+
+      must "match-type = 'match-any' or count(access-group) <= 1" {
+        error-message
+          "A match-all class-map may reference at most one access-group";
+      }
+
+      leaf name {
+        type qos-map-name;
+        must ". != 'class-default'" {
+          error-message "class-default is a reserved class name";
+        }
+        description
+          "Class-map name.";
+      }
+
+      leaf match-type {
+        type enumeration {
+          enum match-all {
+            value 0;
+            description
+              "A packet must match every match statement.";
+          }
+          enum match-any {
+            value 1;
+            description
+              "A packet must match at least one match statement.";
+          }
+        }
+        default "match-all";
+        description
+          "How the match statements of this class are combined.";
+      }
+
+      leaf-list access-group {
+        type string {
+          length "1..128";
+        }
+        description
+          "Match packets permitted by the named access-list.  An
+           extended access-list (ip access-list extended) of that name
+           takes precedence; otherwise the IPv4 and/or IPv6 access-lists
+           of that name are used.  Standard (zebra style) access-list
+           entries are applied to the source address, Cisco style
+           extended entries are applied to source and destination
+           address.";
+      }
+
+      leaf-list dscp {
+        type dscp;
+        description
+          "Match packets carrying any of these DSCP values.  The list
+           of values forms a single match statement.";
+      }
+
+      leaf any {
+        type empty;
+        description
+          "Match every packet.";
+      }
+    }
+
+    list policy-map {
+      key "name";
+      description
+        "Traffic policy.";
+
+      leaf name {
+        type qos-map-name;
+        description
+          "Policy-map name.";
+      }
+
+      leaf type {
+        type enumeration {
+          enum htb {
+            value 0;
+            description
+              "Hierarchical token bucket: guaranteed rate, ceiling and
+               priority per class.";
+          }
+          enum hfsc {
+            value 1;
+            description
+              "Hierarchical fair service curve: real-time, link-sharing
+               and upper-limit service curves per class.";
+          }
+        }
+        default "htb";
+        description
+          "Queueing discipline the policy-map is implemented with.  The
+           policy-maps of a hierarchy (child service-policies) must all
+           be of the same type.";
+      }
+
+      list class {
+        key "name";
+        ordered-by user;
+        /*
+         * must, not when: a "when" turning false (e.g. after changing the
+         * policy-map type) would silently delete the settings.
+         */
+        must "../type = 'htb' or not(bandwidth/percent or bandwidth/bps"
+           + " or max-bandwidth/percent or max-bandwidth/bps or priority)" {
+          error-message
+            "bandwidth, max-bandwidth and priority are HTB settings, "
+            + "they cannot be used in an hfsc policy-map (use rt, ls, sc and ul)";
+        }
+        must "../type = 'hfsc' or not(rt or ls or sc or ul)" {
+          error-message
+            "rt, ls, sc and ul are HFSC settings, they cannot be used "
+            + "in an htb policy-map (create it with: policy-map NAME hfsc)";
+        }
+        description
+          "Traffic class within the policy.  Classes are evaluated in
+           the order they are configured; class-default always matches
+           whatever is left.";
+
+        leaf name {
+          type qos-map-name;
+          description
+            "Name of the class-map, or class-default.";
+        }
+
+        container bandwidth {
+          description
+            "Guaranteed rate (HTB rate).  A percentage refers to the
+             rate of the parent: the interface QoS bandwidth for a top
+             level policy, or the guaranteed rate of the parent class
+             for a child policy.  When unset, the class receives an
+             equal share of the bandwidth left unallocated.";
+          uses rate-spec;
+        }
+
+        container max-bandwidth {
+          description
+            "Ceiling rate (HTB ceil).  A percentage refers to the
+             interface QoS bandwidth.  Defaults to the interface QoS
+             bandwidth.";
+          uses rate-spec;
+        }
+
+        leaf priority {
+          type uint8 {
+            range "0..7";
+          }
+          description
+            "HTB priority, 0 is the highest.  Classes with a higher
+             priority are offered excess bandwidth first.";
+        }
+
+        container rt {
+          presence "rt service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Real-time service curve (HFSC rsc): the guaranteed rate and
+             delay of a leaf class, independent of link-sharing.";
+          uses service-curve;
+        }
+
+        container ls {
+          presence "ls service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Link-share service curve (HFSC fsc): how the bandwidth not
+             used by real-time traffic is shared between sibling classes.";
+          uses service-curve;
+        }
+
+        container sc {
+          presence "sc service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Shorthand setting both the real-time and the link-share curve.
+             rt and ls, when configured, take precedence over it.";
+          uses service-curve;
+        }
+
+        container ul {
+          presence "ul service curve configured";
+        must "m2/percent or m2/bps" {
+          error-message "A service curve needs an m2 rate";
+        }
+        must "(m1/percent or m1/bps) = boolean(d)" {
+          error-message "m1 and d must be configured together";
+        }
+          description
+            "Upper-limit service curve (HFSC usc): the most link-sharing
+             may give the class.  Only meaningful together with a
+             link-share curve.";
+          uses service-curve;
+        }
+
+        leaf queue-limit {
+          type uint32 {
+            range "1..max";
+          }
+          units "packets";
+          description
+            "Queue length of the class.";
+        }
+
+        leaf service-policy {
+          type qos-map-name;
+          description
+            "Child policy-map applied to traffic in this class.";
+        }
+      }
+    }
+  }
+
+  augment "/frr-interface:lib/frr-interface:interface" {
+    description
+      "Interface QoS configuration.";
+    container qos {
+      description
+        "Interface QoS configuration.";
+
+      leaf bandwidth {
+        type bits-per-second;
+        description
+          "Bandwidth available to the output service policy.";
+      }
+
+      leaf service-policy-output {
+        type qos-map-name;
+        description
+          "Policy-map applied to traffic leaving the interface.";
+      }
+    }
+
+    container access-group {
+      description
+        "Access control with extended access-lists (\"ip access-group
+         NAME in|out\").  The first matching entry decides: permit
+         accepts, deny drops the packet.  Each list ends with an
+         implicit deny of the IP families (IPv4, IPv6) it has entries
+         for; other traffic matching no entry is accepted.  A list that
+         is not configured or has no entries accepts everything.";
+
+      leaf in {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Extended access-list applied to traffic received on the
+           interface.";
+      }
+
+      leaf out {
+        type string {
+          length "1..128";
+          pattern "[^\\s]+";
+        }
+        description
+          "Extended access-list applied to traffic sent on the
+           interface.";
+      }
+    }
+  }
+}

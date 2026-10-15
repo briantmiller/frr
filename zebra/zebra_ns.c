@@ -21,6 +21,7 @@
 #include "zebra/interface.h"
 #include "zebra_pbr.h"
 #include "zebra_tc.h"
+#include "zebra_qos.h"
 #include "rib.h"
 #include "table_manager.h"
 #include "zebra_errors.h"
@@ -336,6 +337,8 @@ void zebra_ns_startup_continue(struct zebra_dplane_ctx *ctx)
 		 * been processed by the metaQ.
 		 */
 		rib_add_finished_startup();
+		if (zns->ns_id == NS_DEFAULT)
+			zebra_qos_startup_done();
 		break;
 	}
 }
