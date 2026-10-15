@@ -51,7 +51,8 @@ module frr-qos {
   revision 2026-10-15 {
     description
       "Add detected-bandwidth: the output service policy bandwidth from
-       bandwidth measured by protocol daemons, with fallback.";
+       bandwidth measured by protocol daemons, with fallback, scaling and
+       hysteresis.";
     reference "FRRouting";
   }
 
@@ -528,6 +529,52 @@ module frr-qos {
                 mandatory true;
                 description
                   "The daemon.";
+              }
+            }
+
+            leaf percent {
+              type uint8 {
+                range "1..100";
+              }
+              units "percent";
+              default "100";
+              description
+                "Share of the detected bandwidth used as the service
+                 policy bandwidth.  Shaping slightly below the measured
+                 bandwidth keeps the queue in this router rather than
+                 in the network.  Does not apply to the default.";
+            }
+
+            container hysteresis {
+              description
+                "Keep the bandwidth in use while the detected bandwidth
+                 of the same source differs from it by less than a
+                 percentage, so that small variations between
+                 measurements do not update the service policy.  The
+                 comparison is with the bandwidth in use, so a slow drift
+                 is followed once it adds up to the threshold.  A change
+                 of source, or to the default, applies at once.";
+
+              leaf increase {
+                type uint8 {
+                  range "0..50";
+                }
+                units "percent";
+                default "0";
+                description
+                  "Smallest increase applied, in percent of the bandwidth
+                   in use.  0 applies every increase.";
+              }
+
+              leaf decrease {
+                type uint8 {
+                  range "0..50";
+                }
+                units "percent";
+                default "0";
+                description
+                  "Smallest decrease applied, in percent of the bandwidth
+                   in use.  0 applies every decrease.";
               }
             }
 

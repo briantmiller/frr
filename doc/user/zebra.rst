@@ -979,7 +979,7 @@ Interface commands
    ceiling of the HTB root class and as the reference for percentages. When
    not configured, the interface ``bandwidth`` or the link speed is used.
 
-.. clicmd:: qos bandwidth detected <ospf|nhrp> [<ospf|nhrp>] [default RATE]
+.. clicmd:: qos bandwidth detected <ospf|nhrp> [<ospf|nhrp>] [percent (1-100)] [hysteresis <(1-50)|{increase (0-50)|decrease (0-50)}>] [default RATE]
 
    Take the QoS bandwidth from the bandwidth ospfd and/or nhrpd measured
    towards their neighbors on this interface (see ``show zebra
@@ -997,17 +997,42 @@ Interface commands
    Whenever the selected value changes, the HTB classes are updated in
    place, so a new measurement does not disturb traffic.
 
+   ``percent`` shapes to that share of the detected bandwidth (100 by
+   default). Shaping a little below the measured bandwidth, e.g. 90 to 95
+   percent, keeps the queue in this router, where the service-policy
+   decides which traffic waits, rather than in the network. It does not
+   apply to the ``default`` rate, which is used as given.
+
+   ``hysteresis`` keeps the bandwidth in use while the detected bandwidth
+   of the same daemon differs from it by less than that percentage (0, i.e.
+   every change is applied, by default), so the classes are not rewritten
+   for every small variation between measurements. The comparison is with
+   the bandwidth in use rather than the previous measurement, so a slow
+   drift is still followed once it adds up to the threshold. A change to
+   another daemon or to the default applies at once, as does a
+   configuration change. A value of 5 to 10 suits most links.
+
+   ``hysteresis increase N decrease M`` sets separate thresholds for the
+   two directions; ``hysteresis N`` sets both to ``N``, and a direction
+   that is not given applies every change (0). A small decrease threshold
+   with a larger increase threshold follows a drop in the available
+   bandwidth quickly, before the queue builds in the network, while only
+   raising the rate for a clear and lasting gain. For example ``hysteresis
+   increase 20 decrease 5`` keeps the bandwidth in use until a measurement
+   is at least 20 percent above or 5 percent below it.
+
    This command and ``qos bandwidth RATE`` replace each other.
 
    .. code-block:: frr
 
       interface gre1
-       qos bandwidth detected nhrp ospf default 10mbps
+       qos bandwidth detected nhrp ospf percent 95 hysteresis increase 10 decrease 3 default 10mbps
        service-policy output WAN
       exit
 
    ``show qos interface`` shows the bandwidth in use and where it came
-   from, and the value of every configured daemon.
+   from, the measurement behind it and whether a change is being held back
+   by the hysteresis, and the value of every configured daemon.
 
 .. clicmd:: service-policy [output] NAME
 

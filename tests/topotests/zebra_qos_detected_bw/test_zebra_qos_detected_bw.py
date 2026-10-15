@@ -182,6 +182,33 @@ def _check_bw(source, bps):
     return None
 
 
+def _check_detected(bps, measured, held):
+    show = qos_show()
+    have = (
+        show.get("qosBandwidth"),
+        root_rate(),
+        show.get("qosBandwidthMeasured"),
+        show.get("qosBandwidthHeld"),
+    )
+    want = (bps, bps, measured, held)
+    if have != want:
+        return "(qosBandwidth, tc root rate, measured, held) {} != {}".format(
+            have, want
+        )
+    return None
+
+
+def expect_detected(bps, measured, held, msg):
+    "The detected bandwidth in use, the measurement behind it, and if it is held"
+    _, result = topotest.run_and_expect(
+        functools.partial(_check_detected, bps, measured, held),
+        None,
+        count=30,
+        wait=1,
+    )
+    assert result is None, "{}: {}".format(msg, result)
+
+
 def expect_bw(source, bps, msg):
     _, result = topotest.run_and_expect(
         functools.partial(_check_bw, source, bps), None, count=30, wait=1
@@ -275,6 +302,139 @@ def test_single_source(tgen):
         "interface {}".format(INTF), "qos bandwidth detected ospf nhrp default 3mbps"
     )
     expect_bw("ospf", 5000000, "ospf not used after restore")
+
+
+def test_percent(tgen):
+    "percent shapes to a share of the detected bandwidth, not of the default"
+    vtysh_conf(
+        "interface {}".format(INTF),
+        "qos bandwidth detected ospf nhrp percent 90 default 3mbps",
+    )
+    expect_bw("ospf", 4500000, "ospf bandwidth not scaled to 90%")
+    expect_detected(4500000, 5000000, False, "measured bandwidth not reported")
+
+    out = tgen.gears["r1"].vtysh_cmd("show running-config")
+    assert " qos bandwidth detected ospf nhrp percent 90 default 3mbps" in out, out
+    show = qos_show()
+    assert show["detectedBandwidth"]["percent"] == 90, show
+
+    # the default is an explicit rate and is not scaled
+    vtysh_conf(
+        "interface {}".format(INTF),
+        "qos bandwidth detected ospf percent 90 default 3mbps",
+    )
+    del_bw("ospf", "192.0.2.2")
+    expect_bw("default", 3000000, "default bandwidth scaled")
+    set_bw("ospf", "192.0.2.2", 5000)
+    expect_bw("ospf", 4500000, "ospf bandwidth not scaled after it came back")
+
+
+def test_hysteresis(tgen):
+    "Changes smaller than the hysteresis keep the bandwidth in use"
+    vtysh_conf(
+        "interface {}".format(INTF),
+        "qos bandwidth detected ospf nhrp hysteresis 10 default 3mbps",
+    )
+    expect_detected(5000000, 5000000, False, "hysteresis start")
+
+    out = tgen.gears["r1"].vtysh_cmd("show running-config")
+    assert " qos bandwidth detected ospf nhrp hysteresis 10 default 3mbps" in out, out
+
+    # +6%: kept
+    set_bw("ospf", "192.0.2.2", 5300)
+    expect_detected(5000000, 5300000, True, "6% change not held")
+
+    # +12% from the value in use: applied
+    set_bw("ospf", "192.0.2.2", 5600)
+    expect_detected(5600000, 5600000, False, "12% change not applied")
+
+    # -9% from 5.6M: kept; drifting to -11%: applied
+    set_bw("ospf", "192.0.2.2", 5100)
+    expect_detected(5600000, 5100000, True, "-9% change not held")
+    set_bw("ospf", "192.0.2.2", 4950)
+    expect_detected(4950000, 4950000, False, "-11.6% change not applied")
+
+    # +1%: kept
+    set_bw("ospf", "192.0.2.2", 5000)
+    expect_detected(4950000, 5000000, True, "+1% change not held")
+
+    # a change of source applies at once, even within the hysteresis
+    set_bw("nhrp", "192.0.2.2", 5200)
+    stop_injector("ospf")
+    expect_bw("nhrp", 5200000, "change of source held by the hysteresis")
+
+    # restore the state the following tests expect
+    set_bw("nhrp", "192.0.2.2", 8000)
+    start_injector("ospf")
+    time.sleep(1)
+    set_bw("ospf", "192.0.2.2", 5000)
+    vtysh_conf(
+        "interface {}".format(INTF), "qos bandwidth detected ospf nhrp default 3mbps"
+    )
+    expect_bw("ospf", 5000000, "state not restored")
+
+
+def test_hysteresis_increase_decrease(tgen):
+    "Separate thresholds for increases and decreases"
+    vtysh_conf(
+        "interface {}".format(INTF),
+        "qos bandwidth detected ospf nhrp hysteresis increase 20 decrease 5 default 3mbps",
+    )
+    expect_detected(5000000, 5000000, False, "start")
+
+    out = tgen.gears["r1"].vtysh_cmd("show running-config")
+    assert (
+        " qos bandwidth detected ospf nhrp hysteresis increase 20 decrease 5"
+        " default 3mbps" in out
+    ), out
+    show = qos_show()
+    assert show["detectedBandwidth"]["hysteresisIncrease"] == 20, show
+    assert show["detectedBandwidth"]["hysteresisDecrease"] == 5, show
+
+    # +10%: below the increase threshold, kept
+    set_bw("ospf", "192.0.2.2", 5500)
+    expect_detected(5000000, 5500000, True, "+10% increase not held")
+    # -2%: below the decrease threshold, kept
+    set_bw("ospf", "192.0.2.2", 4900)
+    expect_detected(5000000, 4900000, True, "-2% decrease not held")
+    # -6%: applied
+    set_bw("ospf", "192.0.2.2", 4700)
+    expect_detected(4700000, 4700000, False, "-6% decrease not applied")
+    # +19%: kept; +21%: applied
+    set_bw("ospf", "192.0.2.2", 5600)
+    expect_detected(4700000, 5600000, True, "+19% increase not held")
+    set_bw("ospf", "192.0.2.2", 5700)
+    expect_detected(5700000, 5700000, False, "+21% increase not applied")
+
+    # only an increase threshold: every decrease applies at once
+    vtysh_conf(
+        "interface {}".format(INTF),
+        "qos bandwidth detected ospf nhrp hysteresis increase 20 default 3mbps",
+    )
+    expect_detected(5700000, 5700000, False, "increase only")
+    out = tgen.gears["r1"].vtysh_cmd("show running-config")
+    assert re.search(
+        r"^ qos bandwidth detected ospf nhrp hysteresis increase 20 default 3mbps$",
+        out,
+        re.M,
+    ), out
+    set_bw("ospf", "192.0.2.2", 5650)
+    expect_detected(5650000, 5650000, False, "-1% decrease held without threshold")
+    set_bw("ospf", "192.0.2.2", 6000)
+    expect_detected(5650000, 6000000, True, "+6% increase not held")
+
+    # "hysteresis" needs a value
+    out = vtysh_conf(
+        "interface {}".format(INTF), "qos bandwidth detected ospf nhrp hysteresis"
+    )
+    assert "%" in out, out
+
+    # restore the state the following tests expect
+    set_bw("ospf", "192.0.2.2", 5000)
+    vtysh_conf(
+        "interface {}".format(INTF), "qos bandwidth detected ospf nhrp default 3mbps"
+    )
+    expect_bw("ospf", 5000000, "state not restored")
 
 
 def test_daemon_gone(tgen):
