@@ -161,13 +161,11 @@ static void link_cfg_set_up(struct interface *ifp)
 static void link_cfg_admin_up(struct interface *ifp, struct zebra_link_cfg *cfg)
 {
 	struct interface *peer = NULL;
-	unsigned int scope;
 
 	if (!link_matches_kind(ifp, cfg->params.kind))
 		return;
 
-	if (cfg->create_inflight || cfg->master_inflight ||
-	    cfg->brport_inflight)
+	if (cfg->create_inflight || cfg->master_inflight)
 		return;
 
 	if (link_cfg_shutdown_configured(ifp)) {
