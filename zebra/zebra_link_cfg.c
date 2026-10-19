@@ -32,12 +32,12 @@ struct zebra_link_cfg {
 	/* Desired kernel link */
 	bool has_link;
 	struct zebra_link_params params;
-	bool create_inflight;
+	bool create_pending;
 
 	/* Desired master */
 	bool has_master;
 	char master[IFNAMSIZ];
-	bool master_inflight;
+	bool master_pending;
 	/* ifindex of the master we last successfully enslaved to, or 0 */
 	ifindex_t master_applied;
 
@@ -76,8 +76,8 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	/* Keep it alive while a request is outstanding; the result handler
 	 * will look at it.
 	 */
-	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_inflight ||
-	    cfg->master_inflight)
+	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_pending ||
+	    cfg->master_pending)
 		return;
 
 	XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
@@ -165,7 +165,7 @@ static void link_cfg_admin_up(struct interface *ifp, struct zebra_link_cfg *cfg)
 	if (!link_matches_kind(ifp, cfg->params.kind))
 		return;
 
-	if (cfg->create_inflight || cfg->master_inflight)
+	if (cfg->create_pending || cfg->master_pending)
 		return;
 
 	if (link_cfg_shutdown_configured(ifp)) {
@@ -202,7 +202,7 @@ static void link_cfg_realize(struct interface *ifp)
 		return;
 
 	/* --- create --- */
-	if (cfg->has_link && !ifp_is_real(ifp) && !cfg->create_inflight) {
+	if (cfg->has_link && !ifp_is_real(ifp) && !cfg->create_pending) {
 		link_ifindex = 0;
 		dep = zebra_link_params_dependency(&cfg->params);
 		dep_ifp = dep ? link_cfg_lookup(ifp, dep) : NULL;
@@ -218,10 +218,10 @@ static void link_cfg_realize(struct interface *ifp)
 			if (dep_ifp)
 				link_ifindex = dep_ifp->ifindex;
 
-			cfg->create_inflight = true;
+			cfg->create_pending = true;
 			if (dplane_link_create(ifp, &cfg->params, link_ifindex) !=
 			    ZEBRA_DPLANE_REQUEST_QUEUED) {
-				cfg->create_inflight = false;
+				cfg->create_pending = false;
 				zlog_warn("%s: unable to queue creation of %s link %s",
 					  __func__, zebra_link_kind2str(cfg->params.kind),
 					  ifp->name);
@@ -230,7 +230,7 @@ static void link_cfg_realize(struct interface *ifp)
 	}
 
 	/* --- master --- */
-	if (cfg->has_master && ifp_is_real(ifp) && !cfg->master_inflight) {
+	if (cfg->has_master && ifp_is_real(ifp) && !cfg->master_pending) {
 		master_ifp = link_cfg_lookup(ifp, cfg->master);
 
 		if (!master_ifp || !ifp_is_real(master_ifp)) {
@@ -247,10 +247,10 @@ static void link_cfg_realize(struct interface *ifp)
 			 * Not known to be enslaved to the right master (or the
 			 * kernel reports a different bridge): (re)apply.
 			 */
-			cfg->master_inflight = true;
+			cfg->master_pending = true;
 			if (dplane_link_master_set(ifp, master_ifp->ifindex) !=
 			    ZEBRA_DPLANE_REQUEST_QUEUED) {
-				cfg->master_inflight = false;
+				cfg->master_pending = false;
 				zlog_warn("%s: unable to queue master %s for %s", __func__,
 					  cfg->master, ifp->name);
 			}
@@ -419,8 +419,8 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 
 	if (cfg) {
 		/* The kernel state we recorded is gone */
-		cfg->create_inflight = false;
-		cfg->master_inflight = false;
+		cfg->create_pending = false;
+		cfg->master_pending = false;
 		cfg->master_applied = 0;
 		cfg->up_done = false;
 	}
@@ -459,14 +459,14 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 	if (op == DPLANE_OP_LINK_CREATE) {
 		kind = dplane_ctx_link_get_params(ctx)->kind;
 		if (cfg)
-			cfg->create_inflight = false;
+			cfg->create_pending = false;
 		if (!ok)
 			zlog_warn("Failed to create %s link %s in the kernel",
 				  zebra_link_kind2str(kind), name);
 		/* On success the kernel notification brings the interface in */
 	} else if (op == DPLANE_OP_LINK_MASTER_SET) {
 		if (cfg) {
-			cfg->master_inflight = false;
+			cfg->master_pending = false;
 			if (ok)
 				cfg->master_applied = dplane_ctx_link_get_master_ifindex(ctx);
 		}
