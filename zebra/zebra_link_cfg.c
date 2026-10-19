@@ -166,15 +166,8 @@ static void link_cfg_admin_up(struct interface *ifp, struct zebra_link_cfg *cfg)
 	if (!link_matches_kind(ifp, cfg->params.kind))
 		return;
 
-	if (cfg->create_inflight || cfg->master_inflight || cfg->mtu_inflight ||
+	if (cfg->create_inflight || cfg->master_inflight ||
 	    cfg->brport_inflight)
-		return;
-	for (scope = 0; scope < ZLO_SCOPE_MAX; scope++)
-		if (cfg->opt_inflight[scope])
-			return;
-	/* Bond settings go first: some can only be changed while it is down */
-	if ((cfg->opt[ZLO_SCOPE_BOND] || cfg->opt_reset[ZLO_SCOPE_BOND] || bondx_active(cfg)) &&
-	    cfg->opt_applied_gen[ZLO_SCOPE_BOND] != cfg->opt_gen[ZLO_SCOPE_BOND])
 		return;
 
 	if (link_cfg_shutdown_configured(ifp)) {
