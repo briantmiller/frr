@@ -888,11 +888,6 @@ static int netlink_parse_error(const struct nlsock *nl, struct nlmsghdr *h,
 		       ((msg_type == RTM_NEWTUNNEL || msg_type == RTM_DELTUNNEL ||
 			 msg_type == RTM_GETTUNNEL) &&
 			(-errnum == EOPNOTSUPP)) ||
-		       /*
-	      * Link create is requested with NLM_F_EXCL so an existing link is
-	      * never modified; the link already being there is the desired
-	      * state.  A link that is already gone on delete is likewise fine.
-	      */
 		       (msg_type == RTM_NEWLINK && -errnum == EEXIST) ||
 		       (msg_type == RTM_DELLINK && -errnum == ENODEV))) {
 		if (expected) {
@@ -940,6 +935,8 @@ static int netlink_parse_error(const struct nlsock *nl, struct nlmsghdr *h,
 
 		return -1;
 	}
+
+}
 
 /*
  * netlink_parse_info
