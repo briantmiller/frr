@@ -159,7 +159,7 @@ static void ospf6_gr_flush_grace_lsas(struct ospf6 *ospf6)
 }
 
 /* Exit from the Graceful Restart mode. */
-static void ospf6_gr_restart_exit(struct ospf6 *ospf6, const char *reason)
+void ospf6_gr_restart_exit(struct ospf6 *ospf6, const char *reason)
 {
 	struct ospf6_area *area;
 	struct listnode *onode, *anode;
@@ -233,6 +233,15 @@ static void ospf6_gr_restart_exit(struct ospf6 *ospf6, const char *reason)
 	 *    should be removed.
 	 */
 	ospf6_spf_schedule(ospf6, OSPF6_SPF_FLAGS_GR_FINISH);
+
+	/*
+	 * The routing table computation is only complete after the SPF
+	 * scheduled above runs, followed by the AS-external calculation that it
+	 * schedules. Cancel any AS-external calculation left pending by an SPF
+	 * run during the restart, so finishing_restart isn't cleared before
+	 * that.
+	 */
+	event_cancel(&ospf6->t_ase_calc);
 
 	/* 6) Any grace-LSAs that the router originated should be flushed. */
 	ospf6_gr_flush_grace_lsas(ospf6);
