@@ -525,9 +525,12 @@ static bool gre_put_data(struct nlmsghdr *n, size_t buflen,
 		return false;
 
 	if (g->has_key) {
-		/* The key is only used by the kernel if the flag is set */
-		if (!nl_attr_put16(n, buflen, IFLA_GRE_IFLAGS, htons(GRE_KEY)) ||
-		    !nl_attr_put16(n, buflen, IFLA_GRE_OFLAGS, htons(GRE_KEY)) ||
+		/*
+		 * The key is only used by the kernel if the flag is set.  GRE_KEY
+		 * is already in network byte order.
+		 */
+		if (!nl_attr_put16(n, buflen, IFLA_GRE_IFLAGS, GRE_KEY) ||
+		    !nl_attr_put16(n, buflen, IFLA_GRE_OFLAGS, GRE_KEY) ||
 		    !nl_attr_put32(n, buflen, IFLA_GRE_IKEY, htonl(g->key)) ||
 		    !nl_attr_put32(n, buflen, IFLA_GRE_OKEY, htonl(g->key)))
 			return false;

@@ -168,6 +168,9 @@ def test_gre(tgen):
                 "remote": "10.255.0.2",
                 "ttl": 16,
                 "tos": "0x4",
+                # both directions carry the configured key
+                "ikey": "0.0.0.42",
+                "okey": "0.0.0.42",
             },
         }
     }

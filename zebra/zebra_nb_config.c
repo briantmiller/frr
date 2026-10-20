@@ -1669,13 +1669,20 @@ int lib_interface_zebra_bridge_pvid_destroy(struct nb_cb_destroy_args *args)
  * container is evaluated once per transaction in apply_finish, so leaves that
  * depend on one another (gre local/dev/remote) are always seen consistently.
  */
+static int link_type_validate(const struct lyd_node *kind_dnode, char *errmsg, size_t errmsg_len);
+
 int lib_interface_zebra_link_type_create(struct nb_cb_create_args *args)
 {
+	if (args->event == NB_EV_VALIDATE)
+		return link_type_validate(args->dnode, args->errmsg, args->errmsg_len);
 	return NB_OK;
 }
 
 int lib_interface_zebra_link_type_param_modify(struct nb_cb_modify_args *args)
 {
+	/* The checks look at the whole link-type/<kind> container */
+	if (args->event == NB_EV_VALIDATE)
+		return link_type_validate(lyd_parent(args->dnode), args->errmsg, args->errmsg_len);
 	return NB_OK;
 }
 
@@ -1808,6 +1815,36 @@ static bool link_type_params_from_dnode(const struct lyd_node *dnode,
 	}
 
 	return true;
+}
+
+/*
+ * Reject a link-type that could never be created (veth peer named like the
+ * interface, gre without local or dev, VLAN id out of range, ...) while the
+ * request is validated, so the client gets the error instead of a log line.
+ */
+static int link_type_validate(const struct lyd_node *kind_dnode, char *errmsg, size_t errmsg_len)
+{
+	struct zebra_link_params params;
+	const char *ifname, *err;
+
+	if (!kind_dnode)
+		return NB_OK;
+
+	if (!link_type_params_from_dnode(kind_dnode, &params)) {
+		snprintfrr(errmsg, errmsg_len, "invalid link-type configuration");
+		return NB_ERR_VALIDATION;
+	}
+
+	/* link-type/<kind> -> link-type -> zebra -> interface */
+	ifname = yang_dnode_get_string(kind_dnode, "../../../name");
+	err = zebra_link_params_validate(ifname, &params);
+	if (err) {
+		snprintfrr(errmsg, errmsg_len, "link-type %s on %s: %s",
+			   zebra_link_kind2str(params.kind), ifname, err);
+		return NB_ERR_VALIDATION;
+	}
+
+	return NB_OK;
 }
 
 /* Does the candidate/running configuration have any link-type kind besides

@@ -58,11 +58,21 @@ struct zebra_link_cfg {
 	bool has_link;
 	struct zebra_link_params params;
 	bool create_inflight;
+	/* What the queued create asked for, to notice when it became unwanted */
+	struct zebra_link_params create_params;
+	/*
+	 * A create that succeeded after the link-type was removed or changed.
+	 * The link it made is deleted again once it shows up as an interface.
+	 */
+	bool create_stale;
+	enum zebra_link_kind stale_kind;
 
 	/* Desired master */
 	bool has_master;
 	char master[IFNAMSIZ];
 	bool master_inflight;
+	/* Setting the master failed: not tried again until the configuration changes */
+	bool master_failed;
 	/* ifindex of the master we last successfully enslaved to, or 0 */
 	ifindex_t master_applied;
 
@@ -138,12 +148,13 @@ static void link_cfg_release_if_empty(struct interface *ifp)
 	 * will look at it.
 	 */
 	if (!cfg || cfg->has_link || cfg->has_master || cfg->create_inflight ||
-	    cfg->master_inflight || cfg->has_mtu || cfg->mtu_inflight || cfg->vl || cfg->brport_inflight ||
-	    cfg->isolated_set || cfg->opt[ZLO_SCOPE_BRIDGE] || cfg->opt[ZLO_SCOPE_PORT] ||
-	    cfg->opt_reset[ZLO_SCOPE_BRIDGE] || cfg->opt_reset[ZLO_SCOPE_PORT] ||
-	    cfg->opt_inflight[ZLO_SCOPE_BRIDGE] || cfg->opt_inflight[ZLO_SCOPE_PORT] ||
-	    cfg->opt[ZLO_SCOPE_BOND] || cfg->opt_reset[ZLO_SCOPE_BOND] ||
-	    cfg->opt_inflight[ZLO_SCOPE_BOND] || bondx_active(cfg))
+	    cfg->create_stale || cfg->master_inflight || cfg->has_mtu || cfg->mtu_inflight ||
+	    cfg->vl || cfg->brport_inflight || cfg->isolated_set || cfg->opt[ZLO_SCOPE_BRIDGE] ||
+	    cfg->opt[ZLO_SCOPE_PORT] || cfg->opt_reset[ZLO_SCOPE_BRIDGE] ||
+	    cfg->opt_reset[ZLO_SCOPE_PORT] || cfg->opt_inflight[ZLO_SCOPE_BRIDGE] ||
+	    cfg->opt_inflight[ZLO_SCOPE_PORT] || cfg->opt[ZLO_SCOPE_BOND] ||
+	    cfg->opt_reset[ZLO_SCOPE_BOND] || cfg->opt_inflight[ZLO_SCOPE_BOND] ||
+	    bondx_active(cfg))
 		return;
 
 	XFREE(MTYPE_ZEBRA_LINK_CFG, zif->link_cfg);
@@ -524,6 +535,24 @@ static void link_cfg_admin_up(struct interface *ifp, struct zebra_link_cfg *cfg)
 }
 
 /*
+ * A create that succeeded after its link-type was removed or changed made a
+ * link nobody wants.  Delete it, once it is known as an interface and only if
+ * it is what we created.  (A changed definition is created again afterwards.)
+ */
+static void link_cfg_drop_stale(struct interface *ifp, struct zebra_link_cfg *cfg)
+{
+	if (!cfg->create_stale || !ifp_is_real(ifp))
+		return;
+
+	cfg->create_stale = false;
+	if (link_matches_kind(ifp, cfg->stale_kind)) {
+		zlog_info("%s: removing %s, its link configuration changed while it was being created",
+			  __func__, ifp->name);
+		dplane_link_delete(ifp);
+	}
+}
+
+/*
  * Bring the kernel in line with the desired state of one interface.  Safe to
  * call at any time and as often as needed.
  */
@@ -537,6 +566,9 @@ static void link_cfg_realize(struct interface *ifp)
 
 	if (!cfg)
 		return;
+
+	/* --- undo a create that is no longer wanted --- */
+	link_cfg_drop_stale(ifp, cfg);
 
 	/* --- create --- */
 	if (cfg->has_link && !ifp_is_real(ifp) && !cfg->create_inflight) {
@@ -556,6 +588,7 @@ static void link_cfg_realize(struct interface *ifp)
 				link_ifindex = dep_ifp->ifindex;
 
 			cfg->create_inflight = true;
+			memcpy(&cfg->create_params, &cfg->params, sizeof(cfg->params));
 			if (dplane_link_create(ifp, &cfg->params, link_ifindex) !=
 			    ZEBRA_DPLANE_REQUEST_QUEUED) {
 				cfg->create_inflight = false;
@@ -567,7 +600,7 @@ static void link_cfg_realize(struct interface *ifp)
 	}
 
 	/* --- master --- */
-	if (cfg->has_master && ifp_is_real(ifp) && !cfg->master_inflight) {
+	if (cfg->has_master && ifp_is_real(ifp) && !cfg->master_inflight && !cfg->master_failed) {
 		master_ifp = link_cfg_lookup(ifp, cfg->master);
 
 		if (!master_ifp || !ifp_is_real(master_ifp)) {
@@ -745,6 +778,7 @@ void zebra_link_cfg_set_master(struct interface *ifp, const char *master)
 
 	if (!cfg->has_master || strcmp(cfg->master, master) != 0)
 		cfg->master_applied = 0;
+	cfg->master_failed = false;
 
 	strlcpy(cfg->master, master, sizeof(cfg->master));
 	cfg->has_master = true;
@@ -773,9 +807,14 @@ void zebra_link_cfg_unset_master(struct interface *ifp)
 			dplane_link_master_set(ifp, 0);
 	}
 
+	/*
+	 * If the assignment is still in flight there is nothing to undo yet:
+	 * the result handler releases the interface when it completes.
+	 */
 	cfg->has_master = false;
 	cfg->master[0] = '\0';
 	cfg->master_applied = 0;
+	cfg->master_failed = false;
 	link_cfg_release_if_empty(ifp);
 }
 
@@ -1093,7 +1132,9 @@ void zebra_link_cfg_if_deleted(struct interface *ifp)
 	if (cfg) {
 		/* The kernel state we recorded is gone */
 		cfg->create_inflight = false;
+		cfg->create_stale = false;
 		cfg->master_inflight = false;
+		cfg->master_failed = false;
 		cfg->master_applied = 0;
 		/* A new kernel link starts from its own MTU */
 		cfg->mtu_inflight = false;
@@ -1151,13 +1192,35 @@ void zebra_link_cfg_if_free(struct interface *ifp)
 
 /* ---- dataplane results ---- */
 
+/*
+ * The interface a result is about.  It may have changed VRF since the request
+ * was made (enslaving it to a VRF device moves it), so it is found by its
+ * index in the namespace first, and by name in the VRF it was in only if that
+ * is not possible (it has no index before it is created).
+ */
+static struct interface *link_cfg_result_ifp(const struct zebra_dplane_ctx *ctx)
+{
+	const char *name = dplane_ctx_get_ifname(ctx);
+	ifindex_t idx = dplane_ctx_get_ifindex(ctx);
+	struct interface *ifp = NULL;
+
+	if (idx != IFINDEX_INTERNAL) {
+		ifp = if_lookup_by_index_per_nsid(dplane_ctx_get_ns_id(ctx), idx);
+		if (ifp && strcmp(ifp->name, name) != 0)
+			ifp = NULL;
+	}
+	if (!ifp)
+		ifp = if_lookup_by_name(name, dplane_ctx_get_vrf(ctx));
+	return ifp;
+}
+
 void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 {
 	enum dplane_op_e op = dplane_ctx_get_op(ctx);
 	bool ok = dplane_ctx_get_status(ctx) == ZEBRA_DPLANE_REQUEST_SUCCESS;
 	enum zebra_link_kind kind;
 	const char *name = dplane_ctx_get_ifname(ctx);
-	struct interface *ifp = if_lookup_by_name(name, dplane_ctx_get_vrf(ctx));
+	struct interface *ifp = link_cfg_result_ifp(ctx);
 	struct zebra_link_cfg *cfg = ifp ? link_cfg_get(ifp, false) : NULL;
 
 	if (IS_ZEBRA_DEBUG_KERNEL || IS_ZEBRA_DEBUG_DPLANE_DETAIL)
@@ -1166,20 +1229,44 @@ void zebra_link_cfg_dplane_result(struct zebra_dplane_ctx *ctx)
 
 	if (op == DPLANE_OP_LINK_CREATE) {
 		kind = dplane_ctx_link_get_params(ctx)->kind;
-		if (cfg)
+		if (cfg) {
 			cfg->create_inflight = false;
+			/* Wanted when it was queued, but not any more? */
+			if (ok && (!cfg->has_link || memcmp(&cfg->params, &cfg->create_params,
+							    sizeof(cfg->params)) != 0)) {
+				cfg->create_stale = true;
+				cfg->stale_kind = kind;
+				/* Or later, when the interface appears */
+				link_cfg_drop_stale(ifp, cfg);
+			}
+		}
 		if (!ok)
 			zlog_warn("Failed to create %s link %s in the kernel",
 				  zebra_link_kind2str(kind), name);
 		/* On success the kernel notification brings the interface in */
 	} else if (op == DPLANE_OP_LINK_MASTER_SET) {
-		if (cfg) {
+		ifindex_t master_ifindex = dplane_ctx_link_get_master_ifindex(ctx);
+
+		/* Releasing a port (master 0) is not tracked as in flight */
+		if (cfg && master_ifindex) {
 			cfg->master_inflight = false;
-			if (ok)
-				cfg->master_applied = dplane_ctx_link_get_master_ifindex(ctx);
+			if (!ok) {
+				/* Not tried again by itself, but the rest goes on */
+				cfg->master_failed = true;
+			} else if (!cfg->has_master) {
+				/* The master was removed from the configuration meanwhile */
+				cfg->master_applied = 0;
+				if (ifp && ifp_is_real(ifp))
+					dplane_link_master_set(ifp, 0);
+			} else {
+				cfg->master_applied = master_ifindex;
+			}
 		}
-		/* VLAN settings wait for the enslavement */
-		if (ok)
+		/*
+		 * VLAN settings and bringing the link up wait for this, and the
+		 * kernel's notification of the enslavement is not a new interface.
+		 */
+		if (cfg && master_ifindex)
 			link_cfg_kick();
 		if (!ok)
 			zlog_warn("Failed to set master of %s (master ifindex %d)", name,
