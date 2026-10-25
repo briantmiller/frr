@@ -803,6 +803,8 @@ AC_ARG_ENABLE([group],
   AS_HELP_STRING([--enable-group=GROUP], [group to run FRR suite as (default frr)]))
 AC_ARG_ENABLE([vty_group],
   AS_HELP_STRING([--enable-vty-group=ARG], [set vty sockets to have specified group as owner]))
+AC_ARG_ENABLE([vty_admin_group],
+  AS_HELP_STRING([--enable-vty-admin-group=ARG], [only allow root, the FRR user and members of this group to enable on vtysh sockets (default: no restriction)]))
 AC_ARG_ENABLE([configfile_mask],
   AS_HELP_STRING([--enable-configfile-mask=ARG], [set mask for config files]))
 AC_ARG_ENABLE([logfile_mask],
@@ -1015,9 +1017,17 @@ elif test "$enable_vty_group" != ""; then
     AC_DEFINE_UNQUOTED([VTY_GROUP], ["${enable_vty_group}"], [VTY Sockets Group])
   fi
 fi
+if test "$enable_vty_admin_group" = "yes" ; then
+  AC_MSG_ERROR([--enable-vty-admin-group requires a group as argument, not yes])
+elif test "$enable_vty_admin_group" != ""; then
+  if test "$enable_vty_admin_group" != "no"; then
+    AC_DEFINE_UNQUOTED([VTY_ADMIN_GROUP], ["${enable_vty_admin_group}"], [VTY Admin Group])
+  fi
+fi
 AC_SUBST([enable_user])
 AC_SUBST([enable_group])
 AC_SUBST([enable_vty_group])
+AC_SUBST([enable_vty_admin_group])
 
 enable_configfile_mask=${enable_configfile_mask:-0600}
 AC_DEFINE_UNQUOTED([CONFIGFILE_MASK], [${enable_configfile_mask}], [Mask for config files])
@@ -1357,6 +1367,7 @@ dnl ---------------
 AC_CHECK_FUNCS([ \
 	strlcat strlcpy \
 	getgrouplist \
+	getpeereid \
 	getloadavg \
 	openat \
 	unlinkat \
@@ -2932,6 +2943,7 @@ script directory        : ${e_scriptdir}
 user to run as          : ${enable_user}
 group to run as         : ${enable_group}
 group for vty sockets   : ${enable_vty_group}
+vty admin group         : ${enable_vty_admin_group}
 config file mask        : ${enable_configfile_mask}
 log file mask           : ${enable_logfile_mask}
 zebra protobuf enabled  : ${enable_protobuf:-yes}

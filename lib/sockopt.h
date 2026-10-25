@@ -184,6 +184,40 @@ extern int sockopt_v6only(int family, int sock);
 extern int sockopt_ttl(int family, int sock, int ttl);
 extern int sockopt_minttl(int family, int sock, int minttl);
 
+/*
+ * Credentials of the process at the other end of a connected AF_UNIX
+ * socket, as reported by the kernel.  pid is -1 when the platform does
+ * not report it.
+ */
+struct sockopt_peer_cred {
+	uid_t uid;
+	gid_t gid;
+	pid_t pid;
+};
+
+/*
+ * Fill in *cred for the peer of the connected AF_UNIX socket sock.
+ *
+ * Uses SO_PEERCRED on Linux and getpeereid() elsewhere.  Returns 0 on
+ * success, or -1 with errno set (EOPNOTSUPP if the platform provides no way
+ * to obtain peer credentials).
+ */
+extern int sockopt_peer_cred(int sock, struct sockopt_peer_cred *cred);
+
+/*
+ * Return true if the peer of the connected AF_UNIX socket sock is a member
+ * of group gid, either as its primary group or as a supplementary group.
+ * cred must have been filled in by sockopt_peer_cred() on the same socket.
+ *
+ * On Linux the supplementary groups are taken from the kernel
+ * (SO_PEERGROUPS) and reflect the peer process at connect() time.  Where
+ * that is unavailable, the peer uid's group list is looked up with
+ * getgrouplist(), which goes through NSS and may block.
+ *
+ * Any failure to determine membership returns false.
+ */
+extern bool sockopt_peer_has_gid(int sock, const struct sockopt_peer_cred *cred, gid_t gid);
+
 #ifdef __cplusplus
 }
 #endif

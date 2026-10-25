@@ -1354,6 +1354,14 @@ DEFUN (enable,
        "enable",
        "Turn on privileged mode command\n")
 {
+	/* vtysh sessions may be restricted to VIEW_NODE by group membership */
+	if (!vty_may_enable(vty)) {
+		zlog_notice("%s: enable denied (not root, FRR user or vty admin group member)",
+			    vty->address);
+		vty_out(vty, "%% Permission denied\n");
+		return CMD_WARNING;
+	}
+
 	/* If enable password is NULL, change to ENABLE_NODE */
 	if ((host.enable == NULL && host.enable_encrypt == NULL)
 	    || vty->type == VTY_SHELL_SERV)

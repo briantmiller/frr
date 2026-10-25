@@ -104,6 +104,7 @@ static void opt_extend(const struct optspec *os)
 #define OPTION_LOGGING   1007
 #define OPTION_LIMIT_FDS 1008
 #define OPTION_SCRIPTDIR 1009
+#define OPTION_VTYADMINGRP 1010
 
 static const struct option lo_always[] = {
 	{ "help", no_argument, NULL, 'h' },
@@ -118,6 +119,7 @@ static const struct option lo_always[] = {
 	{ "vrfdefaultname", required_argument, NULL, 'o' },
 	{ "graceful_restart", optional_argument, NULL, 'K' },
 	{ "vty_socket", required_argument, NULL, OPTION_VTYSOCK },
+	{ "vty_admin_group", required_argument, NULL, OPTION_VTYADMINGRP },
 	{ "moduledir", required_argument, NULL, OPTION_MODULEDIR },
 	{ "scriptdir", required_argument, NULL, OPTION_SCRIPTDIR },
 	{ "log", required_argument, NULL, OPTION_LOG },
@@ -143,6 +145,7 @@ static const struct optspec os_always = {
 	"  -o, --vrfdefaultname     Set default VRF name.\n"
 	"  -K, --graceful_restart   FRR starting in Graceful Restart mode, with optional route-cleanup timer\n"
 	"      --vty_socket   Override vty socket path\n"
+	"      --vty_admin_group  Only allow root, the FRR user and members of this group to enable on vtysh sockets\n"
 	"      --moduledir    Override modules directory\n"
 	"      --scriptdir    Override scripts directory\n"
 	"      --log          Set Logging to stdout, syslog, or file:<name>\n"
@@ -608,6 +611,14 @@ static int frr_opt(int opt)
 			break;
 		}
 		di->vty_sock_path = optarg;
+		break;
+	case OPTION_VTYADMINGRP:
+		if (di->vty_admin_group) {
+			fprintf(stderr, "--vty_admin_group option specified more than once!\n");
+			errors++;
+			break;
+		}
+		di->vty_admin_group = optarg;
 		break;
 	case OPTION_MODULEDIR:
 		if (di->module_path) {
@@ -1109,6 +1120,7 @@ void frr_vty_serv_start(bool check_detach)
 		di->vty_path = vtypath_default;
 	}
 
+	vty_set_admin_group(di->vty_admin_group);
 	vty_serv_start(di->vty_addr, di->vty_port, di->vty_path);
 
 	if (check_detach)

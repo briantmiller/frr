@@ -369,6 +369,14 @@ tests_lib_test_skiplist_LDADD = $(ALL_TESTS_LDADD)
 tests_lib_test_skiplist_SOURCES = tests/lib/test_skiplist.c
 
 
+check_PROGRAMS += tests/lib/test_sockopt_peer
+tests_lib_test_sockopt_peer_CFLAGS = $(TESTS_CFLAGS)
+tests_lib_test_sockopt_peer_CPPFLAGS = $(TESTS_CPPFLAGS)
+tests_lib_test_sockopt_peer_LDADD = $(ALL_TESTS_LDADD)
+tests_lib_test_sockopt_peer_SOURCES = tests/lib/test_sockopt_peer.c
+EXTRA_DIST += tests/lib/test_sockopt_peer.py
+
+
 check_PROGRAMS += tests/lib/test_srcdest_table
 tests_lib_test_srcdest_table_CFLAGS = $(TESTS_CFLAGS)
 tests_lib_test_srcdest_table_CPPFLAGS = $(TESTS_CPPFLAGS)

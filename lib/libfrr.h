@@ -125,6 +125,7 @@ struct frr_daemon_info {
 	char *vty_addr;
 	int vty_port;
 	char *vty_sock_path;
+	char *vty_admin_group;
 	bool dryrun;
 	bool daemon_mode;
 	bool terminal;
