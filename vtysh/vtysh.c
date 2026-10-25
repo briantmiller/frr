@@ -36,6 +36,7 @@
 #include "vrf.h"
 #include "libfrr.h"
 #include "command_graph.h"
+#include "command_match.h"
 #include "frrstr.h"
 #include "json.h"
 #include "ferr.h"
@@ -503,6 +504,85 @@ static void vtysh_client_config(struct vtysh_client *head_client, char *line)
 }
 
 /* Command execution over the vty interface. */
+/*
+ * Set when the daemons refused "enable" because this user is not root, the
+ * FRR user or a member of the vty admin group (see vty_set_admin_group()).
+ * The session then stays in VIEW_NODE.
+ */
+bool vtysh_view_only;
+
+static void vtysh_discard_output(void *arg, const char *buf)
+{
+}
+
+/*
+ * Would line be accepted in enable mode?  Used to tell a view-only user
+ * that a command is not permitted, rather than that it doesn't exist.
+ */
+static bool vtysh_needs_enable(const char *line)
+{
+	struct cmd_node *cnode;
+	struct list *argv = NULL;
+	const struct cmd_element *el = NULL;
+	enum matcher_rv rv;
+	vector vline;
+
+	if (!vtysh_view_only || gvty->node != VIEW_NODE)
+		return false;
+
+	cnode = vector_slot(cmdvec, ENABLE_NODE);
+	vline = cmd_make_strvec(line);
+	if (!cnode || !vline)
+		return false;
+
+	rv = command_match(cnode->cmdgraph, vline, &argv, &el);
+	if (argv)
+		list_delete(&argv);
+	cmd_free_strvec(vline);
+
+	return rv != MATCHER_NO_MATCH;
+}
+
+void vtysh_enable_or_view(void)
+{
+	struct vtysh_client *vc;
+	bool denied = false, accepted = false;
+	FILE *of = gvty->of;
+	unsigned int i;
+	int ret;
+
+	/* don't let the daemons' replies reach the user's output */
+	gvty->of = NULL;
+
+	for (i = 0; i < array_size(vtysh_client); i++)
+		for (vc = &vtysh_client[i]; vc; vc = vc->next) {
+			if (vc->fd < 0 && vc->fd != VTYSH_WAS_ACTIVE)
+				continue;
+			ret = vtysh_client_run(vc, "enable", vtysh_discard_output, NULL, NULL);
+			if (ret == CMD_WARNING)
+				denied = true;
+			else if (ret == CMD_SUCCESS)
+				accepted = true;
+		}
+
+	/*
+	 * Daemons normally all apply the same policy, but if they disagree,
+	 * put the ones that accepted back into view mode to match vtysh.
+	 */
+	if (denied && accepted)
+		for (i = 0; i < array_size(vtysh_client); i++)
+			for (vc = &vtysh_client[i]; vc; vc = vc->next)
+				vtysh_client_run(vc, "disable", vtysh_discard_output, NULL, NULL);
+
+	gvty->of = of;
+
+	if (denied) {
+		vtysh_view_only = true;
+		gvty->node = VIEW_NODE;
+	} else
+		gvty->node = ENABLE_NODE;
+}
+
 static int vtysh_execute_func(const char *line, int pager)
 {
 	int ret, cmd_stat;
@@ -574,7 +654,10 @@ static int vtysh_execute_func(const char *line, int pager)
 		vty_out(gvty, "%% Ambiguous command: %s\n", line);
 		break;
 	case CMD_ERR_NO_MATCH:
-		vty_out(gvty, "%% Unknown command: %s\n", line);
+		if (vtysh_needs_enable(line))
+			vty_out(gvty, "%% Permission denied (view-only access): %s\n", line);
+		else
+			vty_out(gvty, "%% Unknown command: %s\n", line);
 		break;
 	case CMD_ERR_INCOMPLETE:
 		vty_out(gvty, "%% Command incomplete: %s\n", line);
@@ -5198,7 +5281,7 @@ static int vtysh_reconnect(struct vtysh_client *vclient)
 		return ret;
 	}
 	fprintf(stderr, "success!\n");
-	if (vtysh_client_execute(vclient, "enable") < 0)
+	if (!vtysh_view_only && vtysh_client_execute(vclient, "enable") < 0)
 		return -1;
 	return vtysh_execute_no_pager("end");
 }

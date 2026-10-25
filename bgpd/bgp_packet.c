@@ -54,14 +54,12 @@
 #include "bgpd/bgp_ls.h"
 
 DEFINE_HOOK(bgp_packet_dump,
-		(struct peer *peer, uint8_t type, bgp_size_t size,
-			struct stream *s),
-		(peer, type, size, s));
+	    (struct peer_connection *connection, uint8_t type, bgp_size_t size, struct stream *s),
+	    (connection, type, size, s));
 
 DEFINE_HOOK(bgp_packet_send,
-		(struct peer *peer, uint8_t type, bgp_size_t size,
-			struct stream *s),
-		(peer, type, size, s));
+	    (struct peer_connection *connection, uint8_t type, bgp_size_t size, struct stream *s),
+	    (connection, type, size, s));
 
 /**
  * Sets marker and type fields for a BGP message.
@@ -724,7 +722,7 @@ void bgp_open_send(struct peer_connection *connection)
 
 	/* Dump packet if debug option is set. */
 	/* bgp_packet_dump (s); */
-	hook_call(bgp_packet_send, peer, BGP_MSG_OPEN, stream_get_endp(s), s);
+	hook_call(bgp_packet_send, connection, BGP_MSG_OPEN, stream_get_endp(s), s);
 
 	/* Add packet to the peer. */
 	bgp_packet_add(connection, s);
@@ -1109,6 +1107,24 @@ void bgp_notify_send_with_data(struct peer_connection *connection, uint8_t code,
 {
 	bgp_notify_send_internal(connection, code, sub_code, data, datalen,
 				 true);
+}
+
+/*
+ * Send a Finite State Machine Error for an unexpected message of the given
+ * type.
+ *
+ * RFC 6608 section 4: with the state specific subcodes, the Data field is a
+ * 1-octet unsigned integer that indicates the type of the unexpected message.
+ * No Data is defined for the Unspecified subcode, so none is sent with it.
+ */
+void bgp_notify_send_fsm_error(struct peer_connection *connection, uint8_t type)
+{
+	uint8_t sub_code = bgp_fsm_error_subcode(connection->status);
+
+	if (sub_code == BGP_NOTIFY_FSM_ERR_SUBCODE_UNSPECIFIC)
+		bgp_notify_send(connection, BGP_NOTIFY_FSM_ERR, sub_code);
+	else
+		bgp_notify_send_with_data(connection, BGP_NOTIFY_FSM_ERR, sub_code, &type, 1);
 }
 
 /*
@@ -2327,8 +2343,7 @@ static void bgp_refresh_stalepath_timer_expire(struct event *event)
 	safi_t safi = paf->safi;
 	struct peer *peer = paf->peer;
 
-	if (peer->nsf[afi][safi])
-		bgp_clear_stale_route(peer, afi, safi);
+	bgp_clear_stale_route(peer, afi, safi);
 
 	if (bgp_debug_neighbor_events(peer))
 		zlog_debug(
@@ -2413,8 +2428,7 @@ static int bgp_update_receive(struct peer_connection *connection, bgp_size_t siz
 	if (!peer_established(connection)) {
 		flog_err(EC_BGP_INVALID_STATUS, "%s [FSM] Update packet received under status %s",
 			 peer->host, lookup_msg(bgp_status_msg, connection->status, NULL));
-		bgp_notify_send(connection, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(connection->status));
+		bgp_notify_send_fsm_error(connection, BGP_MSG_UPDATE);
 		return BGP_Stop;
 	}
 
@@ -2827,8 +2841,9 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 		flog_err(EC_BGP_INVALID_STATUS,
 			 "%s [Error] Route refresh packet received under status %s", peer->host,
 			 lookup_msg(bgp_status_msg, connection->status, NULL));
-		bgp_notify_send(connection, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(connection->status));
+		/* BGP_MSG_ROUTE_REFRESH_NEW or _OLD, as received */
+		bgp_notify_send_fsm_error(connection,
+					  stream_getc_from(connection->curr, BGP_MARKER_SIZE + 2));
 		return BGP_Stop;
 	}
 
@@ -3174,8 +3189,7 @@ static int bgp_route_refresh_receive(struct peer_connection *connection, bgp_siz
 				"%pBP rcvd route-refresh (EoRR) for %s/%s, stopping BoRR timer",
 				peer, afi2str(afi), safi2str(safi));
 
-		if (peer->nsf[afi][safi])
-			bgp_clear_stale_route(peer, afi, safi);
+		bgp_clear_stale_route(peer, afi, safi);
 	} else {
 		if (bgp_debug_neighbor_events(peer))
 			zlog_debug(
@@ -4089,8 +4103,7 @@ int bgp_capability_receive(struct peer_connection *connection, bgp_size_t size)
 			 "%s [Error] Dynamic capability packet received under status %s",
 			 peer->host,
 			 lookup_msg(bgp_status_msg, connection->status, NULL));
-		bgp_notify_send(connection, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(connection->status));
+		bgp_notify_send_fsm_error(connection, BGP_MSG_CAPABILITY);
 		return BGP_Stop;
 	}
 
@@ -4195,7 +4208,7 @@ void bgp_process_packet(struct event *event)
 		size = stream_getw(connection->curr);
 		type = stream_getc(connection->curr);
 
-		hook_call(bgp_packet_dump, peer, type, size, connection->curr);
+		hook_call(bgp_packet_dump, connection, type, size, connection->curr);
 
 		/* adjust size to exclude the marker + length + type */
 		size -= BGP_HEADER_SIZE;

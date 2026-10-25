@@ -163,6 +163,15 @@ extern struct vty *gvty;
 
 extern int user_mode;
 
+/* set when the daemons refused "enable"; see vtysh_enable_or_view() */
+extern bool vtysh_view_only;
+
+/*
+ * Enter enable mode on all daemons, or, if they refuse because this user
+ * is not permitted to (vty admin group), quietly stay in view mode.
+ */
+extern void vtysh_enable_or_view(void);
+
 extern bool vtysh_add_timestamp;
 
 struct vtysh_client {

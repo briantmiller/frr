@@ -621,7 +621,7 @@ int main(int argc, char **argv, char **env)
 
 	if (dryrun && cmd && cmd->line) {
 		if (!user_mode)
-			vtysh_execute("enable");
+			vtysh_enable_or_view();
 		while (cmd) {
 			struct cmd_rec *cr;
 			char *cmdnow = cmd->line, *next;
@@ -753,7 +753,7 @@ int main(int argc, char **argv, char **env)
 	if (cmd && cmd->line) {
 		/* Enter into enable node. */
 		if (!user_mode)
-			vtysh_execute("enable");
+			vtysh_enable_or_view();
 
 		vtysh_add_timestamp = ts_flag;
 
@@ -825,8 +825,12 @@ int main(int argc, char **argv, char **env)
 	vty_hello(gvty);
 
 	/* Enter into enable node. */
-	if (!user_mode)
-		vtysh_execute("enable");
+	if (!user_mode) {
+		vtysh_enable_or_view();
+		if (vtysh_view_only)
+			fprintf(stderr,
+				"%% View-only access: configuration and other privileged commands are not permitted for this user.\n\n");
+	}
 
 	vtysh_add_timestamp = ts_flag;
 

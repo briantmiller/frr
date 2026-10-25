@@ -5,6 +5,9 @@
 
 #include <zebra.h>
 
+#include <pwd.h>
+#include <grp.h>
+
 #ifndef __linux__
 #include <net/if_dl.h>
 #endif
@@ -13,6 +16,7 @@
 #include "sockopt.h"
 #include "sockunion.h"
 #include "lib_errors.h"
+#include "memory.h"
 
 #if (defined(__FreeBSD__) &&                                                   \
      ((__FreeBSD_version >= 500022 && __FreeBSD_version < 700000) ||           \
@@ -860,4 +864,126 @@ int sockopt_v6only(int family, int sock)
 	}
 #endif /* IPV6_V6ONLY */
 	return 0;
+}
+
+int sockopt_peer_cred(int sock, struct sockopt_peer_cred *cred)
+{
+#if defined(SO_PEERCRED) && defined(GNU_LINUX)
+	struct ucred uc;
+	socklen_t len = sizeof(uc);
+
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &uc, &len) < 0)
+		return -1;
+
+	cred->uid = uc.uid;
+	cred->gid = uc.gid;
+	cred->pid = uc.pid;
+	return 0;
+#elif defined(HAVE_GETPEEREID)
+	uid_t uid;
+	gid_t gid;
+
+	if (getpeereid(sock, &uid, &gid) < 0)
+		return -1;
+
+	cred->uid = uid;
+	cred->gid = gid;
+	cred->pid = -1;
+	return 0;
+#else
+	(void)sock;
+	(void)cred;
+	errno = EOPNOTSUPP;
+	return -1;
+#endif
+}
+
+#if defined(SO_PEERGROUPS) && defined(GNU_LINUX)
+/* returns 1 / 0 for member / not a member, -1 if the kernel can't tell us */
+static int sockopt_peer_has_gid_kernel(int sock, gid_t gid)
+{
+	gid_t stackbuf[64];
+	gid_t *groups = stackbuf;
+	socklen_t len = sizeof(stackbuf);
+	int ret = 0;
+
+	if (getsockopt(sock, SOL_SOCKET, SO_PEERGROUPS, groups, &len) < 0) {
+		if (errno != ERANGE)
+			return -1;
+
+		/* len now holds the required buffer size */
+		groups = XMALLOC(MTYPE_TMP, len);
+		if (getsockopt(sock, SOL_SOCKET, SO_PEERGROUPS, groups, &len) < 0) {
+			XFREE(MTYPE_TMP, groups);
+			return -1;
+		}
+	}
+
+	for (size_t i = 0; i < len / sizeof(gid_t); i++)
+		if (groups[i] == gid) {
+			ret = 1;
+			break;
+		}
+
+	if (groups != stackbuf)
+		XFREE(MTYPE_TMP, groups);
+	return ret;
+}
+#endif
+
+#ifdef HAVE_GETGROUPLIST
+/* fall back to the system's group database for the peer's uid */
+static bool sockopt_peer_has_gid_nss(const struct sockopt_peer_cred *cred, gid_t gid)
+{
+	struct passwd pw, *pwp = NULL;
+	char pwbuf[1024];
+	int ngroups = 64;
+	gid_t *groups;
+	bool found = false;
+
+	if (getpwuid_r(cred->uid, &pw, pwbuf, sizeof(pwbuf), &pwp) != 0 || pwp == NULL)
+		return false;
+
+	groups = XCALLOC(MTYPE_TMP, ngroups * sizeof(gid_t));
+	if (getgrouplist(pw.pw_name, cred->gid, groups, &ngroups) < 0) {
+		/* ngroups now holds the required count */
+		groups = XREALLOC(MTYPE_TMP, groups, ngroups * sizeof(gid_t));
+		if (getgrouplist(pw.pw_name, cred->gid, groups, &ngroups) < 0)
+			ngroups = 0;
+	}
+
+	for (int i = 0; i < ngroups; i++)
+		if (groups[i] == gid) {
+			found = true;
+			break;
+		}
+
+	XFREE(MTYPE_TMP, groups);
+	return found;
+}
+#endif
+
+bool sockopt_peer_has_gid(int sock, const struct sockopt_peer_cred *cred, gid_t gid)
+{
+	if (cred->gid == gid)
+		return true;
+
+#if defined(SO_PEERGROUPS) && defined(GNU_LINUX)
+	switch (sockopt_peer_has_gid_kernel(sock, gid)) {
+	case 1:
+		return true;
+	case 0:
+		return false;
+	default:
+		/* old kernel: fall through to NSS lookup */
+		break;
+	}
+#endif
+
+#ifdef HAVE_GETGROUPLIST
+	return sockopt_peer_has_gid_nss(cred, gid);
+#else
+	(void)sock;
+	return false;
+#endif
 }

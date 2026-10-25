@@ -215,6 +215,22 @@ struct vty {
 	/* What address is this vty coming from. */
 	char address[SU_ADDRSTRLEN];
 
+	/*
+	 * VTY_SHELL_SERV only: credentials of the connecting process as
+	 * reported by the kernel at accept time.  Only meaningful when
+	 * peer_cred_valid is set.
+	 */
+	bool peer_cred_valid;
+	uid_t peer_uid;
+	gid_t peer_gid;
+	pid_t peer_pid;
+
+	/*
+	 * VTY_SHELL_SERV only: whether this session may leave VIEW_NODE.
+	 * Decided once at accept time; see vty_set_admin_group().
+	 */
+	bool peer_admin;
+
 	/* "frame" output.  This is buffered and will be printed if some
 	 * actual output follows, or will be discarded if the frame ends
 	 * without any output. */
@@ -398,6 +414,17 @@ extern void vty_read_file(struct nb_config *config, FILE *confp);
 extern void vty_read_file_finish(struct vty *vty, struct nb_config *config);
 extern void vty_time_print(struct vty *vty, int cr);
 extern void vty_serv_start(const char *addr, unsigned short port, const char *path);
+
+/*
+ * Restrict "enable" on vtysh sockets to root, the FRR daemon user and
+ * members of the named group.  NULL selects the build-time default
+ * (--enable-vty-admin-group), and NULL with no default, or "", leaves vtysh
+ * sockets unrestricted.  Must be called before vty_serv_start().
+ */
+extern void vty_set_admin_group(const char *name);
+
+/* May this vty enter ENABLE_NODE? */
+extern bool vty_may_enable(const struct vty *vty);
 extern void vty_serv_stop(void);
 extern void vty_close(struct vty *vty);
 extern char *vty_get_cwd(void);

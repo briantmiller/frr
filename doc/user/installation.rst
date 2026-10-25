@@ -480,6 +480,15 @@ options to control the behaviour of FRR daemons.
    accessing only the vty sockets, hence allowing one to delegate this group to
    individual users, or to run vtysh setgid to this group.
 
+.. option:: --enable-vty-admin-group <group>
+
+   Build the daemons so that, by default, only root, the FRR user and members
+   of `group` may enter enable mode on vtysh sockets; other members of the
+   vty group get view-only access. The default can be changed at run time
+   with the daemons' :option:`--vty_admin_group` option. Without this option
+   there is no restriction (the historical behavior). See
+   :ref:`vtysh-access-control`.
+
 The default user and group which will be configured is 'frr' if no user or
 group is specified. Note that this user or group requires write access to the
 local state directory (see :option:`--localstatedir`) and requires at least

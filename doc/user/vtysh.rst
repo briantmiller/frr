@@ -104,7 +104,66 @@ plus membership in the |INSTALL_VTY_GROUP| group (which is the group that the
 daemons will change ownership of their sockets to).
 
 To restrict access to FRR configuration, make sure no unauthorized users are
-members of the |INSTALL_VTY_GROUP| group.
+members of the |INSTALL_VTY_GROUP| group, or configure a vty admin group as
+described in :ref:`vtysh-access-control`.
+
+.. _vtysh-access-control:
+
+View-only access for non-admin users
+------------------------------------
+
+By default, any user who can connect to a daemon's vtysh socket can enter
+enable mode and change configuration. The daemons can instead restrict
+enable mode to an *admin group*, giving everybody else view-only access::
+
+   # /etc/frr/daemons
+   frr_global_options="--vty_admin_group frradmin"
+
+or at build time with :option:`--enable-vty-admin-group`. With an admin group
+configured, a vtysh session may enter enable mode only if the user running
+vtysh is:
+
+- root,
+- the FRR user the daemons run as, or
+- a member of the admin group (as primary or supplementary group).
+
+Other users who can reach the socket, i.e. members of the
+|INSTALL_VTY_GROUP| group, can run commands available in view mode (most
+``show`` commands) but not ``configure``, ``clear``, ``debug``, ``write`` or
+any other command that requires enable mode. Attempts are refused with
+``% Permission denied`` and logged with the user's numeric user ID.
+
+A typical setup puts operators in |INSTALL_VTY_GROUP| and administrators in
+both |INSTALL_VTY_GROUP| and the admin group::
+
+   groupadd frradmin
+   usermod -a -G frrvty alice           # view only
+   usermod -a -G frrvty,frradmin bob    # full access
+
+The check is made by each daemon, not by vtysh, using the user and group IDs
+the kernel reports for the connecting process. It therefore also applies to
+other programs that connect to the sockets directly. Group membership is
+evaluated when vtysh connects; users need to start a new login session after
+being added to or removed from the admin group.
+
+.. note::
+
+   On Linux 4.13 and later, the connecting process's supplementary groups are
+   obtained from the kernel. On other systems they are looked up in the system
+   user database (``getgrouplist()``).
+
+If the configured group does not exist, an error is logged at startup and
+only root and the FRR user may enter enable mode.
+
+When the daemons refuse enable mode, vtysh starts in view mode, shows the
+notice ``% View-only access: ...`` in interactive sessions, and reports
+commands that need enable mode as ``% Permission denied (view-only access)``
+rather than as unknown commands. Output of ``vtysh -c`` commands is not
+affected, so scripts that parse ``show ... json`` output keep working.
+
+Commands available in view mode are not hidden from the configuration:
+``show running-config`` requires enable mode and remains unavailable to
+view-only users.
 
 .. warning::
 
@@ -115,6 +174,9 @@ members of the |INSTALL_VTY_GROUP| group.
    security are provided for this option and under no circumstances should this
    option be used to provide any semblance of security or read-only access to
    FRR.
+
+   For view-only access enforced by the daemons themselves, configure a vty
+   admin group as described in :ref:`vtysh-access-control`.
 
 PAM support (experimental)
 --------------------------

@@ -44,6 +44,8 @@ static void ptm_sbfd_echo_xmt_TO(struct bfd_session *bfd);
 static void sbfd_down_handler(struct bfd_session *bs, int nstate);
 static void sbfd_up_handler(struct bfd_session *bs, int nstate);
 
+static bool bfd_vrf_is_perm(const char *vrf_name);
+
 /**
  * Remove BFD profile from all BFD sessions so we don't leave dangling
  * pointers.
@@ -465,6 +467,14 @@ int bfd_session_enable(struct bfd_session *bs)
 		if (bvrf->bg_session_count == 0)
 			bfd_vrf_start_sockets(bvrf);
 		bvrf->bg_session_count++;
+		/*
+		 * Echo set before the VRF was known opened no echo socket.
+		 * Only where bfd_vrf_start_sockets would open sockets: not
+		 * with a data plane, and not in a VRF left out of --vrfs.
+		 */
+		if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_ECHO) && !bglobal.bg_use_dplane &&
+		    bfd_vrf_is_perm(bvrf->vrf->name))
+			bfd_vrf_toggle_echo(bvrf);
 	}
 
 	/* Only start timers if we are using active mode. */
@@ -1058,6 +1068,18 @@ void bfd_recvtimer_cb(struct event *t)
 	case PTM_BFD_INIT:
 	case PTM_BFD_UP:
 		ptm_bfd_sess_dn(bs, BD_CONTROL_EXPIRED, false);
+		break;
+	case PTM_BFD_DOWN:
+		/*
+		 * RFC 5880, Section 6.8.1: bfd.RemoteDiscr is set to zero once
+		 * a Detection Time passes without a valid packet. A packet the
+		 * peer sent while we were already Down (AdminDown, kept up for
+		 * a Detection Time as Section 6.8.16 recommends) sets it again,
+		 * and nothing else clears it. If the peer then comes back with
+		 * a new discriminator, it discards everything we send, and a
+		 * passive peer never speaks first.
+		 */
+		bs->discrs.remote_discr = 0;
 		break;
 	}
 }

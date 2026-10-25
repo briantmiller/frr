@@ -208,6 +208,15 @@ Basic Config Commands
    is used to start the daemon then this command is turned on by default
    and cannot be turned off and the [no] form of the command is disallowed.
 
+   For commands received from :ref:`vtysh <vty-shell>`, each log line
+   identifies the connecting process by the user ID and process ID that the
+   kernel reports for the vtysh socket, for example::
+
+      vty[13]@vtysh uid=1001 pid=4242# configure terminal
+
+   Only numeric IDs are logged; use ``getent passwd UID`` to map them to a
+   user name.  The process ID is omitted on platforms that do not report it.
+
 .. clicmd:: log filtered-file [FILENAME [LEVEL]]
 
    Configure a destination file for filtered logs with the
@@ -937,6 +946,17 @@ These options apply to all |PACKAGE_NAME| daemons.
    Limit the number of file descriptors that will be used internally
    by the FRR daemons. By default, the daemons use the system ulimit
    value.
+
+.. option:: --vty_admin_group <group>
+
+   Only allow root, the FRR user and members of `group` to enter enable mode
+   (and therefore configuration mode) on the daemon's vtysh socket. Other
+   users who can connect to the socket are limited to view-only commands. An
+   empty `group` disables the restriction, overriding a build-time default
+   set with :option:`--enable-vty-admin-group`.
+
+   Give the same option to all daemons, for example via ``frr_global_options``
+   in the ``daemons`` file. See :ref:`vtysh-access-control`.
 
 .. _loadable-module-support:
 

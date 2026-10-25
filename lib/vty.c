@@ -8,6 +8,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <grp.h>
 #include <lib/version.h>
 #include <sys/types.h>
 #include <sys/types.h>
@@ -538,6 +539,22 @@ static void vty_auth(struct vty *vty, char *buf)
 	}
 }
 
+/*
+ * A vtysh session that may not enable must never be anywhere but VIEW_NODE.
+ * "enable" enforces this; this check makes sure no other path (present or
+ * future) moves such a session out of VIEW_NODE.
+ */
+static bool vty_node_permitted(struct vty *vty)
+{
+	if (vty_may_enable(vty) || vty->node == VIEW_NODE)
+		return true;
+
+	flog_err(EC_LIB_VTY, "%s: unprivileged vtysh session in node %d, resetting", vty->address,
+		 vty->node);
+	vty->node = VIEW_NODE;
+	return false;
+}
+
 /* Command execution over the vty interface. */
 static int vty_command(struct vty *vty, char *buf)
 {
@@ -546,6 +563,11 @@ static int vty_command(struct vty *vty, char *buf)
 	char *cp = NULL;
 
 	assert(vty);
+
+	if (!vty_node_permitted(vty)) {
+		vty_out(vty, "%% Permission denied\n");
+		return CMD_WARNING;
+	}
 
 	/*
 	 * Log non empty command lines
@@ -591,6 +613,11 @@ static int vty_command(struct vty *vty, char *buf)
 	GETRUSAGE(&before);
 
 	ret = cmd_execute(vty, buf, NULL, 0);
+
+	if (!vty_node_permitted(vty)) {
+		vty_out(vty, "%% Permission denied\n");
+		ret = CMD_WARNING;
+	}
 
 	GETRUSAGE(&after);
 
@@ -2078,6 +2105,116 @@ static void vty_serv_un(const char *path)
 
 /* #define VTYSH_DEBUG 1 */
 
+/*
+ * vtysh access control.
+ *
+ * Anyone who can connect() to a daemon's vtysh socket has historically been
+ * able to "enable" and change configuration.  When an admin group is
+ * configured, only root, the FRR daemon user and members of that group may
+ * "enable"; everybody else who can reach the socket is limited to VIEW_NODE.
+ */
+static struct {
+	bool configured;
+	bool restricted;
+	bool gid_valid;
+	gid_t gid;
+	char name[64];
+} vty_admin;
+
+void vty_set_admin_group(const char *name)
+{
+	struct group *grp;
+
+#ifdef VTY_ADMIN_GROUP
+	if (!name)
+		name = VTY_ADMIN_GROUP;
+#endif
+	memset(&vty_admin, 0, sizeof(vty_admin));
+	vty_admin.configured = true;
+
+	if (!name || !*name)
+		return;
+
+	vty_admin.restricted = true;
+	strlcpy(vty_admin.name, name, sizeof(vty_admin.name));
+
+	grp = getgrnam(name);
+	if (!grp) {
+		flog_err(EC_LIB_VTY,
+			 "vty admin group \"%s\" does not exist; only root and the FRR user may enable on vtysh sockets",
+			 name);
+		return;
+	}
+
+	vty_admin.gid = grp->gr_gid;
+	vty_admin.gid_valid = true;
+	zlog_info("vtysh enable restricted to group %s (gid %u)", name, (unsigned int)grp->gr_gid);
+}
+
+static bool vtysh_peer_is_admin(struct vty *vty)
+{
+	struct zprivs_ids_t ids;
+	struct sockopt_peer_cred cred;
+
+	if (!vty_admin.restricted)
+		return true;
+
+	/* can't tell who this is: fail closed */
+	if (!vty->peer_cred_valid)
+		return false;
+
+	if (vty->peer_uid == 0)
+		return true;
+
+	/* the FRR user itself, e.g. watchfrr or init scripts running vtysh */
+	zprivs_get_ids(&ids);
+	if (ids.uid_normal != (uid_t)-1 && vty->peer_uid == ids.uid_normal)
+		return true;
+
+	if (!vty_admin.gid_valid)
+		return false;
+
+	cred.uid = vty->peer_uid;
+	cred.gid = vty->peer_gid;
+	cred.pid = vty->peer_pid;
+	return sockopt_peer_has_gid(vty->fd, &cred, vty_admin.gid);
+}
+
+bool vty_may_enable(const struct vty *vty)
+{
+	return vty->type != VTY_SHELL_SERV || vty->peer_admin;
+}
+
+/*
+ * Record who is on the other end of a vtysh socket.  The kernel-reported
+ * credentials are kept on the vty and also folded into vty->address, so that
+ * "log commands" output and other diagnostics identify the user.
+ *
+ * Only numeric IDs are recorded; name lookups go through NSS and may block
+ * the daemon's event loop.
+ */
+static void vtysh_record_peer(struct vty *vty)
+{
+	struct sockopt_peer_cred cred;
+
+	if (sockopt_peer_cred(vty->fd, &cred) < 0) {
+		strlcpy(vty->address, "vtysh", sizeof(vty->address));
+		return;
+	}
+
+	vty->peer_cred_valid = true;
+	vty->peer_uid = cred.uid;
+	vty->peer_gid = cred.gid;
+	vty->peer_pid = cred.pid;
+
+	if (cred.pid >= 0)
+		snprintfrr(vty->address, sizeof(vty->address), "vtysh uid=%u pid=%ld",
+			   (unsigned int)cred.uid, (long)cred.pid);
+	else
+		snprintfrr(vty->address, sizeof(vty->address), "vtysh uid=%u",
+			   (unsigned int)cred.uid);
+}
+
 static void vtysh_accept(struct event *event)
 {
 	struct vty_serv *vtyserv = EVENT_ARG(event);
@@ -2143,6 +2280,8 @@ static void vtysh_accept(struct event *event)
 	vty->wfd = sock;
 	vty->type = VTY_SHELL_SERV;
 	vty->node = VIEW_NODE;
+	vtysh_record_peer(vty);
+	vty->peer_admin = vtysh_peer_is_admin(vty);
 	vtys_add_tail(vtysh_sessions, vty);
 
 	vty_event(VTYSH_READ, vty);
@@ -2387,6 +2526,10 @@ static void vtysh_write(struct event *event)
 /* Determine address family to bind. */
 void vty_serv_start(const char *addr, unsigned short port, const char *path)
 {
+	/* apply the build-time default if the caller didn't set anything */
+	if (!vty_admin.configured)
+		vty_set_admin_group(NULL);
+
 	/* If port is set to 0, do not listen on TCP/IP at all! */
 	if (port)
 		vty_serv_sock_addrinfo(addr, port);

@@ -221,7 +221,6 @@ static struct ospf6_lsa *ospf6_lsa_translated_nssa_new(struct ospf6_area *area,
 	struct prefix prefix;
 	struct ospf6 *ospf6 = area->ospf6;
 	ptrdiff_t tag_offset = 0;
-	route_tag_t network_order;
 	struct ospf6_route *range;
 
 	if (IS_OSPF6_DEBUG_NSSA)
@@ -281,11 +280,9 @@ static struct ospf6_lsa *ospf6_lsa_translated_nssa_new(struct ospf6_area *area,
 	}
 	/* External Route Tag */
 	if (CHECK_FLAG(ext->bits_metric, OSPF6_ASBR_BIT_T)) {
-		memcpy(&network_order, (caddr_t)ext + tag_offset,
-		       sizeof(network_order));
-		network_order = htonl(network_order);
-		memcpy(new_ptr, &network_order, sizeof(network_order));
-		new_ptr += sizeof(network_order);
+		/* The received tag is already in network byte order. */
+		memcpy(new_ptr, (caddr_t)ext + tag_offset, sizeof(route_tag_t));
+		new_ptr += sizeof(route_tag_t);
 	}
 
 	/* Fill LSA Header */
@@ -698,6 +695,12 @@ void ospf6_abr_nssa_type_7_defaults(struct ospf6 *ospf6)
 
 void ospf6_abr_nssa_task(struct ospf6 *ospf6)
 {
+	if (ospf6->gr_info.restart_in_progress) {
+		if (IS_OSPF6_DEBUG_NSSA)
+			zlog_debug("%s : Graceful Restart in progress, skip", __func__);
+		return;
+	}
+
 	if (IS_OSPF6_DEBUG_NSSA)
 		zlog_debug("Check for NSSA-ABR Tasks():");
 
