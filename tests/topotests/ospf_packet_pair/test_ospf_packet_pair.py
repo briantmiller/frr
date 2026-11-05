@@ -252,7 +252,7 @@ def test_packet_pair_config_display():
                     "pairsPerSample": 8,
                     "dscp": 46,
                     "qdiscBypass": True,
-                    "version": 1,
+                    "version": 2,
                     "versionMismatches": 0,
                 }
             },

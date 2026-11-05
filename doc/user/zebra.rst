@@ -1790,6 +1790,10 @@ zebra Terminal Mode Commands
    reporting daemon: the interface value according to ``detected-bandwidth
    aggregate`` and, per next hop, the round-trip, outbound and inbound
    values with their source (``one-way`` or ``round-trip``) and age.
+   Daemons also report the packet loss they measured per direction,
+   shown per next hop (``rttLossPpm``, ``outLossPpm``, ``inLossPpm`` in
+   parts per million), and whether they already reduced the rates for
+   that loss (``lossAdjusted``, see ``ip ospf packet-pair loss``).
    ``show interface`` includes a per-daemon summary
    (``detectedBandwidth`` in JSON).
 

@@ -47,9 +47,21 @@ Verified:
     back within a few samples; with "smoothing step-threshold 0" the same
     rise is still far from complete at that point; "smoothing weight 100"
     reports the latest sample
+  - loss accounting, with probes towards r2 dropped at the switch (nft):
+    the speed estimate is not biased by loss; the loss rate is measured
+    per direction (outbound and round trip see it, inbound does not);
+    "loss adjust delivery" reports capacity * (1 - loss) in the neighbor
+    detail and to zebra, which shows the loss and that the rates are
+    adjusted; with every probe dropped the last estimate is held for
+    "hold-samples" samples, then withdrawn, and comes back once probes
+    get through again
+  - packet trains: with "train", trains sized for the configured span
+    measure the shaped link; with a schedule, sends are deferred out of the
+    guard around each boundary and samples still complete; "profile
+    satellite" expands into its individual settings, and "no" removes them
   - payload version checking: probes and reports of another version from
     a neighbor are ignored and counted, the neighbor detail says why, and
-    the neighbor's real version-1 traffic keeps working; another
+    the neighbor's real version-2 traffic keeps working; another
     version from a non-neighbor is not even counted
 """
 
@@ -402,6 +414,223 @@ def test_smoothing_follows_speed_change():
     assert "packet-pair smoothing" not in r1.vtysh_cmd("show running-config")
 
 
+def _drop_towards(tgen, rname, pct):
+    "Drop pct% of large ICMP (the probes) on s1's port towards rname."
+    port = _switch_port(tgen, rname)
+    s1 = tgen.net["s1"]
+    s1.cmd_status("nft delete table bridge pploss", warn=False)
+    if pct == 0:
+        return
+    rc, _, _ = s1.cmd_status("command -v nft", warn=False)
+    if rc:
+        pytest.skip("nft not installed")
+    rc, out, err = s1.cmd_status(
+        "nft add table bridge pploss && "
+        "nft add chain bridge pploss lossy "
+        "'{{ type filter hook forward priority 0; policy accept; }}' && "
+        "nft add rule bridge pploss lossy oifname {} ip protocol icmp "
+        "meta length gt 1000 {} drop".format(
+            port, "" if pct >= 100 else "numgen random mod 100 lt {}".format(pct)
+        )
+    )
+    assert rc == 0, "nft: {} {}".format(out, err)
+
+
+def _zebra_nh(router, nh):
+    try:
+        data = json.loads(
+            router.vtysh_cmd("show zebra detected-bandwidth interface r1-eth0 json")
+        )
+    except ValueError:
+        return {}
+    src = data.get("r1-eth0", {}).get("sources", {}).get("ospf", {})
+    return src.get("nexthops", {}).get(nh, {})
+
+
+def test_loss_accounting():
+    "Loss is measured per direction, can be applied, and is held over."
+    tgen = get_topogen()
+    _skip_on_failure(tgen)
+    r1 = tgen.gears["r1"]
+    _shape_towards(tgen, "r2", UP_KBPS)
+
+    def _settled():
+        pp = _pp(r1, "2.2.2.2")
+        out = (pp or {}).get("outbound", {})
+        if not _near(out.get("estimatedSpeedSmoothedKbps", 0), UP_KBPS):
+            return "not settled: {}".format(pp)
+        return None
+
+    try:
+        _expect(_settled, count=30, msg="settle at 5 Mbit/s")
+        base = _pp(r1, "2.2.2.2")["outbound"]["estimatedSpeedSmoothedKbps"]
+
+        _set_smoothing(r1, "ip ospf packet-pair loss adjust delivery weight 50")
+        _drop_towards(tgen, "r2", 20)
+
+        def _lossy():
+            pp = _pp(r1, "2.2.2.2")
+            out, inb = pp.get("outbound", {}), pp.get("inbound", {})
+            if not 8 <= out.get("lossSmoothedPct", 0) <= 35:
+                return "outbound loss {}".format(out)
+            if not 8 <= pp.get("lossSmoothedPct", 0) <= 35:
+                return "round-trip loss {}".format(pp)
+            if inb.get("lossSmoothedPct", 100) > 5:
+                return "inbound loss {}".format(inb)
+            return None
+
+        _expect(_lossy, count=40, msg="loss measured per direction")
+
+        pp = _pp(r1, "2.2.2.2")
+        out = pp["outbound"]
+        logger.info("20%% loss towards r2: %s", pp)
+        # Loss thins the samples but does not bias the estimate.
+        assert _near(out["estimatedSpeedSmoothedKbps"], base, 0.15), (base, out)
+        want = out["estimatedSpeedSmoothedKbps"] * (1 - out["lossSmoothedPct"] / 100)
+        assert abs(out["effectiveSpeedKbps"] - want) <= 0.01 * want, out
+        assert out["packetsLostTotal"] > 0, out
+
+        def _zebra_adjusted():
+            nh = _zebra_nh(r1, "10.0.12.2")
+            if not nh.get("lossAdjusted") or nh.get("outLossPpm", 0) < 50000:
+                return "zebra: {}".format(nh)
+            pp = _pp(r1, "2.2.2.2")
+            eff = pp["outbound"]["effectiveSpeedKbps"]
+            if abs(nh.get("outKbps", 0) - eff) > 0.05 * eff:
+                return "zebra out {} vs effective {}".format(nh, eff)
+            return None
+
+        _expect(_zebra_adjusted, count=10, msg="zebra gets adjusted rates")
+        intf = _pp_intf(r1, "r1-eth0")
+        assert intf["lossAdjust"] == "delivery" and intf["lossWeight"] == 50, intf
+
+        # Every probe dropped: held for hold-samples samples, then withdrawn.
+        _set_smoothing(r1, "ip ospf packet-pair loss hold-samples 2 adjust delivery weight 50")
+        assert re.search(
+            r"^ ip ospf packet-pair loss adjust delivery weight 50 hold-samples 2$",
+            r1.vtysh_cmd("show running-config"),
+            re.M,
+        )
+        _drop_towards(tgen, "r2", 100)
+        held = []
+
+        def _withdrawn():
+            pp = _pp(r1, "2.2.2.2")
+            run = pp.get("samplesWithoutValidPairs", 0)
+            if 1 <= run <= 2:
+                held.append(pp["effectiveSpeedKbps"])
+            if run < 3:
+                return "empty run {}".format(run)
+            if pp["effectiveSpeedKbps"] != 0:
+                return "not withdrawn: {}".format(pp)
+            if _zebra_nh(r1, "10.0.12.2").get("rttKbps", -1) != 0:
+                return "zebra still has rtt: {}".format(_zebra_nh(r1, "10.0.12.2"))
+            return None
+
+        _expect(_withdrawn, count=60, wait=0.25, msg="withdrawn after hold")
+        assert held and min(held) > 0, held
+        # r2 -> r1 is untouched, so zebra keeps the next hop for inbound.
+        assert _zebra_nh(r1, "10.0.12.2").get("inKbps", 0) > 0
+
+        _drop_towards(tgen, "r2", 0)
+        _set_smoothing(r1, "no ip ospf packet-pair loss")
+
+        def _recovered():
+            pp = _pp(r1, "2.2.2.2")
+            if pp.get("samplesWithoutValidPairs", 1) != 0:
+                return "still empty: {}".format(pp)
+            if pp["effectiveSpeedKbps"] != pp["estimatedSpeedSmoothedKbps"]:
+                return "adjusted without loss adjust: {}".format(pp)
+            if _zebra_nh(r1, "10.0.12.2").get("lossAdjusted", True):
+                return "zebra still adjusted"
+            return None
+
+        _expect(_recovered, count=20, msg="recovered")
+    finally:
+        _drop_towards(tgen, "r2", 0)
+        _set_smoothing(r1, "no ip ospf packet-pair loss")
+        _unshape_towards(tgen, "r2")
+    assert "packet-pair loss" not in r1.vtysh_cmd("show running-config")
+
+
+def test_packet_trains():
+    "Trains measure the link, honour the schedule, and the profile expands."
+    tgen = get_topogen()
+    _skip_on_failure(tgen)
+    r1 = tgen.gears["r1"]
+    _shape_towards(tgen, "r2", UP_KBPS)
+    try:
+        before = _pp(r1, "2.2.2.2")["outbound"]["samples"]
+        _set_smoothing(r1, "ip ospf packet-pair train span 20 count 2")
+        intf = _pp_intf(r1, "r1-eth0")
+        assert intf["probeMode"] == "train" and intf["trainSpanMsec"] == 20, intf
+
+        def _trains():
+            pp = _pp(r1, "2.2.2.2")
+            out = pp.get("outbound", {})
+            if out.get("samples", 0) < before + 3:
+                return "waiting: {}".format(out)
+            # 5 Mbit/s * 20 ms / 1500 byte = 8.3 packets, at least 8
+            if not 8 <= out.get("trainLength", 0) <= 16:
+                return "outbound train length: {}".format(out)
+            if not _near(out.get("estimatedSpeedKbps", 0), UP_KBPS):
+                return "outbound {} not near {}".format(out, UP_KBPS)
+            if pp.get("trainLength", 0) < 8 or not pp.get("trainSpanUsec"):
+                return "round trip: {}".format(pp)
+            return None
+
+        _expect(_trains, count=30, wait=1, msg="trains measure the link")
+        logger.info("trains: %s", _pp(r1, "2.2.2.2"))
+        assert "Trains of " in r1.vtysh_cmd("show ip ospf neighbor detail")
+
+        # Boundaries every 2 s, 600 ms guard: sends are deferred, but
+        # samples still complete and measure the link.
+        _set_smoothing(r1, "ip ospf packet-pair schedule period 2000 offset 0 guard 600")
+        before = _pp(r1, "2.2.2.2")["outbound"]["samples"]
+
+        def _scheduled():
+            intf = _pp_intf(r1, "r1-eth0")
+            if intf.get("schedulePeriodMsec") != 2000:
+                return "schedule not shown: {}".format(intf)
+            if intf.get("scheduleDeferrals", 0) == 0:
+                return "no deferrals yet"
+            return _check_dir(r1, "2.2.2.2", "outbound", UP_KBPS, before + 2)
+
+        _expect(_scheduled, count=40, wait=1, msg="scheduled trains")
+        _set_smoothing(r1, "no ip ospf packet-pair schedule")
+        _set_smoothing(r1, "no ip ospf packet-pair train")
+
+        def _pairs_again():
+            pp = _pp(r1, "2.2.2.2")
+            if pp.get("trainLength") != 2:
+                return "still trains: {}".format(pp)
+            return None
+
+        _expect(_pairs_again, count=15, msg="back to pairs")
+        assert _pp_intf(r1, "r1-eth0")["probeMode"] == "pair"
+
+        # The satellite profile is saved as its individual settings.
+        _set_smoothing(r1, "ip ospf packet-pair profile satellite")
+        config = r1.vtysh_cmd("show running-config")
+        for line in (
+            " ip ospf packet-pair loss adjust delivery",
+            " ip ospf packet-pair train span 20 head-skip 10",
+            " ip ospf packet-pair schedule period 15000 offset 12000",
+            " ip ospf packet-pair smoothing window 20",
+        ):
+            assert re.search("^" + line + "$", config, re.M), (line, config)
+        intf = _pp_intf(r1, "r1-eth0")
+        assert intf["smoothingWindow"] == 20 and intf["smoothingPercentile"] == 50
+        assert intf["lossAdjust"] == "delivery" and intf["trainSkipPct"] == 10
+        _set_smoothing(r1, "no ip ospf packet-pair profile satellite")
+        config = r1.vtysh_cmd("show running-config")
+        for word in ("train", "schedule", "window", "loss adjust"):
+            assert "packet-pair " + word not in config, (word, config)
+    finally:
+        _set_smoothing(r1, "no ip ospf packet-pair profile satellite")
+        _unshape_towards(tgen, "r2")
+
+
 def test_non_neighbor_ignored():
     "Probes from a host that isn't an OSPF neighbor get no report."
     tgen = get_topogen()
@@ -419,26 +648,26 @@ def test_version_mismatch():
     r1 = tgen.gears["r1"]
 
     intf = _pp_intf(r1, "r1-eth0")
-    assert intf["version"] == 1 and intf["versionMismatches"] == 0, intf
+    assert intf["version"] == 2 and intf["versionMismatches"] == 0, intf
     inbound_before = _pp(r1, "2.2.2.2")["inbound"]["samples"]
 
     # Another version from a non-neighbor: dropped without a trace.
-    out = _forge(tgen, "r3", "probe", "r3-eth0", "10.0.12.3", "10.0.12.1", "2")
+    out = _forge(tgen, "r3", "probe", "r3-eth0", "10.0.12.3", "10.0.12.1", "1")
     assert "REPORTS 0" in out, out
     assert _pp_intf(r1, "r1-eth0")["versionMismatches"] == 0
 
-    # Version 2 probes claiming to come from neighbor r2: they reach r1
+    # Version 1 probes (an older peer) claiming to come from neighbor r2: they reach r1
     # (its kernel echoes them) but are not measured.
-    out = _forge(tgen, "r3", "probe", "r3-eth0", "10.0.12.2", "10.0.12.1", "2")
+    out = _forge(tgen, "r3", "probe", "r3-eth0", "10.0.12.2", "10.0.12.1", "1")
     intf = _pp_intf(r1, "r1-eth0")
-    logger.info("r1 after version 2 probes: %s", intf)
+    logger.info("r1 after version 1 probes: %s", intf)
     assert intf["versionMismatches"] >= 4, intf
     assert intf["versionMismatchLastSource"] == "10.0.12.2", intf
-    assert intf["versionMismatchLastVersion"] == 2, intf
+    assert intf["versionMismatchLastVersion"] == 1, intf
 
-    # A version 2 report from r2 for one of r1's real samples.
+    # A version 1 report from r2 for one of r1's real samples.
     count = intf["versionMismatches"]
-    out = _forge(tgen, "r2", "report", "r2-eth0", "10.0.12.2", "10.0.12.1", "2")
+    out = _forge(tgen, "r2", "report", "r2-eth0", "10.0.12.2", "10.0.12.1", "1")
     assert "REPORTED" in out, out
     _expect(
         lambda: (
@@ -447,27 +676,27 @@ def test_version_mismatch():
             else "report not counted"
         ),
         count=5,
-        msg="version 2 report",
+        msg="version 1 report",
     )
 
     output = r1.vtysh_cmd("show ip ospf interface r1-eth0")
     assert re.search(
         r"Ignored \d+ packet-pair messages from peers using another version "
-        r"than 1 \(last: 10\.0\.12\.2, version 2",
+        r"than 2 \(last: 10\.0\.12\.2, version 1",
         output,
     ), output
     output = r1.vtysh_cmd("show ip ospf neighbor detail")
     assert (
-        "Peer uses packet-pair version 2, this router version 1: "
+        "Peer uses packet-pair version 1, this router version 2: "
         "its probes and reports are ignored" in output
     ), output
-    assert _pp(r1, "2.2.2.2").get("peerVersion") == 2
+    assert _pp(r1, "2.2.2.2").get("peerVersion") == 1
 
-    # r2's real version 1 probes are still measured.
+    # r2's real version 2 probes are still measured.
     _expect(
         partial(_check_dir, r1, "2.2.2.2", "inbound", None, inbound_before + 2),
         count=15,
-        msg="r2's version 1 probes no longer measured",
+        msg="r2's version 2 probes no longer measured",
     )
 
 
