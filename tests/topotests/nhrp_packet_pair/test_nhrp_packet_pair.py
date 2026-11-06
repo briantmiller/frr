@@ -308,7 +308,7 @@ def test_packet_pair_config_display():
             "intervalSec": 2,
             "pairsPerSample": 6,
             "dscp": 46,
-            "version": 1,
+            "version": 2,
             "versionMismatches": 0,
         }
     }

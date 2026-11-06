@@ -52,6 +52,7 @@ static void pp_cfg(struct interface *ifp, struct pktpair_cfg *cfg)
 {
 	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
 
+	memset(cfg, 0, sizeof(*cfg));
 	cfg->interval = OSPF_IF_PARAM_CONFIGURED(params, pp_interval)
 				? params->pp_interval
 				: PKTPAIR_INTERVAL_DEFAULT;
@@ -74,6 +75,31 @@ static void pp_cfg(struct interface *ifp, struct pktpair_cfg *cfg)
 		OSPF_IF_PARAM_CONFIGURED(params, pp_step_samples)
 			? params->pp_step_samples
 			: PKTPAIR_STEP_SAMPLES_DEFAULT;
+	cfg->loss.adjust = OSPF_IF_PARAM_CONFIGURED(params, pp_loss_adjust)
+				   ? params->pp_loss_adjust
+				   : PKTPAIR_LOSS_ADJUST_NONE;
+	cfg->loss.weight = OSPF_IF_PARAM_CONFIGURED(params, pp_loss_weight)
+				   ? params->pp_loss_weight
+				   : PKTPAIR_LOSS_WEIGHT_DEFAULT;
+	cfg->loss.hold_samples =
+		OSPF_IF_PARAM_CONFIGURED(params, pp_hold_samples)
+			? params->pp_hold_samples
+			: PKTPAIR_HOLD_SAMPLES_DEFAULT;
+	if (OSPF_IF_PARAM_CONFIGURED(params, pp_train_span)) {
+		cfg->train.span_ms = params->pp_train_span;
+		cfg->train.count = params->pp_train_count;
+		cfg->train.max_len = params->pp_train_max;
+		cfg->train.skip_pct = params->pp_train_skip;
+	}
+	if (OSPF_IF_PARAM_CONFIGURED(params, pp_sched_period)) {
+		cfg->sched.period_ms = params->pp_sched_period;
+		cfg->sched.offset_ms = params->pp_sched_offset;
+		cfg->sched.guard_ms = params->pp_sched_guard;
+	}
+	if (OSPF_IF_PARAM_CONFIGURED(params, pp_smooth_window)) {
+		cfg->smooth.window = params->pp_smooth_window;
+		cfg->smooth.percentile = params->pp_smooth_pct;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -177,9 +203,15 @@ static void pp_zebra_send(struct pktpair_session *s, struct in_addr peer,
 
 	bw.nexthop.ipa_type = IPADDR_V4;
 	bw.nexthop.ipaddr_v4 = peer;
-	if (!withdraw)
+	if (!withdraw) {
 		pktpair_peer_bw(s, peer, &bw.rtt_kbps, &bw.out_kbps,
 				&bw.in_kbps);
+		pktpair_peer_loss(s, peer, &bw.rtt_loss_ppm, &bw.out_loss_ppm,
+				  &bw.in_loss_ppm);
+		if (pktpair_session_cfg(s)->loss.adjust !=
+		    PKTPAIR_LOSS_ADJUST_NONE)
+			SET_FLAG(bw.flags, ZAPI_DETECTED_BW_LOSS_ADJUSTED);
+	}
 	if (!bw.rtt_kbps && !bw.out_kbps && !bw.in_kbps)
 		SET_FLAG(bw.flags, ZAPI_DETECTED_BW_DELETE);
 	zclient_detected_bw_send(ospf_zclient, oi->ospf->vrf_id, &bw);
@@ -314,6 +346,8 @@ void ospf_pp_show_if(struct vty *vty, struct ospf_interface *oi,
 		json_object_int_add(json_pp, "pairsPerSample", cfg.probes);
 		json_object_int_add(json_pp, "dscp", cfg.dscp);
 		pktpair_show_smoothing(vty, json_pp, &cfg.smooth, NULL);
+		pktpair_show_loss_cfg(vty, json_pp, &cfg.loss, NULL);
+		pktpair_show_train_cfg(vty, json_pp, &cfg, NULL);
 		pktpair_show_session(vty, json_pp, oi->pp, NULL);
 		json_object_object_add(json_iface, "packetPair", json_pp);
 	} else if (cfg.respond_only) {
@@ -335,6 +369,8 @@ void ospf_pp_show_if(struct vty *vty, struct ospf_interface *oi,
 	}
 	if (!json_iface) {
 		pktpair_show_smoothing(vty, NULL, &cfg.smooth, "    ");
+		pktpair_show_loss_cfg(vty, NULL, &cfg.loss, "    ");
+		pktpair_show_train_cfg(vty, NULL, &cfg, "    ");
 		pktpair_show_session(vty, NULL, oi->pp, "    ");
 	}
 }

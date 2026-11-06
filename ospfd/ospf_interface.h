@@ -125,6 +125,18 @@ struct ospf_if_params {
 	DECLARE_IF_PARAM(uint8_t, pp_smooth_weight);	/* % per sample */
 	DECLARE_IF_PARAM(uint16_t, pp_step_threshold); /* %, 0 = off */
 	DECLARE_IF_PARAM(uint8_t, pp_step_samples);
+	DECLARE_IF_PARAM(uint8_t, pp_loss_adjust); /* pktpair_loss_adjust */
+	DECLARE_IF_PARAM(uint8_t, pp_loss_weight); /* % per sample */
+	DECLARE_IF_PARAM(uint8_t, pp_hold_samples);
+	DECLARE_IF_PARAM(uint16_t, pp_train_span); /* ms, 0 = pairs */
+	DECLARE_IF_PARAM(uint8_t, pp_train_count);
+	DECLARE_IF_PARAM(uint16_t, pp_train_max);
+	DECLARE_IF_PARAM(uint8_t, pp_train_skip); /* % */
+	DECLARE_IF_PARAM(uint32_t, pp_sched_period); /* ms, 0 = off */
+	DECLARE_IF_PARAM(uint32_t, pp_sched_offset);
+	DECLARE_IF_PARAM(uint16_t, pp_sched_guard);
+	DECLARE_IF_PARAM(uint8_t, pp_smooth_window); /* 0 = moving average */
+	DECLARE_IF_PARAM(uint8_t, pp_smooth_pct);
 
 	/* Authentication data. */
 	uint8_t auth_simple[OSPF_AUTH_SIMPLE_SIZE + 1]; /* Simple password. */
