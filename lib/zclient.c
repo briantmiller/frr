@@ -5070,6 +5070,9 @@ zclient_detected_bw_send(struct zclient *zclient, vrf_id_t vrf_id,
 	stream_putq(s, bw->rtt_kbps);
 	stream_putq(s, bw->out_kbps);
 	stream_putq(s, bw->in_kbps);
+	stream_putl(s, bw->rtt_loss_ppm);
+	stream_putl(s, bw->out_loss_ppm);
+	stream_putl(s, bw->in_loss_ppm);
 
 	stream_putw_at(s, 0, stream_get_endp(s));
 	return zclient_send_message(zclient);
@@ -5090,6 +5093,9 @@ int zapi_detected_bw_decode(struct stream *s, struct zapi_detected_bw *bw)
 	STREAM_GETQ(s, bw->rtt_kbps);
 	STREAM_GETQ(s, bw->out_kbps);
 	STREAM_GETQ(s, bw->in_kbps);
+	STREAM_GETL(s, bw->rtt_loss_ppm);
+	STREAM_GETL(s, bw->out_loss_ppm);
+	STREAM_GETL(s, bw->in_loss_ppm);
 	return 0;
 
 stream_failure:

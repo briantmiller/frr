@@ -30,44 +30,40 @@ def addr(a):
 
 def probe_payload(version, dst, sample, pair, which, npairs=2, size=200):
     now = time.time()
-    # magic, version, flags, interval, sample, dst, pair, which, npairs,
-    # rsvd, tx_sec, tx_nsec
-    hdr = struct.pack(
-        "!IBBHI4sBBBBII",
-        MAGIC,
-        version,
-        0,
-        2,
-        sample,
-        addr(dst),
-        pair,
-        which,
-        npairs,
-        0,
-        int(now),
-        int((now % 1) * 1e9),
-    )
+    if version == 1:
+        # magic, version, flags, interval, sample, dst, pair, which,
+        # npairs, rsvd, tx_sec, tx_nsec
+        hdr = struct.pack(
+            "!IBBHI4sBBBBII",
+            MAGIC, version, 0, 2, sample, addr(dst), pair, which, npairs, 0,
+            int(now), int((now % 1) * 1e9),
+        )
+    else:
+        # magic, version, flags, interval, sample, dst, pair, npairs,
+        # which, len (2: a pair), skip, tx_sec, tx_nsec
+        hdr = struct.pack(
+            "!IBBHI4sBBHHHII",
+            MAGIC, version, 0, 2, sample, addr(dst), pair, npairs, which, 2, 0,
+            int(now), int((now % 1) * 1e9),
+        )
     return hdr + b"\0" * (size - 28 - len(hdr))
 
 
 def report_payload(version, src, sample):
+    if version == 1:
+        # magic, version, rsvd, pkt_size, sample, dst, npairs, seen,
+        # valid, rcvd, bw_kbps, ipd_usec, jitter_usec
+        return struct.pack(
+            "!IBBHI4sBBBBIII",
+            REPORT, version, 0, 1500, sample, addr(src), 8, 8, 8, 16, 123,
+            97561, 1,
+        )
     # magic, version, rsvd, pkt_size, sample, dst, npairs, seen, valid,
-    # rcvd, bw_kbps, ipd_usec, jitter_usec
+    # rsvd, rcvd, train_len, bw_kbps, ipd_usec, jitter_usec
     return struct.pack(
-        "!IBBHI4sBBBBIII",
-        REPORT,
-        version,
-        0,
-        1500,
-        sample,
-        addr(src),
-        8,
-        8,
-        8,
-        16,
-        123,
-        97561,
-        1,
+        "!IBBHI4sBBBBHHIII",
+        REPORT, version, 0, 1500, sample, addr(src), 8, 8, 8, 0, 16, 2, 123,
+        97561, 1,
     )
 
 
@@ -124,5 +120,5 @@ def do_report(ifname, src, dst, version):
 
 if __name__ == "__main__":
     mode, ifname, src, dst = sys.argv[1:5]
-    version = int(sys.argv[5]) if len(sys.argv) > 5 else 1
+    version = int(sys.argv[5]) if len(sys.argv) > 5 else 2
     {"probe": do_probe, "report": do_report}[mode](ifname, src, dst, version)

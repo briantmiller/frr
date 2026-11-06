@@ -10884,6 +10884,276 @@ DEFPY(no_ip_ospf_packet_pair, no_ip_ospf_packet_pair_cmd,
 	UNSET_IF_PARAM(params, pp_smooth_weight);
 	UNSET_IF_PARAM(params, pp_step_threshold);
 	UNSET_IF_PARAM(params, pp_step_samples);
+	UNSET_IF_PARAM(params, pp_loss_adjust);
+	UNSET_IF_PARAM(params, pp_loss_weight);
+	UNSET_IF_PARAM(params, pp_hold_samples);
+	UNSET_IF_PARAM(params, pp_train_span);
+	UNSET_IF_PARAM(params, pp_sched_period);
+	UNSET_IF_PARAM(params, pp_smooth_window);
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+static void ospf_pp_set_train(struct ospf_if_params *params, uint16_t span,
+			      uint8_t count, uint16_t max, uint8_t skip)
+{
+	params->pp_train_span = span;
+	SET_IF_PARAM(params, pp_train_span);
+	params->pp_train_count = count;
+	params->pp_train_max = max;
+	params->pp_train_skip = skip;
+}
+
+static void ospf_pp_set_sched(struct ospf_if_params *params, uint32_t period,
+			      uint32_t offset, uint16_t guard)
+{
+	params->pp_sched_period = period;
+	SET_IF_PARAM(params, pp_sched_period);
+	params->pp_sched_offset = offset;
+	params->pp_sched_guard = guard;
+}
+
+static void ospf_pp_set_window(struct ospf_if_params *params, uint8_t window,
+			       uint8_t pct)
+{
+	params->pp_smooth_window = window;
+	SET_IF_PARAM(params, pp_smooth_window);
+	params->pp_smooth_pct = pct;
+}
+
+DEFPY(ip_ospf_packet_pair_train, ip_ospf_packet_pair_train_cmd,
+      "ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Measure with packet trains instead of pairs (for satellite, cellular and other scheduled links)\n"
+      "Time each train should take at the bottleneck\n"
+      "Milliseconds (default 20)\n"
+      "Trains per sample\n"
+      "Number of trains (default 3)\n"
+      "Longest train\n"
+      "Packets (default 512)\n"
+      "Leading part of each train that is not timed\n"
+      "Percent (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	ospf_pp_set_train(IF_DEF_PARAMS(ifp), span_str ? span : 20,
+			  count_str ? count : PKTPAIR_TRAIN_COUNT_DEFAULT,
+			  max_packets_str ? max_packets
+					  : PKTPAIR_TRAIN_MAXLEN_DEFAULT,
+			  head_skip_str ? head_skip : 0);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair_train, no_ip_ospf_packet_pair_train_cmd,
+      "no ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Measure with packet trains instead of pairs (for satellite, cellular and other scheduled links)\n"
+      "Time each train should take at the bottleneck\n"
+      "Milliseconds (default 20)\n"
+      "Trains per sample\n"
+      "Number of trains (default 3)\n"
+      "Longest train\n"
+      "Packets (default 512)\n"
+      "Leading part of each train that is not timed\n"
+      "Percent (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	UNSET_IF_PARAM(IF_DEF_PARAMS(ifp), pp_train_span);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(ip_ospf_packet_pair_schedule, ip_ospf_packet_pair_schedule_cmd,
+      "ip ospf packet-pair schedule period (1000-3600000) offset (0-3600000) [guard (0-10000)]",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Avoid sending around periodic boundaries (system clock, UTC)\n"
+      "Time between boundaries\n"
+      "Milliseconds\n"
+      "First boundary after the start of each period, from the epoch\n"
+      "Milliseconds\n"
+      "Keep this far from each boundary\n"
+      "Milliseconds (default 1000)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	ospf_pp_set_sched(IF_DEF_PARAMS(ifp), period, offset,
+			  guard_str ? guard : 1000);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair_schedule, no_ip_ospf_packet_pair_schedule_cmd,
+      "no ip ospf packet-pair schedule [period (1000-3600000) offset (0-3600000) [guard (0-10000)]]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Avoid sending around periodic boundaries (system clock, UTC)\n"
+      "Time between boundaries\n"
+      "Milliseconds\n"
+      "First boundary after the start of each period, from the epoch\n"
+      "Milliseconds\n"
+      "Keep this far from each boundary\n"
+      "Milliseconds (default 1000)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	UNSET_IF_PARAM(IF_DEF_PARAMS(ifp), pp_sched_period);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(ip_ospf_packet_pair_smoothing_window,
+      ip_ospf_packet_pair_smoothing_window_cmd,
+      "ip ospf packet-pair smoothing window (2-64) [percentile (1-100)]",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Use a percentile of the recent samples instead of a moving average\n"
+      "Samples\n"
+      "Percentile\n"
+      "Percent (default 50, the median)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	ospf_pp_set_window(IF_DEF_PARAMS(ifp), window,
+			   percentile_str ? percentile
+					  : PKTPAIR_SMOOTH_PERCENTILE_DEFAULT);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair_smoothing_window,
+      no_ip_ospf_packet_pair_smoothing_window_cmd,
+      "no ip ospf packet-pair smoothing window [(2-64) [percentile (1-100)]]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Use a percentile of the recent samples instead of a moving average\n"
+      "Samples\n"
+      "Percentile\n"
+      "Percent (default 50, the median)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+
+	UNSET_IF_PARAM(IF_DEF_PARAMS(ifp), pp_smooth_window);
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+/*
+ * Settings for pLEO satellite links such as Starlink: trains instead of
+ * pairs, no sending around the 15 s path reallocation (at :12, :27, :42
+ * and :57 past the minute), the median of the last 20 samples, and the
+ * speed reduced for measured loss.  Expands into the individual settings.
+ */
+DEFPY(ip_ospf_packet_pair_profile, ip_ospf_packet_pair_profile_cmd,
+      "[no] ip ospf packet-pair profile satellite",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Set several options at once for a kind of link\n"
+      "pLEO satellite (Starlink): trains, 15 s schedule, windowed median, loss-adjusted\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	if (no) {
+		UNSET_IF_PARAM(params, pp_train_span);
+		UNSET_IF_PARAM(params, pp_sched_period);
+		UNSET_IF_PARAM(params, pp_smooth_window);
+		UNSET_IF_PARAM(params, pp_loss_adjust);
+	} else {
+		ospf_pp_set_train(params, 20, 3, 512, 10);
+		ospf_pp_set_sched(params, 15000, 12000, 1000);
+		ospf_pp_set_window(params, 20, 50);
+		params->pp_loss_adjust = PKTPAIR_LOSS_ADJUST_DELIVERY;
+		SET_IF_PARAM(params, pp_loss_adjust);
+	}
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(ip_ospf_packet_pair_loss, ip_ospf_packet_pair_loss_cmd,
+      "ip ospf packet-pair loss {adjust <none|delivery|tcp>$mode|weight (1-100)$lw|hold-samples (0-16)$hold}",
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Packet loss accounting\n"
+      "Reduce the reported speed for measured loss\n"
+      "Report the measured capacity unchanged (default)\n"
+      "Capacity times the fraction of packets delivered\n"
+      "Steady-state TCP throughput at the measured loss and RTT, at most the capacity\n"
+      "Weight of each new sample in the loss rate\n"
+      "Percent (default 10)\n"
+      "Keep reporting the last speed through samples without valid pairs\n"
+      "Samples (default 3, 0 = withdraw at once)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	if (mode) {
+		params->pp_loss_adjust =
+			!strcmp(mode, "tcp")	    ? PKTPAIR_LOSS_ADJUST_TCP
+			: !strcmp(mode, "delivery") ? PKTPAIR_LOSS_ADJUST_DELIVERY
+						    : PKTPAIR_LOSS_ADJUST_NONE;
+		SET_IF_PARAM(params, pp_loss_adjust);
+	} else {
+		UNSET_IF_PARAM(params, pp_loss_adjust);
+	}
+	if (lw_str) {
+		params->pp_loss_weight = lw;
+		SET_IF_PARAM(params, pp_loss_weight);
+	} else {
+		UNSET_IF_PARAM(params, pp_loss_weight);
+	}
+	if (hold_str) {
+		params->pp_hold_samples = hold;
+		SET_IF_PARAM(params, pp_hold_samples);
+	} else {
+		UNSET_IF_PARAM(params, pp_hold_samples);
+	}
+
+	ospf_pp_if_config_changed(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_ip_ospf_packet_pair_loss, no_ip_ospf_packet_pair_loss_cmd,
+      "no ip ospf packet-pair loss [{adjust <none|delivery|tcp>|weight (1-100)|hold-samples (0-16)}]",
+      NO_STR
+      "IP Information\n"
+      "OSPF interface commands\n"
+      "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
+      "Packet loss accounting\n"
+      "Reduce the reported speed for measured loss\n"
+      "Report the measured capacity unchanged (default)\n"
+      "Capacity times the fraction of packets delivered\n"
+      "Steady-state TCP throughput at the measured loss and RTT, at most the capacity\n"
+      "Weight of each new sample in the loss rate\n"
+      "Percent (default 10)\n"
+      "Keep reporting the last speed through samples without valid pairs\n"
+      "Samples (default 3, 0 = withdraw at once)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct ospf_if_params *params = IF_DEF_PARAMS(ifp);
+
+	UNSET_IF_PARAM(params, pp_loss_adjust);
+	UNSET_IF_PARAM(params, pp_loss_weight);
+	UNSET_IF_PARAM(params, pp_hold_samples);
 
 	ospf_pp_if_config_changed(ifp);
 	return CMD_SUCCESS;
@@ -10948,6 +11218,7 @@ DEFPY(no_ip_ospf_packet_pair_smoothing, no_ip_ospf_packet_pair_smoothing_cmd,
 	UNSET_IF_PARAM(params, pp_smooth_weight);
 	UNSET_IF_PARAM(params, pp_step_threshold);
 	UNSET_IF_PARAM(params, pp_step_samples);
+	UNSET_IF_PARAM(params, pp_smooth_window);
 
 	ospf_pp_if_config_changed(ifp);
 	return CMD_SUCCESS;
@@ -13613,6 +13884,65 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 						params->pp_step_samples);
 				vty_out(vty, "\n");
 			}
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    (OSPF_IF_PARAM_CONFIGURED(params, pp_loss_adjust) ||
+			     OSPF_IF_PARAM_CONFIGURED(params, pp_loss_weight) ||
+			     OSPF_IF_PARAM_CONFIGURED(params, pp_hold_samples))) {
+				vty_out(vty, " ip ospf packet-pair loss");
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_loss_adjust))
+					vty_out(vty, " adjust %s",
+						pktpair_loss_adjust_str(
+							params->pp_loss_adjust));
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_loss_weight))
+					vty_out(vty, " weight %u",
+						params->pp_loss_weight);
+				if (OSPF_IF_PARAM_CONFIGURED(params,
+							     pp_hold_samples))
+					vty_out(vty, " hold-samples %u",
+						params->pp_hold_samples);
+				vty_out(vty, "\n");
+			}
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    OSPF_IF_PARAM_CONFIGURED(params, pp_train_span)) {
+				vty_out(vty, " ip ospf packet-pair train span %u",
+					params->pp_train_span);
+				if (params->pp_train_count !=
+				    PKTPAIR_TRAIN_COUNT_DEFAULT)
+					vty_out(vty, " count %u",
+						params->pp_train_count);
+				if (params->pp_train_max !=
+				    PKTPAIR_TRAIN_MAXLEN_DEFAULT)
+					vty_out(vty, " max-packets %u",
+						params->pp_train_max);
+				if (params->pp_train_skip)
+					vty_out(vty, " head-skip %u",
+						params->pp_train_skip);
+				vty_out(vty, "\n");
+			}
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    OSPF_IF_PARAM_CONFIGURED(params, pp_sched_period)) {
+				vty_out(vty,
+					" ip ospf packet-pair schedule period %u offset %u",
+					params->pp_sched_period,
+					params->pp_sched_offset);
+				if (params->pp_sched_guard != 1000)
+					vty_out(vty, " guard %u",
+						params->pp_sched_guard);
+				vty_out(vty, "\n");
+			}
+			if (params == IF_DEF_PARAMS(ifp) &&
+			    OSPF_IF_PARAM_CONFIGURED(params, pp_smooth_window)) {
+				vty_out(vty,
+					" ip ospf packet-pair smoothing window %u",
+					params->pp_smooth_window);
+				if (params->pp_smooth_pct !=
+				    PKTPAIR_SMOOTH_PERCENTILE_DEFAULT)
+					vty_out(vty, " percentile %u",
+						params->pp_smooth_pct);
+				vty_out(vty, "\n");
+			}
 
 			/* neighbor-filter print. */
 			if (OSPF_IF_PARAM_CONFIGURED(params, nbr_filter_name)) {
@@ -14507,6 +14837,17 @@ static void ospf_vty_if_init(void)
 	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_responder_cmd);
 	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_smoothing_cmd);
 	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_smoothing_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_loss_cmd);
+	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_loss_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_train_cmd);
+	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_train_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_schedule_cmd);
+	install_element(INTERFACE_NODE, &no_ip_ospf_packet_pair_schedule_cmd);
+	install_element(INTERFACE_NODE,
+			&ip_ospf_packet_pair_smoothing_window_cmd);
+	install_element(INTERFACE_NODE,
+			&no_ip_ospf_packet_pair_smoothing_window_cmd);
+	install_element(INTERFACE_NODE, &ip_ospf_packet_pair_profile_cmd);
 
 	/* "ip ospf neighbor-filter" commands. */
 	install_element(INTERFACE_NODE, &ip_ospf_neighbor_filter_addr_cmd);

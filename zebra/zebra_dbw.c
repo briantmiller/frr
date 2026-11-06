@@ -38,6 +38,10 @@ struct dbw_nh {
 	uint64_t rtt_kbps;
 	uint64_t out_kbps;
 	uint64_t in_kbps;
+	uint32_t rtt_loss_ppm;
+	uint32_t out_loss_ppm;
+	uint32_t in_loss_ppm;
+	bool loss_adjusted; /* the daemon already reduced the rates for loss */
 	time_t updated; /* monotime() */
 };
 
@@ -75,6 +79,17 @@ static uint64_t dbw_nh_out(const struct dbw_nh *nh)
 static uint64_t dbw_nh_in(const struct dbw_nh *nh)
 {
 	return nh->in_kbps ? nh->in_kbps : nh->rtt_kbps;
+}
+
+/* Loss matching the value dbw_nh_out()/dbw_nh_in() use. */
+static uint32_t dbw_nh_out_loss(const struct dbw_nh *nh)
+{
+	return nh->out_kbps ? nh->out_loss_ppm : nh->rtt_loss_ppm;
+}
+
+static uint32_t dbw_nh_in_loss(const struct dbw_nh *nh)
+{
+	return nh->in_kbps ? nh->in_loss_ppm : nh->rtt_loss_ppm;
 }
 
 /* Where a next hop's effective value comes from. */
@@ -180,6 +195,11 @@ static void dbw_update(struct interface *ifp, uint8_t proto,
 	nh->rtt_kbps = bw->rtt_kbps;
 	nh->out_kbps = bw->out_kbps;
 	nh->in_kbps = bw->in_kbps;
+	nh->rtt_loss_ppm = bw->rtt_loss_ppm;
+	nh->out_loss_ppm = bw->out_loss_ppm;
+	nh->in_loss_ppm = bw->in_loss_ppm;
+	nh->loss_adjusted =
+		CHECK_FLAG(bw->flags, ZAPI_DETECTED_BW_LOSS_ADJUSTED);
 	nh->updated = monotime(NULL);
 }
 
@@ -280,10 +300,17 @@ void zread_detected_bw(ZAPI_HANDLER_ARGS)
 				   client->instance, ifp->name);
 		else
 			zlog_debug("detected bandwidth: %s[%u] %s %pIA: rtt %" PRIu64
-				   " out %" PRIu64 " in %" PRIu64 " kbps%s",
+				   " out %" PRIu64 " in %" PRIu64
+				   " kbps, loss rtt %u out %u in %u ppm%s%s",
 				   zebra_route_string(client->proto),
 				   client->instance, ifp->name, &bw.nexthop,
 				   bw.rtt_kbps, bw.out_kbps, bw.in_kbps,
+				   bw.rtt_loss_ppm, bw.out_loss_ppm,
+				   bw.in_loss_ppm,
+				   CHECK_FLAG(bw.flags,
+					      ZAPI_DETECTED_BW_LOSS_ADJUSTED)
+					   ? " (loss-adjusted)"
+					   : "",
 				   CHECK_FLAG(bw.flags, ZAPI_DETECTED_BW_DELETE)
 					   ? " (delete)"
 					   : "");
@@ -456,6 +483,14 @@ static void dbw_show_detail(struct vty *vty, struct interface *ifp,
 				json_object_string_add(jn, "inSource",
 						       dbw_nh_source(nh->in_kbps,
 								     nh->rtt_kbps));
+				json_object_int_add(jn, "rttLossPpm",
+						    nh->rtt_loss_ppm);
+				json_object_int_add(jn, "outLossPpm",
+						    dbw_nh_out_loss(nh));
+				json_object_int_add(jn, "inLossPpm",
+						    dbw_nh_in_loss(nh));
+				json_object_boolean_add(jn, "lossAdjusted",
+							nh->loss_adjusted);
 				json_object_int_add(jn, "updatedSecAgo",
 						    now - nh->updated);
 				json_object_object_addf(jnhs, jn, "%pIA",
@@ -475,6 +510,17 @@ static void dbw_show_detail(struct vty *vty, struct interface *ifp,
 					dbw_speed_str(nh->rtt_kbps, b3,
 						      sizeof(b3)),
 					(long long)(now - nh->updated));
+				if (nh->rtt_loss_ppm || nh->out_loss_ppm ||
+				    nh->in_loss_ppm || nh->loss_adjusted)
+					vty_out(vty,
+						"      loss out %u.%04u%%, in %u.%04u%%%s\n",
+						dbw_nh_out_loss(nh) / 10000,
+						dbw_nh_out_loss(nh) % 10000,
+						dbw_nh_in_loss(nh) / 10000,
+						dbw_nh_in_loss(nh) % 10000,
+						nh->loss_adjusted
+							? " (rates loss-adjusted by the daemon)"
+							: "");
 			}
 		}
 	}

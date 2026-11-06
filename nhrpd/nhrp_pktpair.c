@@ -470,9 +470,15 @@ static void pp_zebra_send(struct pktpair_session *s, struct in_addr peer,
 
 	bw.nexthop.ipa_type = IPADDR_V4;
 	bw.nexthop.ipaddr_v4 = peer;
-	if (!withdraw)
+	if (!withdraw) {
 		pktpair_peer_bw(s, peer, &bw.rtt_kbps, &bw.out_kbps,
 				&bw.in_kbps);
+		pktpair_peer_loss(s, peer, &bw.rtt_loss_ppm, &bw.out_loss_ppm,
+				  &bw.in_loss_ppm);
+		if (pktpair_session_cfg(s)->loss.adjust !=
+		    PKTPAIR_LOSS_ADJUST_NONE)
+			SET_FLAG(bw.flags, ZAPI_DETECTED_BW_LOSS_ADJUSTED);
+	}
 	if (!bw.rtt_kbps && !bw.out_kbps && !bw.in_kbps)
 		SET_FLAG(bw.flags, ZAPI_DETECTED_BW_DELETE);
 	nhrp_zebra_detected_bw_send(ifp->vrf->vrf_id, &bw);
@@ -565,11 +571,60 @@ static void pp_smoothing_config_write(struct vty *vty,
 	vty_out(vty, "\n");
 }
 
+static void pp_loss_config_write(struct vty *vty,
+				 const struct pktpair_loss_cfg *l)
+{
+	if (l->adjust == PKTPAIR_LOSS_ADJUST_NONE &&
+	    l->weight == PKTPAIR_LOSS_WEIGHT_DEFAULT &&
+	    l->hold_samples == PKTPAIR_HOLD_SAMPLES_DEFAULT)
+		return;
+
+	vty_out(vty, " ip nhrp packet-pair loss");
+	if (l->adjust != PKTPAIR_LOSS_ADJUST_NONE)
+		vty_out(vty, " adjust %s", pktpair_loss_adjust_str(l->adjust));
+	if (l->weight != PKTPAIR_LOSS_WEIGHT_DEFAULT)
+		vty_out(vty, " weight %u", l->weight);
+	if (l->hold_samples != PKTPAIR_HOLD_SAMPLES_DEFAULT)
+		vty_out(vty, " hold-samples %u", l->hold_samples);
+	vty_out(vty, "\n");
+}
+
 void nhrp_pp_config_write(struct vty *vty, struct interface *ifp)
 {
 	struct nhrp_interface *nifp = ifp->info;
 
 	pp_smoothing_config_write(vty, &nifp->pp_cfg.smooth);
+	pp_loss_config_write(vty, &nifp->pp_cfg.loss);
+	if (nifp->pp_cfg.train.span_ms) {
+		const struct pktpair_train_cfg *t = &nifp->pp_cfg.train;
+
+		vty_out(vty, " ip nhrp packet-pair train span %u", t->span_ms);
+		if (t->count != PKTPAIR_TRAIN_COUNT_DEFAULT)
+			vty_out(vty, " count %u", t->count);
+		if (t->max_len != PKTPAIR_TRAIN_MAXLEN_DEFAULT)
+			vty_out(vty, " max-packets %u", t->max_len);
+		if (t->skip_pct)
+			vty_out(vty, " head-skip %u", t->skip_pct);
+		vty_out(vty, "\n");
+	}
+	if (nifp->pp_cfg.sched.period_ms) {
+		const struct pktpair_sched_cfg *c = &nifp->pp_cfg.sched;
+
+		vty_out(vty, " ip nhrp packet-pair schedule period %u offset %u",
+			c->period_ms, c->offset_ms);
+		if (c->guard_ms != 1000)
+			vty_out(vty, " guard %u", c->guard_ms);
+		vty_out(vty, "\n");
+	}
+	if (nifp->pp_cfg.smooth.window >= 2) {
+		vty_out(vty, " ip nhrp packet-pair smoothing window %u",
+			nifp->pp_cfg.smooth.window);
+		if (nifp->pp_cfg.smooth.percentile !=
+		    PKTPAIR_SMOOTH_PERCENTILE_DEFAULT)
+			vty_out(vty, " percentile %u",
+				nifp->pp_cfg.smooth.percentile);
+		vty_out(vty, "\n");
+	}
 	if (!nifp->pp_enabled)
 		return;
 
@@ -664,6 +719,8 @@ void nhrp_pp_show(struct vty *vty, struct interface *ifp,
 		json_object_int_add(ji, "pairsPerSample", nifp->pp_cfg.probes);
 		json_object_int_add(ji, "dscp", nifp->pp_cfg.dscp);
 		pktpair_show_smoothing(vty, ji, &nifp->pp_cfg.smooth, NULL);
+		pktpair_show_loss_cfg(vty, ji, &nifp->pp_cfg.loss, NULL);
+		pktpair_show_train_cfg(vty, ji, &nifp->pp_cfg, NULL);
 		pktpair_show_session(vty, ji, nifp->pp, NULL);
 		ctx.json_peers = json_object_new_object();
 		nhrp_cache_foreach(ifp, pp_show_peer, &ctx);
@@ -694,6 +751,8 @@ void nhrp_pp_show(struct vty *vty, struct interface *ifp,
 			"  Probes use the IP stack, egress qdiscs apply (%s)\n",
 			reason ? reason : "unknown");
 	pktpair_show_smoothing(vty, NULL, &nifp->pp_cfg.smooth, "  ");
+	pktpair_show_loss_cfg(vty, NULL, &nifp->pp_cfg.loss, "  ");
+	pktpair_show_train_cfg(vty, NULL, &nifp->pp_cfg, "  ");
 	pktpair_show_session(vty, NULL, nifp->pp, "  ");
 	nhrp_cache_foreach(ifp, pp_show_peer, &ctx);
 	vty_out(vty, "\n");

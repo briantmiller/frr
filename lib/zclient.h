@@ -258,9 +258,14 @@ struct zapi_detected_bw {
 	uint8_t flags;
 #define ZAPI_DETECTED_BW_DELETE 0x01 /* forget this next hop          */
 #define ZAPI_DETECTED_BW_CLEAR	0x02 /* forget all next hops on ifindex */
+#define ZAPI_DETECTED_BW_LOSS_ADJUSTED 0x04 /* rates already reduced for loss */
 	uint64_t rtt_kbps; /* round-trip estimate: min of both directions */
 	uint64_t out_kbps; /* local -> next hop, measured one-way         */
 	uint64_t in_kbps;  /* next hop -> local, measured one-way         */
+	/* Packet loss in parts per million, same directions; 0 = none/unknown. */
+	uint32_t rtt_loss_ppm; /* both directions together */
+	uint32_t out_loss_ppm;
+	uint32_t in_loss_ppm;
 };
 
 extern enum zclient_send_status
