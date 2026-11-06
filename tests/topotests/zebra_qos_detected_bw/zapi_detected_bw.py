@@ -78,7 +78,8 @@ def detected_bw(cmd, ifindex, flags, nexthop=None, out_kbps=0):
         family = IPADDR_V4 if addr.version == 4 else IPADDR_V6
         body += struct.pack("!H", family) + addr.packed
     # round trip, outbound one-way, inbound one-way
-    body += struct.pack("!QQQ", 0, out_kbps, 0)
+    # rtt/out/in kbps, then rtt/out/in loss in ppm (0: none or unknown)
+    body += struct.pack("!QQQIII", 0, out_kbps, 0, 0, 0, 0)
     return message(cmd, body)
 
 

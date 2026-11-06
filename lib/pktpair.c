@@ -1156,6 +1156,7 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	}
 
 	ow->pkt_size = in->pkt_size;
+	ow->interval = in->interval;
 	ow->npairs = in->npairs;
 	ow->pairs_seen = seen;
 	ow->pairs_valid = nbw;
@@ -1951,6 +1952,93 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 	pp_show_loss(vty, NULL, &ow->loss, eff, indent);
 }
 
+/* IP length of a report: header, ICMP echo reply header, payload */
+#define PP_REPORT_IP_LEN (20 + 8 + (unsigned int)sizeof(struct pktpair_report))
+
+/* "245.76kbps": two decimals at the largest SI prefix below 1000 */
+static const char *pp_bps_str(uint64_t bps, char *buf, size_t len)
+{
+	static const char *const prefix[] = { "", "k", "M", "G", "T" };
+	unsigned int i = 0;
+	double scale = 1;
+
+	while (i + 1 < array_size(prefix) && (double)bps / scale >= 999.995) {
+		scale *= 1000;
+		i++;
+	}
+	snprintf(buf, len, "%.2f%sbps", (double)bps / scale, prefix[i]);
+	return buf;
+}
+
+/*
+ * The bandwidth the measurement itself uses with this peer, at the IP
+ * level, averaged over the probing interval of the latest sample in each
+ * direction (pairs or trains alike):
+ *
+ *   out: our probes, our echo replies to the peer's probes, our reports
+ *   in:  replies to our probes, the peer's probes, the peer's reports
+ *
+ * Our probes and the replies to them recur every one of our intervals;
+ * the peer's probes, our replies and our reports every one of its.
+ */
+static void pp_show_load(struct vty *vty, struct json_object *json,
+			 const struct pktpair_session *s,
+			 const struct pktpair_target *t,
+			 const struct pktpair_oneway *in, const char *indent)
+{
+	uint64_t probes_out = 0, replies_in = 0, reports_in = 0;
+	uint64_t probes_in = 0, replies_out = 0, reports_out = 0;
+	uint64_t out_bps, in_bps;
+	char b1[32], b2[32];
+
+	if (t && t->samples && s->cfg.interval) {
+		const struct pktpair_stats *st = &t->stats;
+		uint64_t bits = (uint64_t)st->pkt_size * 8;
+
+		probes_out = st->loss.last_sent * bits / s->cfg.interval;
+		replies_in = (st->loss.last_sent - st->loss.last_lost) * bits /
+			     s->cfg.interval;
+		if (t->outbound.samples)
+			reports_in = PP_REPORT_IP_LEN * 8 / s->cfg.interval;
+	}
+	if (in && in->samples && in->interval) {
+		uint64_t bits = (uint64_t)in->pkt_size * 8;
+
+		probes_in = in->pkts_rcvd * bits / in->interval;
+		/* the kernel answers every echo request */
+		replies_out = probes_in;
+		reports_out = PP_REPORT_IP_LEN * 8 / in->interval;
+	}
+	out_bps = probes_out + replies_out + reports_out;
+	in_bps = replies_in + probes_in + reports_in;
+
+	if (json) {
+		struct json_object *jl = json_object_new_object();
+
+		json_object_object_add(json, "probeLoad", jl);
+		json_object_int_add(jl, "outBps", out_bps);
+		json_object_int_add(jl, "inBps", in_bps);
+		json_object_int_add(jl, "probesSentBps", probes_out);
+		json_object_int_add(jl, "echoRepliesSentBps", replies_out);
+		json_object_int_add(jl, "reportsSentBps", reports_out);
+		json_object_int_add(jl, "repliesReceivedBps", replies_in);
+		json_object_int_add(jl, "peerProbesReceivedBps", probes_in);
+		json_object_int_add(jl, "reportsReceivedBps", reports_in);
+		if (t && t->samples)
+			json_object_int_add(jl, "intervalSec", s->cfg.interval);
+		if (in && in->samples)
+			json_object_int_add(jl, "peerIntervalSec", in->interval);
+		return;
+	}
+
+	if (!out_bps && !in_bps)
+		return;
+	vty_out(vty,
+		"%s  Measurement traffic: %s out, %s in (average, IP level)\n",
+		indent, pp_bps_str(out_bps, b1, sizeof(b1)),
+		pp_bps_str(in_bps, b2, sizeof(b2)));
+}
+
 void pktpair_show_peer(struct vty *vty, struct json_object *json,
 		       const struct pktpair_cfg *cfg,
 		       struct pktpair_session *s, struct in_addr peer,
@@ -1991,6 +2079,9 @@ void pktpair_show_peer(struct vty *vty, struct json_object *json,
 			       indent);
 	else if (responder && !json)
 		vty_out(vty, "%s  No probes received from peer\n", indent);
+
+	if (s)
+		pp_show_load(vty, json, s, responder ? NULL : t, in, indent);
 
 	/* Recently ignored a message from this peer for its version. */
 	if (s && s->ver_mismatch && IPV4_ADDR_SAME(&s->ver_last_src, &peer) &&

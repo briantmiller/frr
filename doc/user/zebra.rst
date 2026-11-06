@@ -1051,7 +1051,14 @@ without disturbing traffic.
    ``ul`` curves as ``m2`` or ``m1/d/m2`` for HFSC), followed by the
    statistics of every class read from the kernel. A warning is printed
    when classes zebra installed are missing from the kernel, e.g. because
-   the kernel lacks ``sch_hfsc``. Statistics columns:
+   the kernel lacks ``sch_hfsc``.
+
+   Rates are shown with two decimals at the largest SI prefix that keeps
+   the value below 1000, from ``bps`` to ``Tbps`` (``512.00bps``,
+   ``15.07Mbps``, ``1.00Gbps``). The JSON output gives every rate as a
+   plain number of bits per second.
+
+   Statistics columns:
 
    ``Current`` / ``Pps``
       Current rate of the class. Zebra creates its classes with a kernel

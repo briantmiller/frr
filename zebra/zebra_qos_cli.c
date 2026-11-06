@@ -95,7 +95,7 @@ static const char *qos_rate2str(uint64_t bps, char *buf, size_t len)
 	else if (bps % 1000ULL == 0)
 		snprintf(buf, len, "%" PRIu64 "kbps", bps / 1000ULL);
 	else
-		snprintf(buf, len, "%lubps", bps);
+		snprintf(buf, len, "%" PRIu64 "bps", bps);
 
 	return buf;
 }
@@ -719,7 +719,7 @@ static int qos_class_rate_set(struct vty *vty, const char *container, const char
 			vty_out(vty, "%% Invalid rate: %s\n", rate);
 			return CMD_WARNING_CONFIG_FAILED;
 		}
-		snprintf(value, sizeof(value), "%lu", bps);
+		snprintf(value, sizeof(value), "%" PRIu64, bps);
 		snprintf(xpath, sizeof(xpath), "./%s/bps", container);
 		nb_cli_enqueue_change(vty, xpath, NB_OP_MODIFY, value);
 	}
@@ -1088,7 +1088,7 @@ DEFPY_YANG (interface_qos_bandwidth,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	snprintf(value, sizeof(value), "%lu", bps);
+	snprintf(value, sizeof(value), "%" PRIu64, bps);
 	nb_cli_enqueue_change(vty, "./frr-qos:qos/bandwidth", NB_OP_MODIFY, value);
 
 	return nb_cli_apply_changes(vty, NULL);

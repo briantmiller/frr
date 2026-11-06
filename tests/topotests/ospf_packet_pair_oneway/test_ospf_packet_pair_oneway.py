@@ -580,6 +580,31 @@ def test_packet_trains():
             return None
 
         _expect(_trains, count=30, wait=1, msg="trains measure the link")
+
+        # The measurement's own traffic: r1 sends trains, r2 pairs, both
+        # every 2 s; probes are MTU sized (1500 bytes).
+        pp = _pp(r1, "2.2.2.2")
+        load, inb = pp["probeLoad"], pp["inbound"]
+        assert load["intervalSec"] == 2 and load["peerIntervalSec"] == 2, load
+        sent = pp["pairsSent"] * pp["trainLength"]
+        assert abs(load["probesSentBps"] - sent * 1500 * 8 // 2) <= 8, (sent, load)
+        assert load["peerProbesReceivedBps"] == inb["packetsReceived"] * 1500 * 8 // 2, (
+            inb,
+            load,
+        )
+        assert load["echoRepliesSentBps"] == load["peerProbesReceivedBps"], load
+        assert load["outBps"] == (
+            load["probesSentBps"] + load["echoRepliesSentBps"] + load["reportsSentBps"]
+        ), load
+        assert load["inBps"] == (
+            load["repliesReceivedBps"]
+            + load["peerProbesReceivedBps"]
+            + load["reportsReceivedBps"]
+        ), load
+        assert re.search(
+            r"Measurement traffic: \d{1,3}\.\d{2}[kMG]?bps out, \d{1,3}\.\d{2}[kMG]?bps in",
+            r1.vtysh_cmd("show ip ospf neighbor detail"),
+        )
         logger.info("trains: %s", _pp(r1, "2.2.2.2"))
         assert "Trains of " in r1.vtysh_cmd("show ip ospf neighbor detail")
 

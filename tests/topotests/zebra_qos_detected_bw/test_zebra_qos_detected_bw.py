@@ -488,6 +488,61 @@ def test_duplicate_source_rejected(tgen):
     assert "qos bandwidth detected" not in out, out
 
 
+def _rate2str(bps):
+    "The display format of show qos interface: 2 decimals, SI prefix < 1000"
+    value, prefixes = float(bps), ["", "k", "M", "G", "T"]
+    i = 0
+    while i + 1 < len(prefixes) and value >= 999.995:
+        value /= 1000
+        i += 1
+    return "{:.2f}{}bps".format(value, prefixes[i])
+
+
+def test_show_rate_format(tgen):
+    "Text rates have 2 decimals at an SI prefix; JSON rates are raw bps"
+    r1 = tgen.gears["r1"]
+    vtysh_conf("interface {}".format(INTF), "qos bandwidth detected ospf nhrp default 3mbps")
+    # the earlier tests disconnected the injectors
+    start_injector("ospf")
+    time.sleep(1)
+    # not a round number: was shown as "15067.00kbps"
+    set_bw("ospf", "192.0.2.2", 15067)
+
+    def _show():
+        show = qos_show()
+        bw = show.get("qosBandwidth")
+        if show.get("qosBandwidthSource") != "ospf" or not bw or bw % 1000:
+            return "not using ospf yet: {}".format(show)
+        out = r1.vtysh_cmd("show qos interface {}".format(INTF))
+        want = "QoS bandwidth: {} (".format(_rate2str(bw))
+        if want not in out:
+            return "missing {!r} in:\n{}".format(want, out)
+        rates = re.findall(r"([\d.]+)([kMGT]?bps)", out)
+        bad = [r for r in rates if not re.match(r"^\d{1,3}\.\d{2}$", r[0])]
+        if not rates or bad:
+            return "badly formatted rates {} in:\n{}".format(bad, out)
+        return None
+
+    _, result = topotest.run_and_expect(_show, None, count=30, wait=1)
+    assert result is None, result
+
+    # JSON: plain bits per second
+    show = qos_show()
+    srcs = show["detectedBandwidth"]["sources"]
+    assert srcs[0]["bandwidth"] == 15067000, srcs
+    assert show["detectedBandwidth"]["default"] == 3000000, show
+    assert isinstance(show["qosBandwidth"], int), show
+
+    # the formatter itself, at the prefix boundaries
+    assert _rate2str(512) == "512.00bps"
+    assert _rate2str(999994) == "999.99kbps"
+    assert _rate2str(999995) == "1.00Mbps"
+    assert _rate2str(15067000) == "15.07Mbps"
+
+    stop_injector("ospf")
+    vtysh_conf("interface {}".format(INTF), "no qos bandwidth detected")
+
+
 def test_memory_leak():
     "Run the memory leak test and report results."
     tgen = get_topogen()

@@ -345,6 +345,7 @@ struct pktpair_oneway {
 	uint32_t ipd_avg_usec;	 /* mean arrival gap within pairs    */
 	uint32_t jitter_usec;	 /* mean |OWD(i) - OWD(i-1)|         */
 	uint16_t pkt_size;
+	uint16_t interval;	 /* sender's probing interval, s     */
 	uint8_t npairs;	     /* pairs the sender sent            */
 	uint8_t pairs_seen;  /* pairs with at least one arrival  */
 	uint8_t pairs_valid; /* both arrived, positive gap       */

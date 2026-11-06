@@ -1003,6 +1003,15 @@ a BFD profile to these sessions.
    samples (see ``ip ospf packet-pair smoothing``). Results are shown by
    ``show ip ospf neighbor detail [json]``.
 
+   ``show ip ospf neighbor detail`` also shows how much bandwidth the measurement itself uses
+   with each peer ("Measurement traffic", ``probeLoad`` in JSON). This is
+   an IP-level average over the probing interval of the latest sample,
+   for pairs and trains alike. Outgoing (``outBps``) counts this router's
+   probes, its echo replies to the peer's probes and its reports. Incoming
+   (``inBps``) counts the replies to its probes, the peer's probes and the
+   peer's reports. JSON also gives each part in bits per second.
+   Link-layer headers and tunnel encapsulation are not included.
+
    On Linux the probes are sent on an ``AF_PACKET`` socket with
    ``PACKET_QDISC_BYPASS`` set, so they skip the egress queueing
    discipline of the local interface (shapers, policers, fq_codel and
