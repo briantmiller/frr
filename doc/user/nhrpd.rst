@@ -180,7 +180,7 @@ Configuring NHRP
    detected bandwidth towards that next hop on the tunnel (see
    ``detected-bandwidth aggregate`` and ``show zebra detected-bandwidth``).
    Probes and reports carry a payload format version
-   (currently 1); messages of another version are ignored and counted in
+   (currently 2; version 1 had no packet trains); messages of another version are ignored and counted in
    ``show ip nhrp packet-pair`` (``versionMismatches`` in JSON), so
    one-way results need both ends to use the same version.
 
@@ -214,6 +214,112 @@ Configuring NHRP
    only about half way there after four samples. Resets are counted in
    ``smoothingResets`` in the JSON output. Options omitted from the
    command revert to their defaults.
+
+.. clicmd:: ip nhrp packet-pair loss {adjust <none|delivery|tcp>|weight (1-100)|hold-samples (0-16)}
+
+   Packet loss does not bias the speed estimate: a pair either arrives
+   complete and is timed, or is left out of the sample. Loss only leaves
+   fewer pairs per sample. This command controls how loss is accounted
+   for in what is reported.
+
+   The fraction of probe packets lost is tracked per direction: round
+   trip (both directions together, from the replies), outbound (from the
+   neighbor's report) and inbound (measured from the neighbor's probes).
+   Each sample's loss enters a moving average with ``weight`` percent
+   (default 10), because a single sample of 20 packets only resolves 5%
+   steps. ``show ip nhrp packet-pair`` show the latest and smoothed loss and the totals
+   (``lossPct``, ``lossSmoothedPct``, ``packetsSentTotal``,
+   ``packetsLostTotal`` in JSON). The smoothed loss is also sent to
+   zebra.
+
+   With ``adjust``, the measured capacity is reduced for that loss
+   before it is reported to zebra (``effectiveSpeedKbps`` in JSON):
+
+   ``none`` (default)
+      Report the capacity as measured.
+
+   ``delivery``
+      Capacity times the fraction of packets delivered,
+      ``capacity * (1 - loss)``.
+
+   ``tcp``
+      The steady-state throughput of a single TCP flow at that loss and
+      the measured RTT (Mathis et al.: ``MSS / RTT * 1.22 / sqrt(loss)``,
+      with the MSS from the probe size), but never more than the
+      capacity. This reduces the value a lot on long paths and hardly at
+      all on short ones. Without an RTT (the inbound direction on a
+      responder) ``delivery`` is used.
+
+   With heavy loss a sample can end without a single complete pair.
+   The last smoothed estimate is kept, and reported, for up to
+   ``hold-samples`` consecutive such samples (default 3), and withdrawn
+   after that. ``samplesWithoutValidPairs`` in JSON shows the current
+   run. ``hold-samples 0`` withdraws the estimate as soon as one sample
+   has no valid pair. Options omitted from the command revert to their
+   defaults.
+
+.. clicmd:: ip nhrp packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]
+
+   Measure with packet trains instead of packet pairs. Use this on links
+   that deliver traffic in scheduled frames instead of sending it at a
+   fixed bit rate, such as pLEO satellite (Starlink), cellular and DOCSIS.
+   On such links the two packets of a pair usually arrive in the same
+   frame, which reads as far too fast, or one frame time apart (1.33 ms
+   on Starlink), which reads as one packet per frame whatever the real
+   rate. Neither reflects the link.
+
+   Each sample sends ``count`` trains (default 3). The length of each
+   train is chosen from the current estimate so that it takes about
+   ``span`` milliseconds at the bottleneck (default 20, many frames
+   long). It is at least 8 and at most ``max-packets`` packets (default
+   512). A train's rate is the number of packets that arrived after the
+   first timed one, divided by the time until the last one. The first
+   ``head-skip`` percent of each train (default 0) is not timed, because
+   some schedulers are slow to give a new burst its full rate. The sample
+   value is the fastest train, because cross traffic can only slow a
+   train down. Lost packets are not counted, so loss can only lower the
+   result. ``show ip nhrp packet-pair`` shows the train length and the span of the fastest
+   train (``trainLength``, ``trainSpanUsec`` in JSON).
+
+   Trains load the link for ``span`` milliseconds per train. The peer
+   echoes every probe, so round-trip trains also load the reverse path.
+   On a strongly asymmetric link the echoes of a long downlink train can
+   overflow the uplink queue. The one-way results, which need the peer
+   to run packet-pair too, are not affected by this. Packet-pair results
+   from a peer still on payload version 1 are ignored.
+
+.. clicmd:: ip nhrp packet-pair schedule period (1000-3600000) offset (0-3600000) [guard (0-10000)]
+
+   Do not send probes within ``guard`` milliseconds (default 1000) of a
+   periodic boundary, or so late that they would still be in flight at
+   the next one. Boundaries fall every ``period`` milliseconds at
+   ``offset`` milliseconds into each period, counted on the system clock
+   (UTC) from the epoch, so the clock must be synchronized (NTP). Starlink
+   reallocates paths every 15 seconds at 12, 27, 42 and 57 seconds past
+   the minute (``period 15000 offset 12000``). Around those moments
+   latency spikes, loss clusters and the allocated rate changes.
+
+.. clicmd:: ip nhrp packet-pair smoothing window (2-64) [percentile (1-100)]
+
+   Instead of the moving average, report the given percentile (default
+   50, the median) of the last ``window`` samples. Use this when the rate
+   legitimately changes every few seconds, as on Starlink, where the
+   moving average with step detection would keep resetting.
+   ``no ip nhrp packet-pair smoothing`` also turns this off.
+
+.. clicmd:: ip nhrp packet-pair profile satellite
+
+   Settings for pLEO satellite links such as Starlink, equivalent to::
+
+      ip nhrp packet-pair train span 20 head-skip 10
+      ip nhrp packet-pair schedule period 15000 offset 12000
+      ip nhrp packet-pair smoothing window 20
+      ip nhrp packet-pair loss adjust delivery
+
+   The individual settings are what is saved in the configuration, and
+   each can be changed afterwards. The ``no`` form removes all four.
+   Use a probing interval that leaves room for the schedule: with three
+   trains and a 1 second guard, at least 10 seconds.
 
 .. clicmd:: ip nhrp packet-pair responder
 

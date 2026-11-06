@@ -1126,6 +1126,222 @@ DEFPY(if_no_nhrp_packet_pair, if_no_nhrp_packet_pair_cmd,
 	nifp->pp_cfg.respond_only = false;
 	nifp->pp_cfg.smooth =
 		(struct pktpair_smooth_cfg)PKTPAIR_SMOOTH_CFG_DEFAULT;
+	nifp->pp_cfg.loss = (struct pktpair_loss_cfg)PKTPAIR_LOSS_CFG_DEFAULT;
+	memset(&nifp->pp_cfg.train, 0, sizeof(nifp->pp_cfg.train));
+	memset(&nifp->pp_cfg.sched, 0, sizeof(nifp->pp_cfg.sched));
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_train, if_nhrp_packet_pair_train_cmd,
+      "[no] ip nhrp packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Measure with packet trains instead of pairs (for satellite, cellular and other scheduled links)\n"
+      "Time each train should take at the bottleneck\n"
+      "Milliseconds (default 20)\n"
+      "Trains per sample\n"
+      "Number of trains (default 3)\n"
+      "Longest train\n"
+      "Packets (default 512)\n"
+      "Leading part of each train that is not timed\n"
+      "Percent (default 0)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+	struct pktpair_train_cfg *t = &nifp->pp_cfg.train;
+
+	if (no) {
+		memset(t, 0, sizeof(*t));
+	} else {
+		t->span_ms = span_str ? span : 20;
+		t->count = count_str ? count : PKTPAIR_TRAIN_COUNT_DEFAULT;
+		t->max_len = max_packets_str ? max_packets
+					     : PKTPAIR_TRAIN_MAXLEN_DEFAULT;
+		t->skip_pct = head_skip_str ? head_skip : 0;
+	}
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_schedule, if_nhrp_packet_pair_schedule_cmd,
+      "ip nhrp packet-pair schedule period (1000-3600000) offset (0-3600000) [guard (0-10000)]",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Avoid sending around periodic boundaries (system clock, UTC)\n"
+      "Time between boundaries\n"
+      "Milliseconds\n"
+      "First boundary after the start of each period, from the epoch\n"
+      "Milliseconds\n"
+      "Keep this far from each boundary\n"
+      "Milliseconds (default 1000)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.sched.period_ms = period;
+	nifp->pp_cfg.sched.offset_ms = offset;
+	nifp->pp_cfg.sched.guard_ms = guard_str ? guard : 1000;
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_no_nhrp_packet_pair_schedule, if_no_nhrp_packet_pair_schedule_cmd,
+      "no ip nhrp packet-pair schedule [period (1000-3600000) offset (0-3600000) [guard (0-10000)]]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Avoid sending around periodic boundaries (system clock, UTC)\n"
+      "Time between boundaries\n"
+      "Milliseconds\n"
+      "First boundary after the start of each period, from the epoch\n"
+      "Milliseconds\n"
+      "Keep this far from each boundary\n"
+      "Milliseconds (default 1000)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	memset(&nifp->pp_cfg.sched, 0, sizeof(nifp->pp_cfg.sched));
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_smoothing_window,
+      if_nhrp_packet_pair_smoothing_window_cmd,
+      "ip nhrp packet-pair smoothing window (2-64) [percentile (1-100)]",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Use a percentile of the recent samples instead of a moving average\n"
+      "Samples\n"
+      "Percentile\n"
+      "Percent (default 50, the median)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.smooth.window = window;
+	nifp->pp_cfg.smooth.percentile =
+		percentile_str ? percentile : PKTPAIR_SMOOTH_PERCENTILE_DEFAULT;
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_no_nhrp_packet_pair_smoothing_window,
+      if_no_nhrp_packet_pair_smoothing_window_cmd,
+      "no ip nhrp packet-pair smoothing window [(2-64) [percentile (1-100)]]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "How estimates are smoothed across samples\n"
+      "Use a percentile of the recent samples instead of a moving average\n"
+      "Samples\n"
+      "Percentile\n"
+      "Percent (default 50, the median)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.smooth.window = 0;
+	nifp->pp_cfg.smooth.percentile = 0;
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+/* See ip ospf packet-pair profile satellite. */
+DEFPY(if_nhrp_packet_pair_profile, if_nhrp_packet_pair_profile_cmd,
+      "[no] ip nhrp packet-pair profile satellite",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Set several options at once for a kind of link\n"
+      "pLEO satellite (Starlink): trains, 15 s schedule, windowed median, loss-adjusted\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+	struct pktpair_cfg *c = &nifp->pp_cfg;
+
+	if (no) {
+		memset(&c->train, 0, sizeof(c->train));
+		memset(&c->sched, 0, sizeof(c->sched));
+		c->smooth.window = c->smooth.percentile = 0;
+		c->loss.adjust = PKTPAIR_LOSS_ADJUST_NONE;
+	} else {
+		c->train = (struct pktpair_train_cfg){
+			.span_ms = 20, .count = 3, .max_len = 512, .skip_pct = 10
+		};
+		c->sched = (struct pktpair_sched_cfg){
+			.period_ms = 15000, .offset_ms = 12000, .guard_ms = 1000
+		};
+		c->smooth.window = 20;
+		c->smooth.percentile = 50;
+		c->loss.adjust = PKTPAIR_LOSS_ADJUST_DELIVERY;
+	}
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_nhrp_packet_pair_loss, if_nhrp_packet_pair_loss_cmd,
+      "ip nhrp packet-pair loss {adjust <none|delivery|tcp>$mode|weight (1-100)$lw|hold-samples (0-16)$hold}",
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Packet loss accounting\n"
+      "Reduce the reported speed for measured loss\n"
+      "Report the measured capacity unchanged (default)\n"
+      "Capacity times the fraction of packets delivered\n"
+      "Steady-state TCP throughput at the measured loss and RTT, at most the capacity\n"
+      "Weight of each new sample in the loss rate\n"
+      "Percent (default 10)\n"
+      "Keep reporting the last speed through samples without valid pairs\n"
+      "Samples (default 3, 0 = withdraw at once)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.loss.adjust =
+		!mode			  ? PKTPAIR_LOSS_ADJUST_NONE
+		: !strcmp(mode, "tcp")	  ? PKTPAIR_LOSS_ADJUST_TCP
+		: !strcmp(mode, "delivery") ? PKTPAIR_LOSS_ADJUST_DELIVERY
+					    : PKTPAIR_LOSS_ADJUST_NONE;
+	nifp->pp_cfg.loss.weight = lw_str ? lw : PKTPAIR_LOSS_WEIGHT_DEFAULT;
+	nifp->pp_cfg.loss.hold_samples = hold_str
+						 ? hold
+						 : PKTPAIR_HOLD_SAMPLES_DEFAULT;
+
+	nhrp_pp_update(ifp);
+	return CMD_SUCCESS;
+}
+
+DEFPY(if_no_nhrp_packet_pair_loss, if_no_nhrp_packet_pair_loss_cmd,
+      "no ip nhrp packet-pair loss [{adjust <none|delivery|tcp>|weight (1-100)|hold-samples (0-16)}]",
+      NO_STR
+      IP_STR
+      NHRP_STR
+      "Estimate speed, RTT and jitter to NHSes and registered clients using packet pairs\n"
+      "Packet loss accounting\n"
+      "Reduce the reported speed for measured loss\n"
+      "Report the measured capacity unchanged (default)\n"
+      "Capacity times the fraction of packets delivered\n"
+      "Steady-state TCP throughput at the measured loss and RTT, at most the capacity\n"
+      "Weight of each new sample in the loss rate\n"
+      "Percent (default 10)\n"
+      "Keep reporting the last speed through samples without valid pairs\n"
+      "Samples (default 3, 0 = withdraw at once)\n")
+{
+	VTY_DECLVAR_CONTEXT(interface, ifp);
+	struct nhrp_interface *nifp = ifp->info;
+
+	nifp->pp_cfg.loss = (struct pktpair_loss_cfg)PKTPAIR_LOSS_CFG_DEFAULT;
 
 	nhrp_pp_update(ifp);
 	return CMD_SUCCESS;
@@ -1532,4 +1748,14 @@ void nhrp_config_init(void)
 	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_responder_cmd);
 	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_smoothing_cmd);
 	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_smoothing_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_train_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_schedule_cmd);
+	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_schedule_cmd);
+	install_element(INTERFACE_NODE,
+			&if_nhrp_packet_pair_smoothing_window_cmd);
+	install_element(INTERFACE_NODE,
+			&if_no_nhrp_packet_pair_smoothing_window_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_profile_cmd);
+	install_element(INTERFACE_NODE, &if_nhrp_packet_pair_loss_cmd);
+	install_element(INTERFACE_NODE, &if_no_nhrp_packet_pair_loss_cmd);
 }

@@ -49,6 +49,7 @@
 
 #include <zebra.h>
 
+#include <math.h>
 #include <netinet/ip.h>
 #include <netinet/ip_icmp.h>
 #ifdef GNU_LINUX
@@ -79,6 +80,7 @@ DEFINE_MTYPE_STATIC(LIB, PKTPAIR_INBOUND, "Packet-pair inbound sender");
 #define PKTPAIR_REPORT_MAGIC   0x4f505054 /* "OPPT": one-way report */
 #define PKTPAIR_IP_HDR_LEN     20
 #define PKTPAIR_PAIR_GAP_MSEC  50   /* between pairs within a sample */
+#define PKTPAIR_TRAIN_GAP_MSEC 1000 /* between trains within a sample */
 #define PKTPAIR_REPLY_WAIT_MSEC 1000 /* for the last replies */
 
 /* Receiving side. */
@@ -106,10 +108,11 @@ struct pktpair_payload {
 	uint16_t interval; /* sender's interval, s   */
 	uint32_t sample_id;
 	struct in_addr dst;
-	uint8_t pair;
-	uint8_t which;
-	uint8_t npairs; /* pairs in this sample   */
-	uint8_t rsvd;
+	uint8_t pair;	 /* pair/train index in the sample */
+	uint8_t npairs;	 /* pairs/trains in this sample    */
+	uint16_t which;	 /* packet index in the pair/train */
+	uint16_t len;	 /* packets in the pair/train (2 = pair) */
+	uint16_t skip;	 /* leading packets not timed      */
 	uint32_t tx_sec; /* sender's transmit time */
 	uint32_t tx_nsec;
 };
@@ -125,7 +128,9 @@ struct pktpair_report {
 	uint8_t npairs;
 	uint8_t pairs_seen;
 	uint8_t pairs_valid;
-	uint8_t pkts_rcvd;
+	uint8_t rsvd2;
+	uint16_t pkts_rcvd;
+	uint16_t train_len;
 	uint32_t bw_kbps;
 	uint32_t ipd_avg_usec;
 	uint32_t jitter_usec;
@@ -140,15 +145,8 @@ _Static_assert(offsetof(struct pktpair_report, version) ==
 	       "report version offset");
 _Static_assert(offsetof(struct pktpair_hdr, version) + 1 == PKTPAIR_HDR_LEN,
 	       "header length");
-_Static_assert(sizeof(struct pktpair_payload) == 28, "probe payload size");
-_Static_assert(sizeof(struct pktpair_report) == 32, "report payload size");
-
-/* A peer that sends us probes. */
-struct pktpair_inpair {
-	struct timespec rx[2]; /* our clock            */
-	struct timespec tx[2]; /* sender's clock       */
-	uint8_t rcvd;
-};
+_Static_assert(sizeof(struct pktpair_payload) == 32, "probe payload size");
+_Static_assert(sizeof(struct pktpair_report) == 36, "report payload size");
 
 PREDECL_HASH(pktpair_inbound);
 
@@ -164,12 +162,15 @@ struct pktpair_inbound {
 	uint8_t npairs;
 	uint8_t tos;
 	uint16_t pkt_size;
+	uint16_t train_len;
 	uint16_t interval;
 	bool pending;
-	struct pktpair_inpair pairs[PKTPAIR_PROBES_MAX];
+	struct pktpair_pair pairs[PKTPAIR_PROBES_MAX];
 	struct event *t_done;
 
 	struct timeval last_rx; /* monotonic */
+	struct timeval first_rx; /* first arrival of this sample */
+	uint8_t first_pair;	 /* its pair index                */
 	struct pktpair_oneway stats;
 };
 
@@ -221,6 +222,7 @@ struct pktpair_session {
 	/* Current sample. */
 	uint8_t probes;
 	uint8_t pair_idx;
+	uint64_t sched_waits; /* sends deferred by the schedule */
 	unsigned int cursor;
 	unsigned int gap_msec;
 	struct pktpair_target **active;
@@ -241,7 +243,9 @@ struct pktpair_session {
 	struct event *t_finish;
 	struct event *t_sweep;
 
-	uint8_t buf[PKTPAIR_ENCAP_MAX + PKTPAIR_PKT_MAX];
+	/* Packets of a pair/train, built a batch at a time before sending. */
+	uint8_t *txbuf;
+	size_t txbuf_stride;
 };
 
 /* ------------------------------------------------------------------ */
@@ -263,6 +267,64 @@ static int64_t ts_diff_ns(const struct timespec *a, const struct timespec *b)
 {
 	return (int64_t)(a->tv_sec - b->tv_sec) * 1000000000LL +
 	       (a->tv_nsec - b->tv_nsec);
+}
+
+/* Fold the arrival of packet idx at ts into a pair/train. */
+static void pp_train_arrival(struct pktpair_pair *pr, uint16_t idx,
+			     const struct timespec *ts)
+{
+	if (idx < 2) {
+		if (pr->seen01 & (1 << idx))
+			return; /* duplicate */
+		pr->seen01 |= 1 << idx;
+		if (idx == 0)
+			pr->rx0 = *ts;
+	}
+	pr->rcvd++;
+	if (idx >= pr->skip) {
+		if (!pr->steady || ts_diff_ns(ts, &pr->rx_a) < 0)
+			pr->rx_a = *ts;
+		if (!pr->steady || ts_diff_ns(ts, &pr->rx_b) > 0)
+			pr->rx_b = *ts;
+		pr->steady++;
+	}
+}
+
+/*
+ * Rate of a pair/train in kbit/s, 0 if it cannot be timed: the packets
+ * after the first timed one, over the time to the last.  Lost packets in
+ * between are not counted, so loss can only lower the result.
+ */
+static uint64_t pp_train_kbps(const struct pktpair_pair *pr, uint16_t size,
+			      int64_t *span_ns)
+{
+	int64_t dt;
+
+	if (pr->steady < 2)
+		return 0;
+	dt = ts_diff_ns(&pr->rx_b, &pr->rx_a);
+	if (dt <= 0)
+		return 0;
+	*span_ns = dt;
+	return (uint64_t)(pr->steady - 1) * size * 8ULL * 1000000ULL /
+	       (uint64_t)dt;
+}
+
+uint32_t pktpair_sched_delay(uint64_t now_ms, const struct pktpair_sched_cfg *c,
+			     uint32_t dur_ms)
+{
+	uint64_t phase;
+
+	if (!c->period_ms || dur_ms + 2ULL * c->guard_ms >= c->period_ms)
+		return 0;
+	/* ms since the last boundary */
+	phase = (now_ms + c->period_ms - c->offset_ms % c->period_ms) %
+		c->period_ms;
+	if (phase < c->guard_ms)
+		return c->guard_ms - phase;
+	if (phase + dur_ms + c->guard_ms > c->period_ms)
+		return c->period_ms - phase + c->guard_ms;
+	return 0;
 }
 
 static uint16_t pp_pkt_size(const struct pktpair_session *s)
@@ -293,6 +355,33 @@ uint64_t pktpair_smooth_update(struct pktpair_smoother *sm,
 			       const struct pktpair_smooth_cfg *cfg,
 			       uint64_t sample_kbps)
 {
+	if (cfg->window >= 2) {
+		uint64_t v[PKTPAIR_SMOOTH_WINDOW_MAX];
+		unsigned int n, k, pct, w = MIN(cfg->window,
+						PKTPAIR_SMOOTH_WINDOW_MAX);
+
+		if (sample_kbps) {
+			sm->hist[sm->pos] = sample_kbps;
+			sm->pos = (sm->pos + 1) % PKTPAIR_SMOOTH_WINDOW_MAX;
+			if (sm->nhist < PKTPAIR_SMOOTH_WINDOW_MAX)
+				sm->nhist++;
+		}
+		n = MIN(sm->nhist, w);
+		if (!n)
+			return 0;
+		for (k = 0; k < n; k++)
+			v[k] = sm->hist[(sm->pos + PKTPAIR_SMOOTH_WINDOW_MAX -
+					 1 - k) %
+					PKTPAIR_SMOOTH_WINDOW_MAX];
+		qsort(v, n, sizeof(v[0]), uint64_cmp);
+		pct = cfg->percentile ? cfg->percentile
+				      : PKTPAIR_SMOOTH_PERCENTILE_DEFAULT;
+		/* nearest rank */
+		pct = MIN(pct, 100U);
+		k = (pct * n + 99) / 100;
+		return v[k ? k - 1 : 0];
+	}
+
 	double x, w, ratio, limit;
 	int8_t dir;
 
@@ -345,6 +434,73 @@ out:
 }
 
 /* ------------------------------------------------------------------ */
+/* Loss                                                               */
+/* ------------------------------------------------------------------ */
+
+void pktpair_loss_update(struct pktpair_loss *l,
+			 const struct pktpair_loss_cfg *cfg, unsigned int sent,
+			 unsigned int lost, bool valid)
+{
+	double w, f;
+
+	if (valid)
+		l->empty_run = 0;
+	else if (l->empty_run < UINT8_MAX)
+		l->empty_run++;
+
+	if (sent == 0)
+		return;
+	if (lost > sent)
+		lost = sent;
+	l->last_sent = MIN(sent, UINT16_MAX);
+	l->last_lost = MIN(lost, UINT16_MAX);
+	l->pkts_sent += sent;
+	l->pkts_lost += lost;
+
+	f = (double)lost / sent;
+	w = (cfg->weight ? cfg->weight : PKTPAIR_LOSS_WEIGHT_DEFAULT) / 100.0;
+	if (l->samples == 0)
+		l->rate = f;
+	else
+		l->rate += w * (f - l->rate);
+	l->samples++;
+}
+
+uint64_t pktpair_loss_adjust(uint64_t kbps, double loss, uint32_t rtt_usec,
+			     uint16_t pkt_size, enum pktpair_loss_adjust mode)
+{
+	double tcp;
+	unsigned int mss;
+
+	if (kbps == 0 || loss <= 0 || mode == PKTPAIR_LOSS_ADJUST_NONE)
+		return kbps;
+	if (loss >= 1)
+		return 0;
+
+	if (mode == PKTPAIR_LOSS_ADJUST_TCP && rtt_usec) {
+		/* MSS / RTT * 1.22 / sqrt(p); bits per usec = Mbit/s. */
+		mss = pkt_size > 40 ? pkt_size - 40 : PKTPAIR_PKT_DEFAULT - 40;
+		tcp = (double)mss * 8.0 / rtt_usec * 1000.0 * 1.22 / sqrt(loss);
+		return tcp < (double)kbps ? (uint64_t)tcp : kbps;
+	}
+
+	return (uint64_t)((double)kbps * (1.0 - loss) + 0.5);
+}
+
+const char *pktpair_loss_adjust_str(enum pktpair_loss_adjust mode)
+{
+	switch (mode) {
+	case PKTPAIR_LOSS_ADJUST_DELIVERY:
+		return "delivery";
+	case PKTPAIR_LOSS_ADJUST_TCP:
+		return "tcp";
+	case PKTPAIR_LOSS_ADJUST_NONE:
+		break;
+	}
+	return "none";
+}
+
+/* ------------------------------------------------------------------ */
 /* Sample evaluation                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -352,29 +508,31 @@ static void pp_target_finalize(struct pktpair_session *s,
 			       struct pktpair_target *t)
 {
 	struct pktpair_stats *st = &t->stats;
-	uint64_t bw[PKTPAIR_PROBES_MAX];
+	uint64_t bw[PKTPAIR_PROBES_MAX], best = 0;
 	uint64_t rtt_sum = 0, ipd_sum = 0, jit_sum = 0;
-	int64_t prev_rtt = -1;
+	int64_t prev_rtt = -1, best_span = 0;
 	uint32_t rtt_min = UINT32_MAX, rtt_max = 0;
 	unsigned int nrtt = 0, nbw = 0, njit = 0, sent = 0, lost = 0;
-	unsigned int i, k;
+	unsigned int pkts_sent = 0;
+	unsigned int i;
 
 	if (t->npairs == 0)
 		return;
 
 	for (i = 0; i < t->npairs; i++) {
 		struct pktpair_pair *pr = &t->pairs[i];
+		int64_t span = 0;
+		uint64_t kbps;
 
 		if (pr->sent == 0)
 			continue;
 		sent++;
-		for (k = 0; k < 2; k++)
-			if ((pr->sent & (1 << k)) && !(pr->rcvd & (1 << k)))
-				lost++;
+		pkts_sent += pr->sent;
+		lost += pr->sent - MIN(pr->rcvd, pr->sent);
 
-		/* RTT and jitter from the leading packet of the pair. */
-		if (pr->rcvd & 0x1) {
-			int64_t rtt = ts_diff_ns(&pr->rx[0], &pr->tx[0]) / 1000;
+		/* RTT and jitter from the leading packet. */
+		if (pr->seen01 & 0x1) {
+			int64_t rtt = ts_diff_ns(&pr->rx0, &pr->tx0) / 1000;
 
 			if (rtt >= 0) {
 				rtt_sum += rtt;
@@ -392,14 +550,13 @@ static void pp_target_finalize(struct pktpair_session *s,
 		}
 
 		/* Dispersion of the replies. */
-		if (pr->rcvd == 0x3) {
-			int64_t ipd = ts_diff_ns(&pr->rx[1], &pr->rx[0]);
-
-			if (ipd > 0) {
-				ipd_sum += ipd;
-				/* kbps = bits / ns * 1e6 */
-				bw[nbw++] = (uint64_t)t->pkt_size * 8ULL *
-					    1000000ULL / (uint64_t)ipd;
+		kbps = pp_train_kbps(pr, t->pkt_size, &span);
+		if (kbps) {
+			ipd_sum += span / (pr->steady - 1);
+			bw[nbw++] = kbps;
+			if (kbps > best) {
+				best = kbps;
+				best_span = span;
 			}
 		}
 	}
@@ -419,10 +576,12 @@ static void pp_target_finalize(struct pktpair_session *s,
 	}
 
 	st->pkt_size = t->pkt_size;
+	st->train_len = t->train_len;
 	st->tx = t->tx;
 	st->pairs_sent = sent;
 	st->pairs_valid = nbw;
 	st->pkts_lost = lost;
+	pktpair_loss_update(&st->loss, &s->cfg.loss, pkts_sent, lost, nbw > 0);
 
 	if (nrtt) {
 		st->rtt_min_usec = rtt_min;
@@ -436,14 +595,21 @@ static void pp_target_finalize(struct pktpair_session *s,
 
 	if (nbw) {
 		qsort(bw, nbw, sizeof(bw[0]), uint64_cmp);
-		st->bw_kbps = (nbw & 1) ? bw[nbw / 2]
-					: (bw[nbw / 2 - 1] + bw[nbw / 2]) / 2;
+		/* Pairs: the median.  Trains: the fastest. */
+		if (t->train_len > 2)
+			st->bw_kbps = best;
+		else
+			st->bw_kbps = (nbw & 1) ? bw[nbw / 2]
+						: (bw[nbw / 2 - 1] + bw[nbw / 2]) /
+							  2;
+		st->span_usec = best_span / 1000;
 		st->ipd_avg_usec = ipd_sum / nbw / 1000;
 		st->bw_smooth_kbps = pktpair_smooth_update(
 			&st->smoother, &s->cfg.smooth, st->bw_kbps);
 	} else {
 		st->bw_kbps = 0;
 		st->ipd_avg_usec = 0;
+		st->span_usec = 0;
 	}
 
 	monotime(&st->last_update);
@@ -477,7 +643,7 @@ static void pp_finish_timer(struct event *thread)
 /* Build the inner IPv4 + ICMP echo probe at buf. */
 static void pp_build_probe(struct pktpair_session *s, struct pktpair_target *t,
 			   uint8_t *buf, uint16_t ip_len, uint8_t pair,
-			   uint8_t which, const struct timespec *tx_ts)
+			   uint16_t which, const struct timespec *tx_ts)
 {
 	struct ip *iph = (struct ip *)buf;
 	struct icmphdr *icmp = (struct icmphdr *)(buf + PKTPAIR_IP_HDR_LEN);
@@ -496,8 +662,10 @@ static void pp_build_probe(struct pktpair_session *s, struct pktpair_target *t,
 	pl->sample_id = htonl(s->sample_id);
 	pl->dst = t->dst;
 	pl->pair = pair;
-	pl->which = which;
 	pl->npairs = t->npairs;
+	pl->which = htons(which);
+	pl->len = htons(t->pairs[pair].len);
+	pl->skip = htons(t->pairs[pair].skip);
 	pl->interval = htons(s->cfg.interval);
 	pl->tx_sec = htonl((uint32_t)tx_ts->tv_sec);
 	pl->tx_nsec = htonl((uint32_t)tx_ts->tv_nsec);
@@ -518,63 +686,105 @@ static void pp_build_probe(struct pktpair_session *s, struct pktpair_target *t,
 	s->seq++;
 }
 
-static int pp_send_one(struct pktpair_session *s, struct pktpair_target *t,
-		       uint8_t pair, uint8_t which, struct timespec *tx_ts)
+#define PKTPAIR_TX_BATCH 32
+
+/*
+ * Send a pair or train.  Packets are built a batch at a time and handed
+ * to the kernel in one sendmmsg() call per batch, so nothing runs between
+ * the packets of a batch: building and checksumming each packet after the
+ * previous one had left put 15-75us between them, more than the gap being
+ * measured on a fast link (12us for 1500 bytes at 1 Gbit/s).  A train
+ * stops early if the socket or driver queue is full; unsent packets count
+ * as neither sent nor lost.
+ */
+static void pp_send_pair(struct pktpair_session *s, struct pktpair_target *t,
+			 uint8_t idx)
 {
+	struct pktpair_pair *pr = &t->pairs[idx];
 	struct pktpair_tx *tx = &t->tx;
 	uint16_t ip_len = t->pkt_size;
-	ssize_t ret;
+	struct mmsghdr msgs[PKTPAIR_TX_BATCH];
+	struct iovec iov[PKTPAIR_TX_BATCH];
+	struct sockaddr_in to = {};
+#ifdef PACKET_QDISC_BYPASS
+	struct sockaddr_ll sll = {};
+#endif
+	size_t off = 0, stride;
+	void *name;
+	socklen_t namelen;
+	struct timespec now;
+	int fd, i, n, ret = 0;
 
 #ifdef PACKET_QDISC_BYPASS
 	if (tx->mode == PKTPAIR_TX_BYPASS) {
-		struct sockaddr_ll sll = {};
-
 		sll.sll_family = AF_PACKET;
 		sll.sll_protocol = htons(tx->protocol);
 		sll.sll_ifindex = tx->ifindex;
 		sll.sll_halen = tx->halen;
 		memcpy(sll.sll_addr, tx->lladdr, tx->halen);
-
-		clock_gettime(CLOCK_REALTIME, tx_ts);
-		memcpy(s->buf, tx->encap, tx->encap_len);
-		pp_build_probe(s, t, s->buf + tx->encap_len, ip_len, pair,
-			       which, tx_ts);
-		ret = sendto(s->pfd, s->buf, tx->encap_len + ip_len, 0,
-			     (struct sockaddr *)&sll, sizeof(sll));
+		fd = s->pfd;
+		off = tx->encap_len;
+		name = &sll;
+		namelen = sizeof(sll);
 	} else
 #endif
 	{
-		struct sockaddr_in to = {};
-
 		to.sin_family = AF_INET;
 		to.sin_addr = t->dst;
-
-		clock_gettime(CLOCK_REALTIME, tx_ts);
-		pp_build_probe(s, t, s->buf, ip_len, pair, which, tx_ts);
-		ret = sendto(s->fd, s->buf, ip_len, 0, (struct sockaddr *)&to,
-			     sizeof(to));
+		fd = s->fd;
+		name = &to;
+		namelen = sizeof(to);
 	}
 
-	if (ret < 0) {
-		if (pp_debug(s))
-			zlog_debug("packet-pair %s: send to %pI4 via %s: %s",
-				   s->ifp->name, &t->dst, tx->path,
-				   safe_strerror(errno));
-		return -1;
+	stride = off + ip_len;
+	if (s->txbuf_stride < stride) {
+		XFREE(MTYPE_TMP, s->txbuf);
+		s->txbuf = XMALLOC(MTYPE_TMP, PKTPAIR_TX_BATCH * stride);
+		s->txbuf_stride = stride;
 	}
-	return 0;
+	stride = s->txbuf_stride;
+
+	clock_gettime(CLOCK_REALTIME, &pr->tx0);
+	now = pr->tx0;
+	while (pr->sent < pr->len) {
+		n = MIN(pr->len - pr->sent, PKTPAIR_TX_BATCH);
+		memset(msgs, 0, sizeof(msgs[0]) * n);
+		for (i = 0; i < n; i++) {
+			uint8_t *b = s->txbuf + i * stride;
+
+			if (off)
+				memcpy(b, tx->encap, off);
+			pp_build_probe(s, t, b + off, ip_len, idx,
+				       pr->sent + i, &now);
+			iov[i].iov_base = b;
+			iov[i].iov_len = off + ip_len;
+			msgs[i].msg_hdr.msg_iov = &iov[i];
+			msgs[i].msg_hdr.msg_iovlen = 1;
+			msgs[i].msg_hdr.msg_name = name;
+			msgs[i].msg_hdr.msg_namelen = namelen;
+		}
+		ret = sendmmsg(fd, msgs, n, MSG_DONTWAIT);
+		if (ret > 0)
+			pr->sent += ret;
+		if (ret < n)
+			break;
+		clock_gettime(CLOCK_REALTIME, &now);
+	}
+	if (pr->sent < pr->len && pp_debug(s))
+		zlog_debug("packet-pair %s: send to %pI4 via %s: %u of %u sent: %s",
+			   s->ifp->name, &t->dst, tx->path, pr->sent, pr->len,
+			   ret < 0 ? safe_strerror(errno) : "queue full");
 }
 
-static void pp_send_pair(struct pktpair_session *s, struct pktpair_target *t,
-			 uint8_t idx)
+/* How long a pair/train to t is in flight, for the schedule. */
+static uint32_t pp_flight_ms(const struct pktpair_session *s,
+			     const struct pktpair_target *t)
 {
-	struct pktpair_pair *pr = &t->pairs[idx];
+	uint32_t ms = t->stats.rtt_avg_usec / 1000 + 1;
 
-	/* Both packets are queued back-to-back. */
-	if (pp_send_one(s, t, idx, 0, &pr->tx[0]) == 0)
-		pr->sent |= 0x1;
-	if (pp_send_one(s, t, idx, 1, &pr->tx[1]) == 0)
-		pr->sent |= 0x2;
+	if (t->train_len > 2)
+		ms += s->cfg.train.span_ms;
+	return ms;
 }
 
 static void pp_pair_timer(struct event *thread)
@@ -589,6 +799,23 @@ static void pp_pair_timer(struct event *thread)
 			event_add_timer_msec(s->loop, pp_finish_timer, s,
 					     PKTPAIR_REPLY_WAIT_MSEC,
 					     &s->t_finish);
+			return;
+		}
+	}
+
+	if (s->cfg.sched.period_ms) {
+		struct timespec now;
+		uint32_t delay;
+
+		clock_gettime(CLOCK_REALTIME, &now);
+		delay = pktpair_sched_delay((uint64_t)now.tv_sec * 1000 +
+						    now.tv_nsec / 1000000,
+					    &s->cfg.sched,
+					    pp_flight_ms(s, s->active[s->cursor]));
+		if (delay) {
+			s->sched_waits++;
+			event_add_timer_msec(s->loop, pp_pair_timer, s, delay,
+					     &s->t_pair);
 			return;
 		}
 	}
@@ -620,11 +847,38 @@ void pktpair_target_add(struct pktpair_session *s, struct in_addr dst)
 	t->seen = true;
 }
 
+/*
+ * Packets per pair/train: 2 for pairs; for trains, enough to take
+ * span_ms at the current estimate (the outbound one-way result if the
+ * target reports one, else the round-trip one).
+ */
+static uint16_t pp_train_len(const struct pktpair_session *s,
+			     const struct pktpair_target *t, uint16_t size)
+{
+	const struct pktpair_train_cfg *c = &s->cfg.train;
+	uint64_t est = 0, len;
+	uint16_t max = c->max_len ? c->max_len : PKTPAIR_TRAIN_MAXLEN_DEFAULT;
+
+	if (!c->span_ms)
+		return 2;
+	if (t->outbound.samples && t->outbound.bw_smooth_kbps)
+		est = t->outbound.bw_smooth_kbps;
+	else if (t->samples && t->stats.bw_smooth_kbps)
+		est = t->stats.bw_smooth_kbps;
+	if (!est)
+		return MIN(4 * PKTPAIR_TRAIN_LEN_MIN, max);
+	/* kbit/s * ms = bit */
+	len = est * c->span_ms / (size * 8ULL) + 1;
+	len = MAX(len, PKTPAIR_TRAIN_LEN_MIN);
+	len = MIN(len, max);
+	return len;
+}
+
 static void pp_sample_timer(struct event *thread)
 {
 	struct pktpair_session *s = EVENT_ARG(thread);
 	struct pktpair_target *t;
-	unsigned int count, budget_msec;
+	unsigned int count, budget_msec, i;
 	uint16_t size = pp_pkt_size(s);
 
 	/* A previous sample is still running: skip this round. */
@@ -654,7 +908,10 @@ static void pp_sample_timer(struct event *thread)
 	s->sample_id++;
 	s->pair_idx = 0;
 	s->cursor = 0;
-	s->probes = s->cfg.probes;
+	s->probes = s->cfg.train.span_ms
+			    ? (s->cfg.train.count ? s->cfg.train.count
+						  : PKTPAIR_TRAIN_COUNT_DEFAULT)
+			    : s->cfg.probes;
 
 	count = pktpair_targets_count(&s->targets);
 	if (count)
@@ -669,9 +926,20 @@ static void pp_sample_timer(struct event *thread)
 			continue;
 		t->tx = tx;
 		memset(t->pairs, 0, sizeof(t->pairs));
+		t->prev_sample_id = t->sample_id;
 		t->sample_id = s->sample_id;
 		t->npairs = s->probes;
 		t->pkt_size = size;
+		t->train_len = pp_train_len(s, t, size);
+		for (i = 0; i < t->npairs; i++) {
+			t->pairs[i].len = t->train_len;
+			t->pairs[i].skip =
+				t->train_len > 2
+					? MIN(t->train_len *
+						      s->cfg.train.skip_pct / 100,
+					      t->train_len - 2)
+					: 0;
+		}
 		s->active[s->nactive++] = t;
 	}
 
@@ -688,7 +956,9 @@ static void pp_sample_timer(struct event *thread)
 	 */
 	budget_msec = s->cfg.interval * 750;
 	s->gap_msec = budget_msec / (s->probes * s->nactive);
-	s->gap_msec = MIN(s->gap_msec, PKTPAIR_PAIR_GAP_MSEC);
+	s->gap_msec = MIN(s->gap_msec, s->cfg.train.span_ms
+					       ? PKTPAIR_TRAIN_GAP_MSEC
+					       : PKTPAIR_PAIR_GAP_MSEC);
 	s->gap_msec = MAX(s->gap_msec, 1U);
 
 	event_add_timer_msec(s->loop, pp_pair_timer, s, 0, &s->t_pair);
@@ -707,8 +977,9 @@ static void pp_handle_reply(struct pktpair_session *s, struct ip *iph,
 {
 	struct pktpair_target key = {}, *t;
 	struct pktpair_pair *pr;
+	uint16_t which = ntohs(pl->which);
 
-	if (pl->which > 1 || pl->pair >= PKTPAIR_PROBES_MAX ||
+	if (pl->pair >= PKTPAIR_PROBES_MAX ||
 	    !IPV4_ADDR_SAME(&pl->dst, &iph->ip_src))
 		return;
 
@@ -718,11 +989,10 @@ static void pp_handle_reply(struct pktpair_session *s, struct ip *iph,
 		return;
 
 	pr = &t->pairs[pl->pair];
-	if (!(pr->sent & (1 << pl->which)) || (pr->rcvd & (1 << pl->which)))
+	if (which >= pr->sent)
 		return;
 
-	pr->rx[pl->which] = *rx_ts;
-	pr->rcvd |= 1 << pl->which;
+	pp_train_arrival(pr, which, rx_ts);
 }
 
 /* A target's report of how our probes arrived: our outbound direction. */
@@ -737,9 +1007,18 @@ static void pp_handle_report(struct pktpair_session *s, struct ip *iph,
 		return;
 	key.dst = iph->ip_src;
 	t = pktpair_targets_find(&s->targets, &key);
-	/* Only for the sample just sent, and only once. */
-	if (!t || t->sample_id != sample_id ||
-	    (t->outbound.samples && t->outbound_sample_id == sample_id))
+	/*
+	 * Only for the sample just sent, or the one before it: when the end
+	 * of a sample is lost, the peer reports only after a timeout, which
+	 * can be after our next sample started.  Dropping those reports
+	 * would hide exactly the lossy samples.  Each sample counts once,
+	 * and never after a newer one.
+	 */
+	if (!t ||
+	    (t->sample_id != sample_id &&
+	     (t->prev_sample_id == 0 || t->prev_sample_id != sample_id)) ||
+	    (t->outbound.samples &&
+	     (int32_t)(sample_id - t->outbound_sample_id) <= 0))
 		return;
 
 	ow = &t->outbound;
@@ -747,7 +1026,8 @@ static void pp_handle_report(struct pktpair_session *s, struct ip *iph,
 	ow->npairs = rp->npairs;
 	ow->pairs_seen = rp->pairs_seen;
 	ow->pairs_valid = rp->pairs_valid;
-	ow->pkts_rcvd = rp->pkts_rcvd;
+	ow->pkts_rcvd = ntohs(rp->pkts_rcvd);
+	ow->train_len = MAX(ntohs(rp->train_len), 2);
 	ow->pkt_size = ntohs(rp->pkt_size);
 	ow->bw_kbps = ntohl(rp->bw_kbps);
 	ow->ipd_avg_usec = ntohl(rp->ipd_avg_usec);
@@ -756,6 +1036,12 @@ static void pp_handle_report(struct pktpair_session *s, struct ip *iph,
 		ow->bw_smooth_kbps = pktpair_smooth_update(
 			&ow->smoother, &s->cfg.smooth, ow->bw_kbps);
 	}
+	pktpair_loss_update(&ow->loss, &s->cfg.loss,
+			    ow->npairs * ow->train_len,
+			    ow->npairs * ow->train_len -
+				    MIN(ow->pkts_rcvd,
+					ow->npairs * ow->train_len),
+			    ow->pairs_valid > 0);
 	ow->samples++;
 	monotime(&ow->last_update);
 
@@ -793,7 +1079,8 @@ static void pp_send_report(struct pktpair_session *s,
 	rp->npairs = ow->npairs;
 	rp->pairs_seen = ow->pairs_seen;
 	rp->pairs_valid = ow->pairs_valid;
-	rp->pkts_rcvd = ow->pkts_rcvd;
+	rp->pkts_rcvd = htons(ow->pkts_rcvd);
+	rp->train_len = htons(ow->train_len);
 	rp->bw_kbps = htonl(MIN(ow->bw_kbps, UINT32_MAX));
 	rp->ipd_avg_usec = htonl(ow->ipd_avg_usec);
 	rp->jitter_usec = htonl(ow->jitter_usec);
@@ -823,8 +1110,9 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 				struct pktpair_inbound *in)
 {
 	struct pktpair_oneway *ow = &in->stats;
-	uint64_t bw[PKTPAIR_PROBES_MAX];
+	uint64_t bw[PKTPAIR_PROBES_MAX], best = 0;
 	uint64_t ipd_sum = 0, jit_sum = 0;
+	unsigned int expect = in->npairs * in->train_len;
 	int64_t prev_owd = 0;
 	bool have_prev = false;
 	unsigned int i, seen = 0, rcvd = 0, nbw = 0, njit = 0;
@@ -835,19 +1123,21 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	in->pending = false;
 
 	for (i = 0; i < in->npairs; i++) {
-		struct pktpair_inpair *pr = &in->pairs[i];
+		struct pktpair_pair *pr = &in->pairs[i];
+		int64_t span = 0;
+		uint64_t kbps;
 
 		if (!pr->rcvd)
 			continue;
 		seen++;
-		rcvd += !!(pr->rcvd & 0x1) + !!(pr->rcvd & 0x2);
+		rcvd += pr->rcvd;
 
 		/*
 		 * One-way delay includes the unknown clock offset between
 		 * the hosts; its variation from pair to pair does not.
 		 */
-		if (pr->rcvd & 0x1) {
-			int64_t owd = ts_diff_ns(&pr->rx[0], &pr->tx[0]);
+		if (pr->seen01 & 0x1) {
+			int64_t owd = ts_diff_ns(&pr->rx0, &pr->tx0);
 
 			if (have_prev) {
 				jit_sum += llabs(owd - prev_owd);
@@ -857,14 +1147,11 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 			have_prev = true;
 		}
 
-		if (pr->rcvd == 0x3) {
-			int64_t ipd = ts_diff_ns(&pr->rx[1], &pr->rx[0]);
-
-			if (ipd > 0) {
-				ipd_sum += ipd;
-				bw[nbw++] = (uint64_t)in->pkt_size * 8ULL *
-					    1000000ULL / (uint64_t)ipd;
-			}
+		kbps = pp_train_kbps(pr, in->pkt_size, &span);
+		if (kbps) {
+			ipd_sum += span / (pr->steady - 1);
+			bw[nbw++] = kbps;
+			best = MAX(best, kbps);
 		}
 	}
 
@@ -872,12 +1159,17 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	ow->npairs = in->npairs;
 	ow->pairs_seen = seen;
 	ow->pairs_valid = nbw;
-	ow->pkts_rcvd = rcvd;
+	ow->pkts_rcvd = MIN(rcvd, UINT16_MAX);
+	ow->train_len = in->train_len;
 	ow->jitter_usec = njit ? jit_sum / njit / 1000 : 0;
 	if (nbw) {
 		qsort(bw, nbw, sizeof(bw[0]), uint64_cmp);
-		ow->bw_kbps = (nbw & 1) ? bw[nbw / 2]
-					: (bw[nbw / 2 - 1] + bw[nbw / 2]) / 2;
+		if (in->train_len > 2)
+			ow->bw_kbps = best;
+		else
+			ow->bw_kbps = (nbw & 1) ? bw[nbw / 2]
+						: (bw[nbw / 2 - 1] + bw[nbw / 2]) /
+							  2;
 		ow->ipd_avg_usec = ipd_sum / nbw / 1000;
 		ow->bw_smooth_kbps = pktpair_smooth_update(
 			&ow->smoother, &s->cfg.smooth, ow->bw_kbps);
@@ -885,6 +1177,8 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 		ow->bw_kbps = 0;
 		ow->ipd_avg_usec = 0;
 	}
+	pktpair_loss_update(&ow->loss, &s->cfg.loss, expect,
+			    expect - MIN(rcvd, expect), nbw > 0);
 	ow->samples++;
 	monotime(&ow->last_update);
 
@@ -941,12 +1235,16 @@ static void pp_handle_probe(struct pktpair_session *s, struct ip *iph,
 			    const struct timespec *rx_ts)
 {
 	struct pktpair_inbound key = {}, *in;
-	struct pktpair_inpair *pr;
+	struct pktpair_pair *pr;
 	uint32_t sample_id = ntohl(pl->sample_id);
 	uint16_t ident = ntohs(icmp->un.echo.id);
+	uint16_t which = ntohs(pl->which), len = ntohs(pl->len),
+		 skip = ntohs(pl->skip);
+	int64_t wait;
 	bool last;
 
-	if (pl->which > 1 || pl->npairs == 0 ||
+	if (len < 2 || len > PKTPAIR_TRAIN_LEN_MAX || which >= len ||
+	    skip > len - 2 || pl->npairs == 0 ||
 	    pl->npairs > PKTPAIR_PROBES_MAX || pl->pair >= pl->npairs ||
 	    !IPV4_ADDR_SAME(&pl->dst, &iph->ip_dst))
 		return;
@@ -978,31 +1276,52 @@ static void pp_handle_probe(struct pktpair_session *s, struct ip *iph,
 		in->ident = ident;
 		in->sample_id = sample_id;
 		in->npairs = pl->npairs;
+		in->train_len = len;
 		in->pkt_size = ip_len;
 		in->interval = ntohs(pl->interval);
 		in->tos = iph->ip_tos;
 		in->local = iph->ip_dst;
 		in->pending = true;
+		monotime(&in->first_rx);
+		in->first_pair = pl->pair;
 	}
 	if (pl->pair >= in->npairs)
 		return;
 
-	pr = &in->pairs[pl->pair];
-	if (pr->rcvd & (1 << pl->which))
+	if (len != in->train_len)
 		return;
-	pr->rx[pl->which] = *rx_ts;
-	pr->tx[pl->which].tv_sec = ntohl(pl->tx_sec);
-	pr->tx[pl->which].tv_nsec = ntohl(pl->tx_nsec);
-	pr->rcvd |= 1 << pl->which;
+	pr = &in->pairs[pl->pair];
+	if (!pr->rcvd) {
+		pr->len = len;
+		pr->skip = skip;
+	}
+	if (which == 0 && !(pr->seen01 & 0x1)) {
+		pr->tx0.tv_sec = ntohl(pl->tx_sec);
+		pr->tx0.tv_nsec = ntohl(pl->tx_nsec);
+	}
+	pp_train_arrival(pr, which, rx_ts);
 	monotime(&in->last_rx);
 
-	/* Report shortly after the final pair, or once arrivals stop. */
-	last = pl->pair == in->npairs - 1 && pr->rcvd == 0x3;
+	/*
+	 * Report shortly after the final pair (even if its second packet is
+	 * missing), or once arrivals stop.  "Stop" is judged from the pair
+	 * spacing seen so far: a few missed pairs' worth of silence, so a
+	 * sample whose tail was lost is reported before the sender's next
+	 * sample begins rather than after a fixed second.
+	 */
+	last = pl->pair == in->npairs - 1;
+	if (last) {
+		wait = PKTPAIR_INBOUND_LAST_MSEC;
+	} else if (pl->pair > in->first_pair) {
+		wait = monotime_since(&in->first_rx, NULL) / 1000 /
+		       (pl->pair - in->first_pair);
+		wait = 4 * wait + PKTPAIR_INBOUND_LAST_MSEC;
+		wait = MIN(wait, PKTPAIR_INBOUND_IDLE_MSEC);
+	} else {
+		wait = PKTPAIR_INBOUND_IDLE_MSEC;
+	}
 	event_cancel(&in->t_done);
-	event_add_timer_msec(s->loop, pp_inbound_done, in,
-			     last ? PKTPAIR_INBOUND_LAST_MSEC
-				  : PKTPAIR_INBOUND_IDLE_MSEC,
-			     &in->t_done);
+	event_add_timer_msec(s->loop, pp_inbound_done, in, wait, &in->t_done);
 }
 
 /*
@@ -1162,6 +1481,12 @@ static int pp_icmp_socket(struct pktpair_session *s)
 		zlog_warn("%s: SO_TIMESTAMPNS: %s", __func__,
 			  safe_strerror(errno));
 #endif
+	/*
+	 * A train arrives as a burst of up to PKTPAIR_TRAIN_LEN_MAX packets
+	 * (replies, or a peer's probes); the default buffer holds fewer
+	 * than a hundred.
+	 */
+	setsockopt_so_recvbuf(fd, PKTPAIR_TRAIN_LEN_MAX * 2048);
 	set_nonblocking(fd);
 	return fd;
 }
@@ -1273,6 +1598,7 @@ void pktpair_session_free(struct pktpair_session **sp)
 	if (s->pfd >= 0)
 		close(s->pfd);
 
+	XFREE(MTYPE_TMP, s->txbuf);
 	XFREE(MTYPE_PKTPAIR_ACTIVE, s->active);
 	while ((t = pktpair_targets_pop(&s->targets)))
 		pp_target_free(t);
@@ -1332,6 +1658,11 @@ int pktpair_session_fd(const struct pktpair_session *s)
 	return s->fd;
 }
 
+const struct pktpair_cfg *pktpair_session_cfg(const struct pktpair_session *s)
+{
+	return &s->cfg;
+}
+
 struct interface *pktpair_session_ifp(const struct pktpair_session *s)
 {
 	return s->ifp;
@@ -1354,19 +1685,52 @@ const struct pktpair_oneway *pktpair_inbound_lookup(struct pktpair_session *s,
 	return (in && in->stats.samples) ? &in->stats : NULL;
 }
 
+/* A direction's reported value: held, then loss-adjusted. */
+static uint64_t pp_dir_bw(const struct pktpair_cfg *cfg, uint64_t smooth,
+			  const struct pktpair_loss *l, uint32_t rtt_usec,
+			  uint16_t pkt_size)
+{
+	if (!smooth || l->empty_run > cfg->loss.hold_samples)
+		return 0;
+	return pktpair_loss_adjust(smooth, l->rate, rtt_usec, pkt_size,
+				   cfg->loss.adjust);
+}
+
 void pktpair_peer_bw(struct pktpair_session *s, struct in_addr peer,
 		     uint64_t *rtt_kbps, uint64_t *out_kbps, uint64_t *in_kbps)
 {
 	struct pktpair_target *t = pktpair_target_lookup(s, peer);
 	const struct pktpair_oneway *in = pktpair_inbound_lookup(s, peer);
+	uint32_t rtt = (t && t->samples) ? t->stats.rtt_avg_usec : 0;
 
-	*rtt_kbps = (t && t->samples && t->stats.pairs_valid)
-			    ? t->stats.bw_smooth_kbps
-			    : 0;
-	*out_kbps = (t && t->outbound.samples && t->outbound.pairs_valid)
-			    ? t->outbound.bw_smooth_kbps
-			    : 0;
-	*in_kbps = (in && in->pairs_valid) ? in->bw_smooth_kbps : 0;
+	*rtt_kbps = *out_kbps = *in_kbps = 0;
+	if (t && t->samples)
+		*rtt_kbps = pp_dir_bw(&s->cfg, t->stats.bw_smooth_kbps,
+				      &t->stats.loss, rtt, t->stats.pkt_size);
+	if (t && t->outbound.samples)
+		*out_kbps = pp_dir_bw(&s->cfg, t->outbound.bw_smooth_kbps,
+				      &t->outbound.loss, rtt,
+				      t->outbound.pkt_size);
+	if (in && in->samples)
+		*in_kbps = pp_dir_bw(&s->cfg, in->bw_smooth_kbps, &in->loss, rtt,
+				     in->pkt_size);
+}
+
+static uint32_t pp_loss_ppm(const struct pktpair_loss *l)
+{
+	return l->samples ? (uint32_t)(l->rate * 1000000.0 + 0.5) : 0;
+}
+
+void pktpair_peer_loss(struct pktpair_session *s, struct in_addr peer,
+		       uint32_t *rtt_ppm, uint32_t *out_ppm, uint32_t *in_ppm)
+{
+	struct pktpair_target *t = pktpair_target_lookup(s, peer);
+	const struct pktpair_oneway *in = pktpair_inbound_lookup(s, peer);
+
+	*rtt_ppm = (t && t->samples) ? pp_loss_ppm(&t->stats.loss) : 0;
+	*out_ppm = (t && t->outbound.samples) ? pp_loss_ppm(&t->outbound.loss)
+					      : 0;
+	*in_ppm = (in && in->samples) ? pp_loss_ppm(&in->loss) : 0;
 }
 
 void pktpair_session_foreach_peer(
@@ -1404,7 +1768,41 @@ const char *pktpair_speed_str(uint64_t kbps, char *buf, size_t len)
 }
 
 /* Round-trip results of probing a target. */
-static void pp_show_rtt(struct vty *vty, struct json_object *json,
+/* Loss for one direction, and the value reported for it (eff). */
+static void pp_show_loss(struct vty *vty, struct json_object *json,
+			 const struct pktpair_loss *l, uint64_t eff,
+			 const char *indent)
+{
+	char b1[32];
+
+	if (json) {
+		json_object_double_add(json, "lossPct",
+				       l->last_sent ? 100.0 * l->last_lost /
+							      l->last_sent
+						    : 0);
+		json_object_double_add(json, "lossSmoothedPct",
+				       100.0 * l->rate);
+		json_object_int_add(json, "packetsSentTotal", l->pkts_sent);
+		json_object_int_add(json, "packetsLostTotal", l->pkts_lost);
+		json_object_int_add(json, "samplesWithoutValidPairs",
+				    l->empty_run);
+		json_object_int_add(json, "effectiveSpeedKbps", eff);
+		return;
+	}
+
+	if (!l->samples)
+		return;
+	vty_out(vty,
+		"%s    Loss %.2f%% last sample, %.2f%% smoothed (%" PRIu64
+		"/%" PRIu64 " packets); reported speed %s%s\n",
+		indent,
+		l->last_sent ? 100.0 * l->last_lost / l->last_sent : 0.0,
+		100.0 * l->rate, l->pkts_lost, l->pkts_sent,
+		eff ? pktpair_speed_str(eff, b1, sizeof(b1)) : "none",
+		l->empty_run && eff ? " (held)" : "");
+}
+
+static void pp_show_rtt(struct vty *vty, struct json_object *json, uint64_t eff,
 			const struct pktpair_cfg *cfg,
 			const struct pktpair_target *t, const char *indent)
 {
@@ -1443,11 +1841,16 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json,
 		json_object_int_add(json, "jitterUsec", st->jitter_usec);
 		json_object_int_add(json, "interPacketDelayUsec",
 				    st->ipd_avg_usec);
+		json_object_int_add(json, "trainLength", st->train_len);
+		if (st->train_len > 2)
+			json_object_int_add(json, "trainSpanUsec",
+					    st->span_usec);
 		json_object_int_add(json, "estimatedSpeedKbps", st->bw_kbps);
 		json_object_int_add(json, "estimatedSpeedSmoothedKbps",
 				    st->bw_smooth_kbps);
 		json_object_int_add(json, "smoothingResets",
 				    st->smoother.resets);
+		pp_show_loss(vty, json, &st->loss, eff, indent);
 		return;
 	}
 
@@ -1469,7 +1872,12 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json,
 			st->tx.desc, st->tx.reason);
 	else
 		vty_out(vty, "%s  Transmit path: %s\n", indent, st->tx.desc);
-	if (st->pkts_lost < 2 * st->pairs_sent)
+	if (st->train_len > 2)
+		vty_out(vty,
+			"%s  Trains of %u packets, fastest timed over %u.%03u ms\n",
+			indent, st->train_len, st->span_usec / 1000,
+			st->span_usec % 1000);
+	if (st->pkts_lost < st->train_len * st->pairs_sent)
 		vty_out(vty,
 			"%s  RTT min/avg/max %u.%03u/%u.%03u/%u.%03u ms, jitter %u.%03u ms\n",
 			indent, st->rtt_min_usec / 1000,
@@ -1490,12 +1898,13 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json,
 	} else {
 		vty_out(vty, "%s  Estimated speed unavailable\n", indent);
 	}
+	pp_show_loss(vty, NULL, &st->loss, eff, indent);
 }
 
 static void pp_show_oneway(struct vty *vty, struct json_object *json,
 			   const char *key, const char *label,
 			   const char *source, const struct pktpair_oneway *ow,
-			   const char *indent)
+			   uint64_t eff, const char *indent)
 {
 	int64_t age_ms = monotime_since(&ow->last_update, NULL) / 1000;
 	char b1[32], b2[32];
@@ -1507,6 +1916,7 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 		json_object_int_add(jo, "lastSampleMsecAgo", age_ms);
 		json_object_int_add(jo, "probeSizeBytes", ow->pkt_size);
 		json_object_int_add(jo, "pairsSent", ow->npairs);
+		json_object_int_add(jo, "trainLength", ow->train_len);
 		json_object_int_add(jo, "pairsReceived", ow->pairs_seen);
 		json_object_int_add(jo, "pairsValid", ow->pairs_valid);
 		json_object_int_add(jo, "packetsReceived", ow->pkts_rcvd);
@@ -1518,6 +1928,7 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 				    ow->bw_smooth_kbps);
 		json_object_int_add(jo, "smoothingResets",
 				    ow->smoother.resets);
+		pp_show_loss(vty, jo, &ow->loss, eff, indent);
 		json_object_object_add(json, key, jo);
 		return;
 	}
@@ -1536,7 +1947,8 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 		"%s    %s %" PRId64 ".%03" PRId64
 		"s ago: %u/%u pairs valid, %u/%u packets received\n",
 		indent, source, age_ms / 1000, age_ms % 1000, ow->pairs_valid,
-		ow->npairs, ow->pkts_rcvd, 2 * ow->npairs);
+		ow->npairs, ow->pkts_rcvd, ow->npairs * ow->train_len);
+	pp_show_loss(vty, NULL, &ow->loss, eff, indent);
 }
 
 void pktpair_show_peer(struct vty *vty, struct json_object *json,
@@ -1549,6 +1961,10 @@ void pktpair_show_peer(struct vty *vty, struct json_object *json,
 		s ? pktpair_inbound_lookup(s, peer) : NULL;
 	bool responder = cfg ? cfg->respond_only
 			     : (s && s->cfg.respond_only);
+	uint64_t eff_rtt = 0, eff_out = 0, eff_in = 0;
+
+	if (s)
+		pktpair_peer_bw(s, peer, &eff_rtt, &eff_out, &eff_in);
 
 	if (responder) {
 		if (json)
@@ -1558,11 +1974,11 @@ void pktpair_show_peer(struct vty *vty, struct json_object *json,
 				"%sPacket-pair responder (measures the peer's probes, does not probe)\n",
 				indent);
 	} else {
-		pp_show_rtt(vty, json, cfg, t, indent);
+		pp_show_rtt(vty, json, eff_rtt, cfg, t, indent);
 		if (t && t->outbound.samples)
 			pp_show_oneway(vty, json, "outbound", "Outbound",
 				       "Reported by peer", &t->outbound,
-				       indent);
+				       eff_out, indent);
 		else if (t && t->samples && !json)
 			vty_out(vty,
 				"%s  Outbound speed not reported (peer not running packet-pair?)\n",
@@ -1571,7 +1987,8 @@ void pktpair_show_peer(struct vty *vty, struct json_object *json,
 
 	if (in)
 		pp_show_oneway(vty, json, "inbound", "Inbound",
-			       "Measured from peer's probes", in, indent);
+			       "Measured from peer's probes", in, eff_in,
+			       indent);
 	else if (responder && !json)
 		vty_out(vty, "%s  No probes received from peer\n", indent);
 
@@ -1604,9 +2021,14 @@ void pktpair_show_session(struct vty *vty, struct json_object *json,
 			json_object_int_add(json, "versionMismatchLastVersion",
 					    s->ver_last);
 		}
+		json_object_int_add(json, "scheduleDeferrals",
+				    s ? s->sched_waits : 0);
 		return;
 	}
 
+	if (s && s->sched_waits)
+		vty_out(vty, "%sSends deferred by the schedule: %" PRIu64 "\n",
+			indent, s->sched_waits);
 	if (!s || !s->ver_mismatch)
 		return;
 	age_ms = monotime_since(&s->ver_last_time, NULL) / 1000;
@@ -1618,6 +2040,61 @@ void pktpair_show_session(struct vty *vty, struct json_object *json,
 		s->ver_last, age_ms / 1000, age_ms % 1000);
 }
 
+void pktpair_show_train_cfg(struct vty *vty, struct json_object *json,
+			    const struct pktpair_cfg *cfg, const char *indent)
+{
+	const struct pktpair_train_cfg *t = &cfg->train;
+	const struct pktpair_sched_cfg *c = &cfg->sched;
+
+	if (json) {
+		json_object_string_add(json, "probeMode",
+				       t->span_ms ? "train" : "pair");
+		if (t->span_ms) {
+			json_object_int_add(json, "trainSpanMsec", t->span_ms);
+			json_object_int_add(json, "trainsPerSample", t->count);
+			json_object_int_add(json, "trainMaxPackets",
+					    t->max_len);
+			json_object_int_add(json, "trainSkipPct", t->skip_pct);
+		}
+		if (c->period_ms) {
+			json_object_int_add(json, "schedulePeriodMsec",
+					    c->period_ms);
+			json_object_int_add(json, "scheduleOffsetMsec",
+					    c->offset_ms);
+			json_object_int_add(json, "scheduleGuardMsec",
+					    c->guard_ms);
+		}
+		return;
+	}
+
+	if (t->span_ms)
+		vty_out(vty,
+			"%sTrains: %u per sample, each sized to take %u ms (at most %u packets), first %u%% not timed\n",
+			indent, t->count, t->span_ms, t->max_len, t->skip_pct);
+	if (c->period_ms)
+		vty_out(vty,
+			"%sSchedule: avoiding %u ms around boundaries every %u ms at offset %u ms (UTC)\n",
+			indent, c->guard_ms, c->period_ms, c->offset_ms);
+}
+
+void pktpair_show_loss_cfg(struct vty *vty, struct json_object *json,
+			   const struct pktpair_loss_cfg *loss,
+			   const char *indent)
+{
+	if (json) {
+		json_object_string_add(json, "lossAdjust",
+				       pktpair_loss_adjust_str(loss->adjust));
+		json_object_int_add(json, "lossWeight", loss->weight);
+		json_object_int_add(json, "holdSamples", loss->hold_samples);
+		return;
+	}
+
+	vty_out(vty,
+		"%sLoss: adjustment %s, weight %u%%, estimate held for %u sample%s without valid pairs\n",
+		indent, pktpair_loss_adjust_str(loss->adjust), loss->weight,
+		loss->hold_samples, loss->hold_samples == 1 ? "" : "s");
+}
+
 void pktpair_show_smoothing(struct vty *vty, struct json_object *json,
 			    const struct pktpair_smooth_cfg *smooth,
 			    const char *indent)
@@ -1627,10 +2104,20 @@ void pktpair_show_smoothing(struct vty *vty, struct json_object *json,
 		json_object_int_add(json, "stepThreshold",
 				    smooth->step_threshold);
 		json_object_int_add(json, "stepSamples", smooth->step_samples);
+		if (smooth->window >= 2) {
+			json_object_int_add(json, "smoothingWindow",
+					    smooth->window);
+			json_object_int_add(json, "smoothingPercentile",
+					    smooth->percentile);
+		}
 		return;
 	}
 
-	if (smooth->step_threshold)
+	if (smooth->window >= 2)
+		vty_out(vty,
+			"%sSmoothing: percentile %u of the last %u samples\n",
+			indent, smooth->percentile, smooth->window);
+	else if (smooth->step_threshold)
 		vty_out(vty,
 			"%sSmoothing: weight %u%%, reset after %u sample%s beyond %u%%\n",
 			indent, smooth->weight, smooth->step_samples,
