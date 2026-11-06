@@ -288,6 +288,15 @@ Configuring NHRP
    to run packet-pair too, are not affected by this. Packet-pair results
    from a peer still on payload version 1 are ignored.
 
+   ``show ip nhrp packet-pair`` also shows how much bandwidth the measurement itself uses
+   with each peer ("Measurement traffic", ``probeLoad`` in JSON). This is
+   an IP-level average over the probing interval of the latest sample,
+   for pairs and trains alike. Outgoing (``outBps``) counts this router's
+   probes, its echo replies to the peer's probes and its reports. Incoming
+   (``inBps``) counts the replies to its probes, the peer's probes and the
+   peer's reports. JSON also gives each part in bits per second.
+   Link-layer headers and tunnel encapsulation are not included.
+
 .. clicmd:: ip nhrp packet-pair schedule period (1000-3600000) offset (0-3600000) [guard (0-10000)]
 
    Do not send probes within ``guard`` milliseconds (default 1000) of a
