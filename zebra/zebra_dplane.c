@@ -90,6 +90,12 @@ struct dplane_nexthop_info {
 	afi_t afi;
 	vrf_id_t vrf_id;
 	int type;
+	bool is_notif;
+	bool nh_valid;
+	struct nexthop nh;
+	uint16_t nh_label_count;
+	mpls_label_t nh_labels[MPLS_MAX_LABELS];
+	struct nhg_resilience resilience;
 
 	struct nexthop_group ng;
 	struct nh_grp nh_grp[MULTIPATH_NUM];
@@ -153,6 +159,14 @@ struct dplane_route_info {
 
 	uint32_t zd_flags;
 	bool zd_replace;
+
+	/*
+	 * Kernel notification vs zebra->kernel programming result.
+	 * Inbound RTM_NEWROUTE/RTM_DELROUTE reuse DPLANE_OP_ROUTE_INSTALL/DELETE
+	 * and set is_notif so the master pthread can tell them apart from
+	 * programming ACKs handled by rib_process_result().
+	 */
+	bool is_notif;
 
 	/* Nexthop hash entry info */
 	struct dplane_nexthop_info nhe;
@@ -355,6 +369,14 @@ struct dplane_rule_info {
 	int unique;
 	int seq;
 
+	/*
+	 * Kernel notification vs zebra->kernel programming result.
+	 * Inbound RTM_NEWRULE/RTM_DELRULE reuse DPLANE_OP_RULE_ADD/DELETE
+	 * and set is_notif so the master pthread can tell them apart.
+	 */
+	bool is_notif;
+	uint8_t proto; /* FRA_PROTOCOL, for leftover RTPROT_ZEBRA cleanup */
+
 	struct dplane_ctx_rule new;
 	struct dplane_ctx_rule old;
 };
@@ -484,6 +506,26 @@ struct dplane_tc_qdisc_notify_info {
 };
 
 /*
+ * Kernel tunnel (VXLAN VNI filter) notification info. Filled by the
+ * dplane thread when it parses an RTM_NEWTUNNEL/RTM_DELTUNNEL message,
+ * consumed by the zebra master thread.
+ *
+ * The 'startup' indication uses the generic dplane ctx 'zd_startup'
+ * field; see dplane_ctx_set_startup()/dplane_ctx_get_startup().
+ */
+struct dplane_tunnel_notify_info {
+	uint8_t family;
+	ifindex_t ifindex;
+	vni_t vni_start;
+	vni_t vni_end;
+	struct in_addr mcast_grp;
+	struct in6_addr mcast_grp6;
+	bool has_mcast_grp;
+	bool has_mcast_grp6;
+	enum dplane_tunnel_notify_e notify_type;
+};
+
+/*
  * VLAN info for the dataplane
  */
 struct dplane_vlan_info {
@@ -566,6 +608,7 @@ struct zebra_dplane_ctx {
 			struct dplane_nat_tc tc;
 			bool ignore_errors;
 		} nat_tc;
+		struct dplane_tunnel_notify_info tunnel_notify;
 	} u;
 
 	/* Namespace info, used especially for netlink kernel communication */
@@ -1059,6 +1102,7 @@ static void dplane_ctx_free_internal(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_NEIGH_READ:
 	case DPLANE_OP_TC_QDISC_READ:
 	case DPLANE_OP_TC_QDISC_NOTIFY:
+	case DPLANE_OP_TUNNEL_NOTIFY:
 		break;
 	}
 }
@@ -1394,6 +1438,8 @@ const char *dplane_op2str(enum dplane_op_e op)
 		return "TC_QDISC_READ";
 	case DPLANE_OP_TC_QDISC_NOTIFY:
 		return "TC_QDISC_NOTIFY";
+	case DPLANE_OP_TUNNEL_NOTIFY:
+		return "TUNNEL_NOTIFY";
 	}
 
 	return "UNKNOWN";
@@ -2173,6 +2219,20 @@ void dplane_ctx_route_set_replace(struct zebra_dplane_ctx *ctx, bool replace)
 	ctx->u.rinfo.zd_replace = replace;
 }
 
+void dplane_ctx_set_route_notif(struct zebra_dplane_ctx *ctx, bool notif)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	ctx->u.rinfo.is_notif = notif;
+}
+
+bool dplane_ctx_get_route_notif(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.rinfo.is_notif;
+}
+
 void dplane_ctx_set_route_metric(struct zebra_dplane_ctx *ctx, uint32_t metric)
 {
 	DPLANE_CTX_VALID(ctx);
@@ -2708,7 +2768,103 @@ int dplane_ctx_get_ns_sock(const struct zebra_dplane_ctx *ctx)
 #endif
 }
 
-/* Accessors for nexthop information */
+/* Setters/accessors for nexthop information */
+void dplane_ctx_set_nhe_id(struct zebra_dplane_ctx *ctx, uint32_t id)
+{
+	DPLANE_CTX_VALID(ctx);
+	ctx->u.rinfo.nhe.id = id;
+}
+
+void dplane_ctx_set_nhe_afi(struct zebra_dplane_ctx *ctx, afi_t afi)
+{
+	DPLANE_CTX_VALID(ctx);
+	ctx->u.rinfo.nhe.afi = afi;
+}
+
+void dplane_ctx_set_nhe_vrf_id(struct zebra_dplane_ctx *ctx, vrf_id_t vrf_id)
+{
+	DPLANE_CTX_VALID(ctx);
+	ctx->u.rinfo.nhe.vrf_id = vrf_id;
+}
+
+void dplane_ctx_set_nhe_type(struct zebra_dplane_ctx *ctx, int type)
+{
+	DPLANE_CTX_VALID(ctx);
+	ctx->u.rinfo.nhe.type = type;
+}
+
+void dplane_ctx_set_nhe_nh_grp(struct zebra_dplane_ctx *ctx, const struct nh_grp *grp,
+			       uint16_t count)
+{
+	uint16_t copy_count = count;
+
+	DPLANE_CTX_VALID(ctx);
+
+	if (copy_count > MULTIPATH_NUM)
+		copy_count = MULTIPATH_NUM;
+
+	ctx->u.rinfo.nhe.nh_grp_count = copy_count;
+	if (copy_count && grp)
+		memcpy(ctx->u.rinfo.nhe.nh_grp, grp, copy_count * sizeof(*grp));
+	else if (!copy_count)
+		memset(ctx->u.rinfo.nhe.nh_grp, 0, sizeof(ctx->u.rinfo.nhe.nh_grp));
+}
+
+void dplane_ctx_set_nhe_resilience(struct zebra_dplane_ctx *ctx,
+				   const struct nhg_resilience *resilience)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	if (resilience)
+		ctx->u.rinfo.nhe.resilience = *resilience;
+	else
+		memset(&ctx->u.rinfo.nhe.resilience, 0, sizeof(ctx->u.rinfo.nhe.resilience));
+}
+
+void dplane_ctx_set_nhe_nh(struct zebra_dplane_ctx *ctx, const struct nexthop *nh)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	if (nh) {
+		ctx->u.rinfo.nhe.nh = *nh;
+		ctx->u.rinfo.nhe.nh.next = NULL;
+		ctx->u.rinfo.nhe.nh.prev = NULL;
+		ctx->u.rinfo.nhe.nh.resolved = NULL;
+		ctx->u.rinfo.nhe.nh.rparent = NULL;
+		ctx->u.rinfo.nhe.nh.nh_label = NULL;
+		ctx->u.rinfo.nhe.nh.nh_srv6 = NULL;
+		ctx->u.rinfo.nhe.nh_valid = true;
+	} else {
+		memset(&ctx->u.rinfo.nhe.nh, 0, sizeof(ctx->u.rinfo.nhe.nh));
+		ctx->u.rinfo.nhe.nh_valid = false;
+	}
+}
+
+void dplane_ctx_set_nhe_labels(struct zebra_dplane_ctx *ctx, const mpls_label_t *labels,
+			       uint16_t count)
+{
+	uint16_t copy_count = count;
+
+	DPLANE_CTX_VALID(ctx);
+
+	if (!labels || copy_count == 0) {
+		ctx->u.rinfo.nhe.nh_label_count = 0;
+		return;
+	}
+
+	if (copy_count > MPLS_MAX_LABELS)
+		copy_count = MPLS_MAX_LABELS;
+
+	ctx->u.rinfo.nhe.nh_label_count = copy_count;
+	memcpy(ctx->u.rinfo.nhe.nh_labels, labels, copy_count * sizeof(*labels));
+}
+
+void dplane_ctx_set_nhe_notif(struct zebra_dplane_ctx *ctx, bool notif)
+{
+	DPLANE_CTX_VALID(ctx);
+	ctx->u.rinfo.nhe.is_notif = notif;
+}
+
 uint32_t dplane_ctx_get_nhe_id(const struct zebra_dplane_ctx *ctx)
 {
 	DPLANE_CTX_VALID(ctx);
@@ -2757,6 +2913,40 @@ uint16_t dplane_ctx_get_nhe_nh_grp_count(const struct zebra_dplane_ctx *ctx)
 {
 	DPLANE_CTX_VALID(ctx);
 	return ctx->u.rinfo.nhe.nh_grp_count;
+}
+
+bool dplane_ctx_get_nhe_notif(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+	return ctx->u.rinfo.nhe.is_notif;
+}
+
+const struct nhg_resilience *dplane_ctx_get_nhe_resilience(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+	return &ctx->u.rinfo.nhe.resilience;
+}
+
+const struct nexthop *dplane_ctx_get_nhe_nh(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	if (!ctx->u.rinfo.nhe.nh_valid)
+		return NULL;
+
+	return &ctx->u.rinfo.nhe.nh;
+}
+
+uint16_t dplane_ctx_get_nhe_label_count(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+	return ctx->u.rinfo.nhe.nh_label_count;
+}
+
+const mpls_label_t *dplane_ctx_get_nhe_labels(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+	return ctx->u.rinfo.nhe.nh_labels;
 }
 
 /* Accessors for EVPN-MH FDB (L2) nexthop / nexthop-group information */
@@ -3841,6 +4031,56 @@ vrf_id_t dplane_ctx_rule_get_vrfid(const struct zebra_dplane_ctx *ctx)
 	return ctx->u.rule.new.prule.vrf_id;
 }
 
+void dplane_ctx_set_rule_notif(struct zebra_dplane_ctx *ctx, bool notif)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	ctx->u.rule.is_notif = notif;
+}
+
+bool dplane_ctx_get_rule_notif(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.rule.is_notif;
+}
+
+void dplane_ctx_set_rule_proto(struct zebra_dplane_ctx *ctx, uint8_t proto)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	ctx->u.rule.proto = proto;
+}
+
+uint8_t dplane_ctx_get_rule_proto(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.rule.proto;
+}
+
+void dplane_ctx_set_rule_from_pbr(struct zebra_dplane_ctx *ctx,
+				  const struct zebra_pbr_rule *rule)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	if (!rule)
+		return;
+
+	ctx->u.rule.new.prule = rule->rule;
+	ctx->zd_vrf_id = rule->vrf_id;
+
+	/* Inbound netlink currently fills zebra_pbr_rule.ifname; outbound
+	 * zapi fills pbr_rule.ifname. Accept either so the ctx is complete.
+	 */
+	if (rule->ifname[0])
+		strlcpy(ctx->u.rule.new.prule.ifname, rule->ifname,
+			sizeof(ctx->u.rule.new.prule.ifname));
+
+	strlcpy(ctx->zd_ifname, ctx->u.rule.new.prule.ifname,
+		sizeof(ctx->zd_ifname));
+}
+
 /***********************************************************************
  *		PBR RULE ACCESSORS - end
  **********************************************************************/
@@ -4185,6 +4425,72 @@ enum dplane_tc_qdisc_notify_e dplane_ctx_tc_qdisc_notify_get_type(const struct z
 	return ctx->u.tc_qdisc_notify.notify_type;
 }
 
+uint8_t dplane_ctx_tunnel_notify_get_family(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.family;
+}
+
+ifindex_t dplane_ctx_tunnel_notify_get_ifindex(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.ifindex;
+}
+
+vni_t dplane_ctx_tunnel_notify_get_vni_start(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.vni_start;
+}
+
+vni_t dplane_ctx_tunnel_notify_get_vni_end(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.vni_end;
+}
+
+const struct in_addr *
+dplane_ctx_tunnel_notify_get_mcast_grp(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tunnel_notify.mcast_grp;
+}
+
+const struct in6_addr *
+dplane_ctx_tunnel_notify_get_mcast_grp6(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return &ctx->u.tunnel_notify.mcast_grp6;
+}
+
+bool dplane_ctx_tunnel_notify_has_mcast_grp(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.has_mcast_grp;
+}
+
+bool dplane_ctx_tunnel_notify_has_mcast_grp6(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.has_mcast_grp6;
+}
+
+enum dplane_tunnel_notify_e
+dplane_ctx_tunnel_notify_get_type(const struct zebra_dplane_ctx *ctx)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	return ctx->u.tunnel_notify.notify_type;
+}
+
 /*
  * Internal helper that copies information from a zebra ns object; this is
  * called in the zebra main pthread context as part of dplane ctx init.
@@ -4433,20 +4739,15 @@ int dplane_ctx_route_init(struct zebra_dplane_ctx *ctx, enum dplane_op_e op,
 			frrtrace(4, frr_zebra, dplane_ctx_route_kernel_nhg_not_ready, op, nhe->id,
 				 nhe->flags, re->vrf_id);
 			if (IS_ZEBRA_DEBUG_DPLANE_DETAIL || IS_ZEBRA_DEBUG_RIB_DETAILED)
-				zlog_debug("%s route %pRN op %s nhg id %u flags 0x%x nh %pNHs not installed nor queued",
-					   __func__, rn, dplane_op2str(op), nhe->id, nhe->flags,
+				zlog_debug("%s (%s:%u:%u)%pRN op %s nhg id %u flags 0x%x nh %pNHs not installed nor queued",
+					   __func__, zvrf_name(zvrf), re->vrf_id, re->table, rn,
+					   dplane_op2str(op), nhe->id, nhe->flags,
 					   nhe->nhg.nexthop);
 
 			return ENOENT;
 		}
 	}
 #endif /* HAVE_NETLINK */
-
-	/* Trying out the sequence number idea, so we can try to detect
-	 * when a result is stale.
-	 */
-	re->dplane_sequence = zebra_router_get_next_sequence();
-	ctx->zd_seq = re->dplane_sequence;
 
 	return AOK;
 }
@@ -5184,6 +5485,17 @@ dplane_route_update_internal(struct route_node *rn,
 	/* Init context with info from zebra data structs */
 	ret = dplane_ctx_route_init(ctx, op, rn, re);
 	if (ret == AOK) {
+		/*
+		 * Stamp the entry with this operation's sequence number: it
+		 * is the identity used to match the result back to the entry.
+		 * Done here rather than in dplane_ctx_route_init() because
+		 * this is the only caller whose result comes back to the rib.
+		 * Other callers just build a context from an entry, and must
+		 * not overwrite the identity of an operation in flight.
+		 */
+		re->dplane_sequence = zebra_router_get_next_sequence();
+		ctx->zd_seq = re->dplane_sequence;
+
 		/* Capture some extra info for update case
 		 * where there's a different 'old' route.
 		 */
@@ -7335,6 +7647,38 @@ enum zebra_dplane_result dplane_tc_qdisc_notify_enqueue(ns_id_t ns_id,
 	return ZEBRA_DPLANE_REQUEST_QUEUED;
 }
 
+enum zebra_dplane_result
+dplane_tunnel_notify_enqueue(ns_id_t ns_id, enum dplane_tunnel_notify_e notify_type, bool startup,
+			     uint8_t family, ifindex_t ifindex, vni_t vni_start, vni_t vni_end,
+			     const struct in_addr *mcast_grp, const struct in6_addr *mcast_grp6)
+{
+	struct zebra_dplane_ctx *ctx;
+
+	ctx = dplane_ctx_alloc();
+	ctx->zd_op = DPLANE_OP_TUNNEL_NOTIFY;
+	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
+	dplane_ctx_set_ns_id(ctx, ns_id);
+	dplane_ctx_set_startup(ctx, startup);
+
+	ctx->u.tunnel_notify.family = family;
+	ctx->u.tunnel_notify.ifindex = ifindex;
+	ctx->u.tunnel_notify.vni_start = vni_start;
+	ctx->u.tunnel_notify.vni_end = vni_end ? vni_end : vni_start;
+	ctx->u.tunnel_notify.notify_type = notify_type;
+	if (mcast_grp) {
+		ctx->u.tunnel_notify.mcast_grp = *mcast_grp;
+		ctx->u.tunnel_notify.has_mcast_grp = true;
+	}
+	if (mcast_grp6) {
+		ctx->u.tunnel_notify.mcast_grp6 = *mcast_grp6;
+		ctx->u.tunnel_notify.has_mcast_grp6 = true;
+	}
+
+	dplane_provider_enqueue_to_zebra(ctx);
+
+	return ZEBRA_DPLANE_REQUEST_QUEUED;
+}
+
 /*
  * Handler for 'show dplane'
  */
@@ -8155,6 +8499,18 @@ static void kernel_dplane_log_detail(struct zebra_dplane_ctx *ctx)
 			   dplane_ctx_tc_qdisc_notify_get_major_handle(ctx),
 			   dplane_ctx_get_startup(ctx));
 		break;
+	case DPLANE_OP_TUNNEL_NOTIFY:
+		zlog_debug("Dplane %s, ns %u, ifindex %u, family %u, vni %u-%u, %s, startup %d",
+			   dplane_op2str(dplane_ctx_get_op(ctx)), dplane_ctx_get_ns(ctx)->ns_id,
+			   dplane_ctx_tunnel_notify_get_ifindex(ctx),
+			   dplane_ctx_tunnel_notify_get_family(ctx),
+			   dplane_ctx_tunnel_notify_get_vni_start(ctx),
+			   dplane_ctx_tunnel_notify_get_vni_end(ctx),
+			   dplane_ctx_tunnel_notify_get_type(ctx) == DPLANE_TUNNEL_NOTIFY_NEW
+				   ? "new"
+				   : "del",
+			   dplane_ctx_get_startup(ctx));
+		break;
 	}
 }
 
@@ -8370,6 +8726,7 @@ static void kernel_dplane_handle_result(struct zebra_dplane_ctx *ctx)
 	case DPLANE_OP_NEIGH_READ:
 	case DPLANE_OP_TC_QDISC_READ:
 	case DPLANE_OP_TC_QDISC_NOTIFY:
+	case DPLANE_OP_TUNNEL_NOTIFY:
 		break;
 	}
 }
@@ -8825,6 +9182,27 @@ void zebra_dplane_finish(void)
 			NULL, 0, &zdplane_info.dg_t_shutdown_check);
 }
 
+#ifdef DEV_BUILD
+/*
+ * When set, dplane_thread_loop leaves new contexts on the incoming queue
+ * instead of handing them to the first provider.
+ */
+static _Atomic bool dplane_install_plugged;
+
+void zebra_dplane_install_plug(void)
+{
+	atomic_store_explicit(&dplane_install_plugged, true, memory_order_relaxed);
+}
+
+void zebra_dplane_install_unplug(void)
+{
+	atomic_store_explicit(&dplane_install_plugged, false, memory_order_relaxed);
+
+	/* Wake the dplane thread so queued contexts are sent. */
+	dplane_provider_work_ready();
+}
+#endif
+
 /*
  * Main dataplane pthread event loop. The thread takes new incoming work
  * and offers it to the first provider. It then iterates through the
@@ -8845,6 +9223,9 @@ static void dplane_thread_loop(struct event *event)
 	int limit, counter, error_counter;
 	uint64_t curr, out_curr, high;
 	bool reschedule = false;
+#ifdef DEV_BUILD
+	bool install_plugged = false;
+#endif
 
 	/* Capture work limit per cycle */
 	limit = zdplane_info.dg_updates_per_cycle;
@@ -8858,6 +9239,19 @@ static void dplane_thread_loop(struct event *event)
 	/* Check for zebra shutdown */
 	if (!zdplane_info.dg_run)
 		return;
+
+#ifdef DEV_BUILD
+	/*
+	 * Test plug: hold new contexts on the incoming queue instead of
+	 * sending them to the first provider.
+	 */
+	install_plugged = atomic_load_explicit(&dplane_install_plugged, memory_order_relaxed);
+	if (install_plugged) {
+		if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
+			zlog_debug("%s: dplane install plugged, holding off new work", __func__);
+		return;
+	}
+#endif
 
 	/* Dequeue some incoming work from zebra (if any) onto the temporary
 	 * working list.

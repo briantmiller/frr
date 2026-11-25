@@ -127,6 +127,7 @@ struct vtysh_client vtysh_client[] = {
 	{.name = "nhrpd", .flag = VTYSH_NHRPD},
 	{.name = "eigrpd", .flag = VTYSH_EIGRPD},
 	{.name = "babeld", .flag = VTYSH_BABELD},
+	{.name = "sandd", .flag = VTYSH_SANDD},
 	{.name = "sharpd", .flag = VTYSH_SHARPD},
 	{.name = "fabricd", .flag = VTYSH_FABRICD},
 	{.name = "pbrd", .flag = VTYSH_PBRD},
@@ -1561,6 +1562,13 @@ static struct cmd_node babel_node = {
 	.prompt = "%s(config-router)# ",
 };
 
+static struct cmd_node sand_node = {
+	.name = "sand",
+	.node = SAND_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-router)# ",
+};
+
 static struct cmd_node ripng_node = {
 	.name = "ripng",
 	.node = RIPNG_NODE,
@@ -2238,6 +2246,16 @@ DEFUNSH(VTYSH_BABELD, router_babel, router_babel_cmd, "router babel",
 	return CMD_SUCCESS;
 }
 #endif /* HAVE_BABELD */
+
+#ifdef HAVE_SANDD
+DEFUNSH(VTYSH_SANDD, router_sand, router_sand_cmd, "router sand",
+	"Enable a routing process\n"
+	"SAND (unidirectional link routing)\n")
+{
+	vty->node = SAND_NODE;
+	return CMD_SUCCESS;
+}
+#endif /* HAVE_SANDD */
 
 #ifdef HAVE_OSPF6D
 DEFUNSH(VTYSH_OSPF6D, router_ospf6, router_ospf6_cmd, "router ospf6 [vrf NAME]",
@@ -2934,6 +2952,20 @@ DEFUNSH(VTYSH_BABELD, vtysh_quit_babeld, vtysh_quit_babeld_cmd, "quit",
 	return vtysh_exit(vty);
 }
 #endif /* HAVE_BABELD */
+
+#ifdef HAVE_SANDD
+DEFUNSH(VTYSH_SANDD, vtysh_exit_sandd, vtysh_exit_sandd_cmd, "exit",
+	"Exit current mode and down to previous mode\n")
+{
+	return vtysh_exit(vty);
+}
+
+DEFUNSH(VTYSH_SANDD, vtysh_quit_sandd, vtysh_quit_sandd_cmd, "quit",
+	"Exit current mode and down to previous mode\n")
+{
+	return vtysh_exit(vty);
+}
+#endif /* HAVE_SANDD */
 
 #ifdef HAVE_OSPF6D
 DEFUNSH(VTYSH_OSPF6D, vtysh_exit_ospf6d, vtysh_exit_ospf6d_cmd, "exit",
@@ -5417,6 +5449,7 @@ void vtysh_init_vty(void)
 
 	install_node(&bgp_node);
 	install_node(&babel_node);
+	install_node(&sand_node);
 	install_node(&bgp_vpnv4_node);
 	install_node(&bgp_vpnv6_node);
 	install_node(&bgp_flowspecv4_node);
@@ -5730,6 +5763,14 @@ void vtysh_init_vty(void)
 	install_element(BABEL_NODE, &vtysh_quit_babeld_cmd);
 	install_element(BABEL_NODE, &vtysh_end_all_cmd);
 #endif /* HAVE_BABELD */
+
+	/* sandd */
+#ifdef HAVE_SANDD
+	install_element(CONFIG_NODE, &router_sand_cmd);
+	install_element(SAND_NODE, &vtysh_exit_sandd_cmd);
+	install_element(SAND_NODE, &vtysh_quit_sandd_cmd);
+	install_element(SAND_NODE, &vtysh_end_all_cmd);
+#endif /* HAVE_SANDD */
 
 	/* isisd */
 #ifdef HAVE_ISISD

@@ -813,6 +813,7 @@ class TopoRouter(TopoGear):
     RD_TRAP = 21
     RD_FPM_LISTENER = 22
     RD_BFD_DPLANE_LISTENER = 23
+    RD_SAND = 24
     RD = {
         RD_FRR: "frr",
         RD_ZEBRA: "zebra",
@@ -838,6 +839,7 @@ class TopoRouter(TopoGear):
         RD_TRAP: "snmptrapd",
         RD_FPM_LISTENER: "fpm_listener",
         RD_BFD_DPLANE_LISTENER: "bfd_dplane_listener",
+        RD_SAND: "sandd",
     }
 
     def __init__(self, tgen, cls, name, **params):
@@ -915,6 +917,9 @@ class TopoRouter(TopoGear):
                 # Special case for bfdd - search for 'bfd' in config files, not 'bf' which is too generic
                 if daemon == self.RD_BFD:
                     daemonstr = "bfd"
+                elif daemon == self.RD_SAND:
+                    # "sandd".rstrip("d") would give "san"
+                    daemonstr = "sand"
                 else:
                     daemonstr = self.RD.get(daemon).rstrip("d")
 

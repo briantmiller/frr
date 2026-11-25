@@ -579,6 +579,8 @@ uint8_t proto_redistnum(int afi, const char *s)
 			return ZEBRA_ROUTE_NHRP;
 		else if (strmatch(s, "babel"))
 			return ZEBRA_ROUTE_BABEL;
+		else if (strmatch(s, "sand"))
+			return ZEBRA_ROUTE_SAND;
 		else if (strmatch(s, "sharp"))
 			return ZEBRA_ROUTE_SHARP;
 		else if (strmatch(s, "openfabric"))
@@ -613,6 +615,8 @@ uint8_t proto_redistnum(int afi, const char *s)
 			return ZEBRA_ROUTE_NHRP;
 		else if (strmatch(s, "babel"))
 			return ZEBRA_ROUTE_BABEL;
+		else if (strmatch(s, "sand"))
+			return ZEBRA_ROUTE_SAND;
 		else if (strmatch(s, "sharp"))
 			return ZEBRA_ROUTE_SHARP;
 		else if (strmatch(s, "openfabric"))

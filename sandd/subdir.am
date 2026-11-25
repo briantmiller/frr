@@ -1,0 +1,25 @@
+#
+# sandd
+#
+
+if SANDD
+sbin_PROGRAMS += sandd/sandd
+vtysh_daemons += sandd
+endif
+
+sandd_sandd_SOURCES = \
+	sandd/sand_if.c \
+	sandd/sand_lsdb.c \
+	sandd/sand_main.c \
+	sandd/sand_pkt.c \
+	sandd/sand_spf.c \
+	sandd/sand_vty.c \
+	sandd/sand_zebra.c \
+	sandd/sandd.c \
+	# end
+
+noinst_HEADERS += \
+	sandd/sandd.h \
+	# end
+
+sandd_sandd_LDADD = lib/libfrr.la $(LIBCAP)

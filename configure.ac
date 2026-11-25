@@ -7,7 +7,7 @@
 ##
 AC_PREREQ([2.69])
 
-AC_INIT([frr], [10.8.0-dev], [https://github.com/frrouting/frr/issues])
+AC_INIT([frr], [10.9.0-dev], [https://github.com/frrouting/frr/issues])
 PACKAGE_URL="https://frrouting.org/"
 AC_SUBST([PACKAGE_URL])
 PACKAGE_FULLNAME="FRRouting"
@@ -744,6 +744,8 @@ AC_ARG_ENABLE([eigrpd],
   AS_HELP_STRING([--disable-eigrpd], [do not build eigrpd]))
 AC_ARG_ENABLE([babeld],
   AS_HELP_STRING([--disable-babeld], [do not build babeld]))
+AC_ARG_ENABLE([sandd],
+  AS_HELP_STRING([--disable-sandd], [do not build sandd]))
 AC_ARG_ENABLE([watchfrr],
   AS_HELP_STRING([--disable-watchfrr], [do not build watchfrr]))
 AC_ARG_ENABLE([isisd],
@@ -1867,6 +1869,9 @@ AS_IF([test "$enable_eigrpd" != "no"], [
   AC_DEFINE([HAVE_EIGRPD], [1], [eigrpd])
 ])
 
+AS_IF([test "$enable_sandd" != "no"], [
+  AC_DEFINE([HAVE_SANDD], [1], [sandd])
+])
 AS_IF([test "$enable_babeld" != "no"], [
   AC_DEFINE([HAVE_BABELD], [1], [babeld])
 ])
@@ -2804,6 +2809,7 @@ AM_CONDITIONAL([WATCHFRR], [test "$WATCHFRR" = "watchfrr"])
 AM_CONDITIONAL([OSPFCLIENT], [test "$OSPFCLIENT" = "ospfclient"])
 AM_CONDITIONAL([RIPNGD], [test "$enable_ripngd" != "no"])
 AM_CONDITIONAL([BABELD], [test "$enable_babeld" != "no"])
+AM_CONDITIONAL([SANDD], [test "$enable_sandd" != "no"])
 AM_CONDITIONAL([OSPF6D], [test "$enable_ospf6d" != "no"])
 AM_CONDITIONAL([ISISD], [test "$enable_isisd" != "no"])
 AM_CONDITIONAL([PIMD], [test "$enable_pimd" != "no"])
@@ -2846,7 +2852,7 @@ AC_CONFIG_FILES([tools/frrinit.sh], [chmod +x tools/frrinit.sh])
 AC_CONFIG_FILES([tools/frrcommon.sh])
 AC_CONFIG_FILES([tools/frr.service])
 AC_CONFIG_FILES([tools/frr@.service])
-AC_CONFIG_FILES([tools/frr.pc])
+AC_CONFIG_FILES([frr.pc], [ln -sf ../frr.pc tools/frr.pc])
 
 # dnl write out a ccls file with our compile configuration
 # dnl have to add -Wno-unused-function otherwise foobar_cmd_magic causes

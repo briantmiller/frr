@@ -207,6 +207,7 @@ include isisd/subdir.am
 include nhrpd/subdir.am
 include ldpd/subdir.am
 include babeld/subdir.am
+include sandd/subdir.am
 include eigrpd/subdir.am
 include sharpd/subdir.am
 include pimd/subdir.am
@@ -236,6 +237,10 @@ rc_SCRIPTS = \
 	pkgsrc/mgmtd.sh \
 	# end
 endif
+
+DISTCLEANFILES += frr.pc tools/frr.pc
+tools_pkgconfigdir = @pkgconfigdir@
+tools_pkgconfig_DATA = frr.pc
 
 EXTRA_DIST += \
 	aclocal.m4 \
@@ -271,6 +276,7 @@ EXTRA_DIST += \
 	snapcraft/helpers \
 	snapcraft/snap \
 	babeld/Makefile \
+	sandd/Makefile \
 	mgmtd/Makefile \
 	bgpd/Makefile \
 	bgpd/rfp-example/librfp/Makefile \
