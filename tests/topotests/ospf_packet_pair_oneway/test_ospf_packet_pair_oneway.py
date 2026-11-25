@@ -564,6 +564,7 @@ def test_packet_trains():
         _set_smoothing(r1, "ip ospf packet-pair train span 20 count 2")
         intf = _pp_intf(r1, "r1-eth0")
         assert intf["probeMode"] == "train" and intf["trainSpanMsec"] == 20, intf
+        assert intf["trainEstimate"] == "median", intf
 
         def _trains():
             pp = _pp(r1, "2.2.2.2")
@@ -622,6 +623,13 @@ def test_packet_trains():
             return _check_dir(r1, "2.2.2.2", "outbound", UP_KBPS, before + 2)
 
         _expect(_scheduled, count=40, wait=1, msg="scheduled trains")
+        _set_smoothing(r1, "ip ospf packet-pair train span 20 count 2 estimate fastest")
+        assert re.search(
+            r"^ ip ospf packet-pair train span 20 count 2 estimate fastest$",
+            r1.vtysh_cmd("show running-config"),
+            re.M,
+        )
+        assert _pp_intf(r1, "r1-eth0")["trainEstimate"] == "fastest"
         _set_smoothing(r1, "no ip ospf packet-pair schedule")
         _set_smoothing(r1, "no ip ospf packet-pair train")
 

@@ -151,6 +151,10 @@ def _check_ospf_nexthops(router):
             return "next hop {} missing: {}".format(nh, nhs)
         if v["outSource"] != "one-way" or v["inSource"] != "one-way":
             return "{} not one-way yet: {}".format(nh, v)
+        # The peers' one-way reports can arrive before r1's own round-trip
+        # sample completes: wait for both.
+        if not v.get("rttKbps"):
+            return "{} no round-trip value yet: {}".format(nh, v)
         if not _near(v["outKbps"], out) or not _near(v["inKbps"], inb):
             return "{} out/in {}/{} not near {}/{}".format(
                 nh, v["outKbps"], v["inKbps"], out, inb

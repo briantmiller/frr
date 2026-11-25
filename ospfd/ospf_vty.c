@@ -10750,8 +10750,10 @@ DEFPY(no_ip_ospf_packet_pair, no_ip_ospf_packet_pair_cmd,
 }
 
 static void ospf_pp_set_train(struct ospf_if_params *params, uint16_t span,
-			      uint8_t count, uint16_t max, uint8_t skip)
+			      uint8_t count, uint16_t max, uint8_t skip,
+			      uint8_t est)
 {
+	params->pp_train_est = est;
 	params->pp_train_span = span;
 	SET_IF_PARAM(params, pp_train_span);
 	params->pp_train_count = count;
@@ -10777,7 +10779,7 @@ static void ospf_pp_set_window(struct ospf_if_params *params, uint8_t window,
 }
 
 DEFPY(ip_ospf_packet_pair_train, ip_ospf_packet_pair_train_cmd,
-      "ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      "ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)|estimate <median|fastest>$est}]",
       "IP Information\n"
       "OSPF interface commands\n"
       "Estimate link speed, RTT and jitter to neighbors using packet pairs\n"
@@ -10789,7 +10791,10 @@ DEFPY(ip_ospf_packet_pair_train, ip_ospf_packet_pair_train_cmd,
       "Longest train\n"
       "Packets (default 512)\n"
       "Leading part of each train that is not timed\n"
-      "Percent (default 0)\n")
+      "Percent (default 0)\n"
+      "Which train of a sample is reported\n"
+      "The median train (default)\n"
+      "The fastest train: capacity, but reads high where train rates vary\n")
 {
 	VTY_DECLVAR_CONTEXT(interface, ifp);
 
@@ -10797,13 +10802,16 @@ DEFPY(ip_ospf_packet_pair_train, ip_ospf_packet_pair_train_cmd,
 			  count_str ? count : PKTPAIR_TRAIN_COUNT_DEFAULT,
 			  max_packets_str ? max_packets
 					  : PKTPAIR_TRAIN_MAXLEN_DEFAULT,
-			  head_skip_str ? head_skip : 0);
+			  head_skip_str ? head_skip : 0,
+			  est && !strcmp(est, "fastest")
+				  ? PKTPAIR_TRAIN_EST_FASTEST
+				  : PKTPAIR_TRAIN_EST_MEDIAN);
 	ospf_pp_if_config_changed(ifp);
 	return CMD_SUCCESS;
 }
 
 DEFPY(no_ip_ospf_packet_pair_train, no_ip_ospf_packet_pair_train_cmd,
-      "no ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      "no ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)|estimate <median|fastest>$est}]",
       NO_STR
       "IP Information\n"
       "OSPF interface commands\n"
@@ -10816,7 +10824,10 @@ DEFPY(no_ip_ospf_packet_pair_train, no_ip_ospf_packet_pair_train_cmd,
       "Longest train\n"
       "Packets (default 512)\n"
       "Leading part of each train that is not timed\n"
-      "Percent (default 0)\n")
+      "Percent (default 0)\n"
+      "Which train of a sample is reported\n"
+      "The median train (default)\n"
+      "The fastest train: capacity, but reads high where train rates vary\n")
 {
 	VTY_DECLVAR_CONTEXT(interface, ifp);
 
@@ -10932,7 +10943,8 @@ DEFPY(ip_ospf_packet_pair_profile, ip_ospf_packet_pair_profile_cmd,
 		UNSET_IF_PARAM(params, pp_smooth_window);
 		UNSET_IF_PARAM(params, pp_loss_adjust);
 	} else {
-		ospf_pp_set_train(params, 20, 3, 512, 10);
+		ospf_pp_set_train(params, 20, 3, 512, 10,
+				  PKTPAIR_TRAIN_EST_MEDIAN);
 		ospf_pp_set_sched(params, 15000, 12000, 1000);
 		ospf_pp_set_window(params, 20, 50);
 		params->pp_loss_adjust = PKTPAIR_LOSS_ADJUST_DELIVERY;
@@ -13769,6 +13781,9 @@ static int config_write_interface_one(struct vty *vty, struct vrf *vrf)
 				if (params->pp_train_skip)
 					vty_out(vty, " head-skip %u",
 						params->pp_train_skip);
+				if (params->pp_train_est ==
+				    PKTPAIR_TRAIN_EST_FASTEST)
+					vty_out(vty, " estimate fastest");
 				vty_out(vty, "\n");
 			}
 			if (params == IF_DEF_PARAMS(ifp) &&

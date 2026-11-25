@@ -211,6 +211,24 @@ struct pktpair_loss {
 	uint8_t empty_run; /* consecutive samples without a valid pair */
 };
 
+/*
+ * Reordering, as RFC 4737 counts it: an arrival is reordered when a packet
+ * with a higher index of the same pair/train arrived before it, and late
+ * by that many positions.  Starlink reorders a large share of packets (a
+ * quarter in some tunnel tests) by a few positions.  Train rates are
+ * timed against the order of arrival, not the packet index, so this does
+ * not bias them; it is measured because it matters for what runs over the
+ * link (IPsec replay windows, TCP).
+ */
+struct pktpair_reorder {
+	uint16_t last_rcvd;	 /* latest sample: arrivals        */
+	uint16_t last_reordered; /*   of which reordered           */
+	uint16_t last_late_max;	 /*   most positions late          */
+	uint16_t late_max;	 /* most positions late, ever      */
+	uint64_t rcvd_total;
+	uint64_t reordered_total;
+};
+
 /* Fold a sample of sent/lost packets into l; valid: it had a valid pair. */
 extern void pktpair_loss_update(struct pktpair_loss *l,
 				const struct pktpair_loss_cfg *cfg,
@@ -241,8 +259,19 @@ extern const char *pktpair_loss_adjust_str(enum pktpair_loss_adjust mode);
  * takes span_ms at the bottleneck (at least PKTPAIR_TRAIN_LEN_MIN and at
  * most max_len packets).  The first skip_pct percent of each train is not
  * timed, as schedulers can be slow to grant a new burst its full rate.
- * The sample value is the highest train rate: cross traffic can only
- * slow a train down.
+ *
+ * A train's rate comes from a least-squares fit of arrival time against
+ * arrival order, not from the first and last arrival alone: on a framed
+ * link the packets of the first frame arrive together, and timing from
+ * the first to the last arrival counts them as delivered in no time,
+ * which reads several percent fast for a 20 ms train (20% for a 5 ms one).
+ * The fit is also unaffected by receive-side batching such as interrupt
+ * coalescing.
+ *
+ * The sample value is the median train, or with "estimate fastest" the
+ * fastest one (cross traffic can only slow a train, so that is the
+ * capacity; but where train rates vary for other reasons, as on
+ * Starlink, it reads high).
  */
 #define PKTPAIR_TRAIN_LEN_MIN	      8
 #define PKTPAIR_TRAIN_LEN_MAX	      1024
@@ -253,12 +282,21 @@ extern const char *pktpair_loss_adjust_str(enum pktpair_loss_adjust mode);
 #define PKTPAIR_TRAIN_MAXLEN_DEFAULT  512
 #define PKTPAIR_TRAIN_SKIP_MAX	      50
 
+enum pktpair_train_estimate {
+	PKTPAIR_TRAIN_EST_MEDIAN = 0, /* median train (default)       */
+	PKTPAIR_TRAIN_EST_FASTEST,    /* fastest train: capacity only */
+};
+
 struct pktpair_train_cfg {
 	uint16_t span_ms; /* 0 = packet pairs   */
 	uint8_t count;	  /* trains per sample  */
 	uint16_t max_len; /* packets            */
 	uint8_t skip_pct; /* head not timed, %  */
+	uint8_t estimate; /* enum pktpair_train_estimate */
 };
+
+/* The train length is only changed when the target moves this much. */
+#define PKTPAIR_TRAIN_LEN_HYSTERESIS 25 /* % */
 
 /*
  * Avoid periodic disruptions, such as a satellite network's path
@@ -333,6 +371,7 @@ struct pktpair_stats {
 	uint16_t train_len;	  /* packets per pair/train         */
 	uint32_t span_usec;	  /* timed span of the best train   */
 	struct pktpair_loss loss; /* both directions together     */
+	struct pktpair_reorder reorder; /* both directions together */
 	struct pktpair_tx tx; /* how this sample was sent          */
 	struct timeval last_update; /* monotonic */
 };
@@ -352,6 +391,7 @@ struct pktpair_oneway {
 	uint16_t pkts_rcvd;
 	uint16_t train_len;  /* packets per pair/train          */
 	struct pktpair_loss loss;
+	struct pktpair_reorder reorder;
 	uint64_t samples;
 	struct timeval last_update; /* monotonic */
 };
@@ -372,6 +412,16 @@ struct pktpair_pair {
 	uint16_t rcvd;	 /* arrivals                       */
 	uint16_t steady; /* arrivals with index >= skip    */
 	uint8_t seen01;	 /* packets 0 and 1 arrived (bits) */
+	struct timespec rx_first; /* first arrival, whichever packet */
+	struct timespec tx_first; /* its send time (receiver: payload) */
+	uint16_t max_idx;	  /* highest packet index arrived    */
+	uint16_t reordered;	  /* arrivals after a higher index   */
+	uint16_t late_max;	  /* most positions an arrival was late */
+	/*
+	 * Least-squares fit of arrival time (usec after the first timed
+	 * arrival) against arrival order, over the timed arrivals.
+	 */
+	double sum_k, sum_kk, sum_t, sum_kt;
 };
 
 PREDECL_HASH(pktpair_targets);

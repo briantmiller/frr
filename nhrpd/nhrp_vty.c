@@ -1135,7 +1135,7 @@ DEFPY(if_no_nhrp_packet_pair, if_no_nhrp_packet_pair_cmd,
 }
 
 DEFPY(if_nhrp_packet_pair_train, if_nhrp_packet_pair_train_cmd,
-      "[no] ip nhrp packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]",
+      "[no] ip nhrp packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)|estimate <median|fastest>$est}]",
       NO_STR
       IP_STR
       NHRP_STR
@@ -1148,7 +1148,10 @@ DEFPY(if_nhrp_packet_pair_train, if_nhrp_packet_pair_train_cmd,
       "Longest train\n"
       "Packets (default 512)\n"
       "Leading part of each train that is not timed\n"
-      "Percent (default 0)\n")
+      "Percent (default 0)\n"
+      "Which train of a sample is reported\n"
+      "The median train (default)\n"
+      "The fastest train: capacity, but reads high where train rates vary\n")
 {
 	VTY_DECLVAR_CONTEXT(interface, ifp);
 	struct nhrp_interface *nifp = ifp->info;
@@ -1162,6 +1165,9 @@ DEFPY(if_nhrp_packet_pair_train, if_nhrp_packet_pair_train_cmd,
 		t->max_len = max_packets_str ? max_packets
 					     : PKTPAIR_TRAIN_MAXLEN_DEFAULT;
 		t->skip_pct = head_skip_str ? head_skip : 0;
+		t->estimate = est && !strcmp(est, "fastest")
+				      ? PKTPAIR_TRAIN_EST_FASTEST
+				      : PKTPAIR_TRAIN_EST_MEDIAN;
 	}
 	nhrp_pp_update(ifp);
 	return CMD_SUCCESS;
