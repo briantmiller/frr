@@ -234,7 +234,7 @@ static inline bool is_selfroute(int proto)
 	    || (proto == RTPROT_LDP) || (proto == RTPROT_BABEL)
 	    || (proto == RTPROT_RIP) || (proto == RTPROT_SHARP)
 	    || (proto == RTPROT_PBR) || (proto == RTPROT_OPENFABRIC)
-	    || (proto == RTPROT_SRTE)) {
+	    || (proto == RTPROT_SRTE) || (proto == RTPROT_SAND)) {
 		return true;
 	}
 
@@ -286,6 +286,9 @@ int zebra2proto(int proto)
 		break;
 	case ZEBRA_ROUTE_SRTE:
 		proto = RTPROT_SRTE;
+		break;
+	case ZEBRA_ROUTE_SAND:
+		proto = RTPROT_SAND;
 		break;
 	case ZEBRA_ROUTE_TABLE:
 	case ZEBRA_ROUTE_NHG:
@@ -359,6 +362,9 @@ static inline int proto2zebra(int proto, int family, bool is_nexthop)
 		break;
 	case RTPROT_SRTE:
 		proto = ZEBRA_ROUTE_SRTE;
+		break;
+	case RTPROT_SAND:
+		proto = ZEBRA_ROUTE_SAND;
 		break;
 	case RTPROT_UNSPEC:
 	case RTPROT_REDIRECT:

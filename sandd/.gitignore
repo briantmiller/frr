@@ -1,0 +1,10 @@
+*
+!*.c
+!*.h
+!Makefile
+!subdir.am
+!README.md
+!.gitignore
+!test/
+!test/*.sh
+*_clippy.c

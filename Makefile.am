@@ -207,6 +207,7 @@ include isisd/subdir.am
 include nhrpd/subdir.am
 include ldpd/subdir.am
 include babeld/subdir.am
+include sandd/subdir.am
 include eigrpd/subdir.am
 include sharpd/subdir.am
 include pimd/subdir.am
@@ -275,6 +276,7 @@ EXTRA_DIST += \
 	snapcraft/helpers \
 	snapcraft/snap \
 	babeld/Makefile \
+	sandd/Makefile \
 	mgmtd/Makefile \
 	bgpd/Makefile \
 	bgpd/rfp-example/librfp/Makefile \

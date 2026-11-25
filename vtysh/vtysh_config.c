@@ -372,6 +372,9 @@ void vtysh_config_parse_line(void *arg, const char *line)
 		else if (strncmp(line, "router babel", strlen("router babel"))
 			 == 0)
 			config = config_get(BABEL_NODE, line);
+		else if (strncmp(line, "router sand", strlen("router sand"))
+			 == 0)
+			config = config_get(SAND_NODE, line);
 		else if (strncmp(line, "router ospf", strlen("router ospf"))
 			 == 0)
 			config = config_get(OSPF_NODE, line);

@@ -116,6 +116,10 @@ module frr-route-types {
         value 31;
         description "Table-Direct route";
       }
+      enum sand {
+        value 32;
+        description "SAND route";
+      }
     }
     description "Enumeration of supported IPv4 route types";
   }
@@ -185,6 +189,10 @@ module frr-route-types {
       enum table-direct {
         value 31;
         description "Table-Direct route";
+      }
+      enum sand {
+        value 32;
+        description "SAND route";
       }
     }
     description "Enumeration of supported IPv6 route types";
