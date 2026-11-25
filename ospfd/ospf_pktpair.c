@@ -90,6 +90,7 @@ static void pp_cfg(struct interface *ifp, struct pktpair_cfg *cfg)
 		cfg->train.count = params->pp_train_count;
 		cfg->train.max_len = params->pp_train_max;
 		cfg->train.skip_pct = params->pp_train_skip;
+		cfg->train.estimate = params->pp_train_est;
 	}
 	if (OSPF_IF_PARAM_CONFIGURED(params, pp_sched_period)) {
 		cfg->sched.period_ms = params->pp_sched_period;

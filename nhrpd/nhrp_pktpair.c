@@ -605,6 +605,8 @@ void nhrp_pp_config_write(struct vty *vty, struct interface *ifp)
 			vty_out(vty, " max-packets %u", t->max_len);
 		if (t->skip_pct)
 			vty_out(vty, " head-skip %u", t->skip_pct);
+		if (t->estimate == PKTPAIR_TRAIN_EST_FASTEST)
+			vty_out(vty, " estimate fastest");
 		vty_out(vty, "\n");
 	}
 	if (nifp->pp_cfg.sched.period_ms) {

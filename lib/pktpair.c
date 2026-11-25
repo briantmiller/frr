@@ -271,8 +271,11 @@ static int64_t ts_diff_ns(const struct timespec *a, const struct timespec *b)
 
 /* Fold the arrival of packet idx at ts into a pair/train. */
 static void pp_train_arrival(struct pktpair_pair *pr, uint16_t idx,
-			     const struct timespec *ts)
+			     const struct timespec *ts,
+			     const struct timespec *tx)
 {
+	uint16_t arrival = pr->rcvd;
+
 	if (idx < 2) {
 		if (pr->seen01 & (1 << idx))
 			return; /* duplicate */
@@ -280,11 +283,42 @@ static void pp_train_arrival(struct pktpair_pair *pr, uint16_t idx,
 		if (idx == 0)
 			pr->rx0 = *ts;
 	}
+	/*
+	 * RTT and one-way delay come from the first arrival, whichever packet
+	 * it is: packet 0 may itself be one of the reordered ones.
+	 */
+	if (arrival == 0) {
+		pr->rx_first = *ts;
+		pr->tx_first = tx ? *tx : pr->tx0;
+	}
+	if (arrival && idx < pr->max_idx) {
+		pr->reordered++;
+		pr->late_max = MAX(pr->late_max, pr->max_idx - idx);
+	} else {
+		pr->max_idx = idx;
+	}
 	pr->rcvd++;
-	if (idx >= pr->skip) {
-		if (!pr->steady || ts_diff_ns(ts, &pr->rx_a) < 0)
-			pr->rx_a = *ts;
-		if (!pr->steady || ts_diff_ns(ts, &pr->rx_b) > 0)
+	/*
+	 * The head that is not timed is the first "skip" arrivals, not the
+	 * packets with the lowest indexes: a reordered head packet arriving
+	 * inside the timed part would otherwise take up time without being
+	 * counted.
+	 */
+	if (arrival >= pr->skip) {
+		double k, t;
+
+		if (!pr->steady) {
+			pr->rx_a = pr->rx_b = *ts;
+			pr->sum_k = pr->sum_kk = pr->sum_t = pr->sum_kt = 0;
+		}
+		/* fit reference: the first timed arrival as processed */
+		k = pr->steady;
+		t = ts_diff_ns(ts, &pr->rx_a) / 1000.0;
+		pr->sum_k += k;
+		pr->sum_kk += k * k;
+		pr->sum_t += t;
+		pr->sum_kt += k * t;
+		if (ts_diff_ns(ts, &pr->rx_b) > 0)
 			pr->rx_b = *ts;
 		pr->steady++;
 	}
@@ -296,18 +330,24 @@ static void pp_train_arrival(struct pktpair_pair *pr, uint16_t idx,
  * between are not counted, so loss can only lower the result.
  */
 static uint64_t pp_train_kbps(const struct pktpair_pair *pr, uint16_t size,
-			      int64_t *span_ns)
+			      int64_t *span_ns, double *per_pkt_usec)
 {
+	double n = pr->steady, den, slope;
 	int64_t dt;
 
 	if (pr->steady < 2)
 		return 0;
 	dt = ts_diff_ns(&pr->rx_b, &pr->rx_a);
-	if (dt <= 0)
+	/* usec per packet; for a pair simply the gap between the two */
+	den = n * pr->sum_kk - pr->sum_k * pr->sum_k;
+	if (dt <= 0 || den <= 0)
+		return 0;
+	slope = (n * pr->sum_kt - pr->sum_k * pr->sum_t) / den;
+	if (slope <= 0)
 		return 0;
 	*span_ns = dt;
-	return (uint64_t)(pr->steady - 1) * size * 8ULL * 1000000ULL /
-	       (uint64_t)dt;
+	*per_pkt_usec = slope;
+	return (uint64_t)((double)size * 8.0 * 1000.0 / slope + 0.5);
 }
 
 uint32_t pktpair_sched_delay(uint64_t now_ms, const struct pktpair_sched_cfg *c,
@@ -504,6 +544,27 @@ const char *pktpair_loss_adjust_str(enum pktpair_loss_adjust mode)
 /* Sample evaluation                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Fold the reordering seen in a sample's pairs/trains into r. */
+static void pp_reorder_update(struct pktpair_reorder *r,
+			      const struct pktpair_pair *pairs, unsigned int n)
+{
+	uint32_t rcvd = 0, reordered = 0;
+	uint16_t late = 0;
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		rcvd += pairs[i].rcvd;
+		reordered += pairs[i].reordered;
+		late = MAX(late, pairs[i].late_max);
+	}
+	r->last_rcvd = MIN(rcvd, UINT16_MAX);
+	r->last_reordered = MIN(reordered, UINT16_MAX);
+	r->last_late_max = late;
+	r->late_max = MAX(r->late_max, late);
+	r->rcvd_total += rcvd;
+	r->reordered_total += reordered;
+}
+
 static void pp_target_finalize(struct pktpair_session *s,
 			       struct pktpair_target *t)
 {
@@ -522,6 +583,7 @@ static void pp_target_finalize(struct pktpair_session *s,
 	for (i = 0; i < t->npairs; i++) {
 		struct pktpair_pair *pr = &t->pairs[i];
 		int64_t span = 0;
+		double ppu = 0;
 		uint64_t kbps;
 
 		if (pr->sent == 0)
@@ -530,9 +592,9 @@ static void pp_target_finalize(struct pktpair_session *s,
 		pkts_sent += pr->sent;
 		lost += pr->sent - MIN(pr->rcvd, pr->sent);
 
-		/* RTT and jitter from the leading packet. */
-		if (pr->seen01 & 0x1) {
-			int64_t rtt = ts_diff_ns(&pr->rx0, &pr->tx0) / 1000;
+		/* RTT and jitter from the first reply of each pair/train. */
+		if (pr->rcvd) {
+			int64_t rtt = ts_diff_ns(&pr->rx_first, &pr->tx0) / 1000;
 
 			if (rtt >= 0) {
 				rtt_sum += rtt;
@@ -550,9 +612,9 @@ static void pp_target_finalize(struct pktpair_session *s,
 		}
 
 		/* Dispersion of the replies. */
-		kbps = pp_train_kbps(pr, t->pkt_size, &span);
+		kbps = pp_train_kbps(pr, t->pkt_size, &span, &ppu);
 		if (kbps) {
-			ipd_sum += span / (pr->steady - 1);
+			ipd_sum += (uint64_t)(ppu * 1000.0);
 			bw[nbw++] = kbps;
 			if (kbps > best) {
 				best = kbps;
@@ -560,6 +622,8 @@ static void pp_target_finalize(struct pktpair_session *s,
 			}
 		}
 	}
+
+	pp_reorder_update(&st->reorder, t->pairs, t->npairs);
 
 	/* Mark the sample consumed so late replies are ignored. */
 	t->npairs = 0;
@@ -595,8 +659,9 @@ static void pp_target_finalize(struct pktpair_session *s,
 
 	if (nbw) {
 		qsort(bw, nbw, sizeof(bw[0]), uint64_cmp);
-		/* Pairs: the median.  Trains: the fastest. */
-		if (t->train_len > 2)
+		/* The median, or for trains optionally the fastest. */
+		if (t->train_len > 2 &&
+		    s->cfg.train.estimate == PKTPAIR_TRAIN_EST_FASTEST)
 			st->bw_kbps = best;
 		else
 			st->bw_kbps = (nbw & 1) ? bw[nbw / 2]
@@ -871,6 +936,16 @@ static uint16_t pp_train_len(const struct pktpair_session *s,
 	len = est * c->span_ms / (size * 8ULL) + 1;
 	len = MAX(len, PKTPAIR_TRAIN_LEN_MIN);
 	len = MIN(len, max);
+	/*
+	 * Keep the current length unless the target moved by more than the
+	 * hysteresis: any error in the estimate otherwise feeds straight
+	 * back into the length, and where longer trains read even slightly
+	 * faster the two ratchet upwards together.
+	 */
+	if (t->train_len > 2 && t->train_len <= max &&
+	    len * 100 <= t->train_len * (100ULL + PKTPAIR_TRAIN_LEN_HYSTERESIS) &&
+	    len * (100ULL + PKTPAIR_TRAIN_LEN_HYSTERESIS) >= t->train_len * 100ULL)
+		return t->train_len;
 	return len;
 }
 
@@ -992,7 +1067,7 @@ static void pp_handle_reply(struct pktpair_session *s, struct ip *iph,
 	if (which >= pr->sent)
 		return;
 
-	pp_train_arrival(pr, which, rx_ts);
+	pp_train_arrival(pr, which, rx_ts, NULL);
 }
 
 /* A target's report of how our probes arrived: our outbound direction. */
@@ -1125,6 +1200,7 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	for (i = 0; i < in->npairs; i++) {
 		struct pktpair_pair *pr = &in->pairs[i];
 		int64_t span = 0;
+		double ppu = 0;
 		uint64_t kbps;
 
 		if (!pr->rcvd)
@@ -1136,8 +1212,8 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 		 * One-way delay includes the unknown clock offset between
 		 * the hosts; its variation from pair to pair does not.
 		 */
-		if (pr->seen01 & 0x1) {
-			int64_t owd = ts_diff_ns(&pr->rx0, &pr->tx0);
+		if (pr->rcvd) {
+			int64_t owd = ts_diff_ns(&pr->rx_first, &pr->tx_first);
 
 			if (have_prev) {
 				jit_sum += llabs(owd - prev_owd);
@@ -1147,15 +1223,16 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 			have_prev = true;
 		}
 
-		kbps = pp_train_kbps(pr, in->pkt_size, &span);
+		kbps = pp_train_kbps(pr, in->pkt_size, &span, &ppu);
 		if (kbps) {
-			ipd_sum += span / (pr->steady - 1);
+			ipd_sum += (uint64_t)(ppu * 1000.0);
 			bw[nbw++] = kbps;
 			best = MAX(best, kbps);
 		}
 	}
 
 	ow->pkt_size = in->pkt_size;
+	ow->interval = in->interval;
 	ow->npairs = in->npairs;
 	ow->pairs_seen = seen;
 	ow->pairs_valid = nbw;
@@ -1164,7 +1241,9 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	ow->jitter_usec = njit ? jit_sum / njit / 1000 : 0;
 	if (nbw) {
 		qsort(bw, nbw, sizeof(bw[0]), uint64_cmp);
-		if (in->train_len > 2)
+		/* The peer's choice is not known here; mirror our own. */
+		if (in->train_len > 2 &&
+		    s->cfg.train.estimate == PKTPAIR_TRAIN_EST_FASTEST)
 			ow->bw_kbps = best;
 		else
 			ow->bw_kbps = (nbw & 1) ? bw[nbw / 2]
@@ -1179,6 +1258,7 @@ static void pp_inbound_finalize(struct pktpair_session *s,
 	}
 	pktpair_loss_update(&ow->loss, &s->cfg.loss, expect,
 			    expect - MIN(rcvd, expect), nbw > 0);
+	pp_reorder_update(&ow->reorder, in->pairs, in->npairs);
 	ow->samples++;
 	monotime(&ow->last_update);
 
@@ -1240,6 +1320,7 @@ static void pp_handle_probe(struct pktpair_session *s, struct ip *iph,
 	uint16_t ident = ntohs(icmp->un.echo.id);
 	uint16_t which = ntohs(pl->which), len = ntohs(pl->len),
 		 skip = ntohs(pl->skip);
+	struct timespec tx;
 	int64_t wait;
 	bool last;
 
@@ -1295,11 +1376,11 @@ static void pp_handle_probe(struct pktpair_session *s, struct ip *iph,
 		pr->len = len;
 		pr->skip = skip;
 	}
-	if (which == 0 && !(pr->seen01 & 0x1)) {
-		pr->tx0.tv_sec = ntohl(pl->tx_sec);
-		pr->tx0.tv_nsec = ntohl(pl->tx_nsec);
-	}
-	pp_train_arrival(pr, which, rx_ts);
+	tx.tv_sec = ntohl(pl->tx_sec);
+	tx.tv_nsec = ntohl(pl->tx_nsec);
+	if (which == 0 && !(pr->seen01 & 0x1))
+		pr->tx0 = tx;
+	pp_train_arrival(pr, which, rx_ts, &tx);
 	monotime(&in->last_rx);
 
 	/*
@@ -1802,6 +1883,39 @@ static void pp_show_loss(struct vty *vty, struct json_object *json,
 		l->empty_run && eff ? " (held)" : "");
 }
 
+/* Reordering of one direction (shown only where it is measured here). */
+static void pp_show_reorder(struct vty *vty, struct json_object *json,
+			    const struct pktpair_reorder *r, const char *indent)
+{
+	if (!r->rcvd_total)
+		return;
+	if (json) {
+		json_object_int_add(json, "packetsReordered", r->last_reordered);
+		json_object_double_add(json, "reorderedPct",
+				       r->last_rcvd ? 100.0 * r->last_reordered /
+							      r->last_rcvd
+						    : 0);
+		json_object_int_add(json, "reorderMaxPositions",
+				    r->last_late_max);
+		json_object_int_add(json, "packetsReorderedTotal",
+				    r->reordered_total);
+		json_object_double_add(json, "reorderedTotalPct",
+				       100.0 * r->reordered_total /
+					       r->rcvd_total);
+		json_object_int_add(json, "reorderMaxPositionsEver",
+				    r->late_max);
+		return;
+	}
+	if (!r->reordered_total)
+		return;
+	vty_out(vty,
+		"%s    Reordered %.2f%% last sample (up to %u positions late), %.2f%% overall (up to %u)\n",
+		indent,
+		r->last_rcvd ? 100.0 * r->last_reordered / r->last_rcvd : 0.0,
+		r->last_late_max, 100.0 * r->reordered_total / r->rcvd_total,
+		r->late_max);
+}
+
 static void pp_show_rtt(struct vty *vty, struct json_object *json, uint64_t eff,
 			const struct pktpair_cfg *cfg,
 			const struct pktpair_target *t, const char *indent)
@@ -1851,6 +1965,7 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json, uint64_t eff,
 		json_object_int_add(json, "smoothingResets",
 				    st->smoother.resets);
 		pp_show_loss(vty, json, &st->loss, eff, indent);
+		pp_show_reorder(vty, json, &st->reorder, indent);
 		return;
 	}
 
@@ -1899,6 +2014,7 @@ static void pp_show_rtt(struct vty *vty, struct json_object *json, uint64_t eff,
 		vty_out(vty, "%s  Estimated speed unavailable\n", indent);
 	}
 	pp_show_loss(vty, NULL, &st->loss, eff, indent);
+	pp_show_reorder(vty, NULL, &st->reorder, indent);
 }
 
 static void pp_show_oneway(struct vty *vty, struct json_object *json,
@@ -1929,6 +2045,7 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 		json_object_int_add(jo, "smoothingResets",
 				    ow->smoother.resets);
 		pp_show_loss(vty, jo, &ow->loss, eff, indent);
+		pp_show_reorder(vty, jo, &ow->reorder, indent);
 		json_object_object_add(json, key, jo);
 		return;
 	}
@@ -1949,6 +2066,94 @@ static void pp_show_oneway(struct vty *vty, struct json_object *json,
 		indent, source, age_ms / 1000, age_ms % 1000, ow->pairs_valid,
 		ow->npairs, ow->pkts_rcvd, ow->npairs * ow->train_len);
 	pp_show_loss(vty, NULL, &ow->loss, eff, indent);
+	pp_show_reorder(vty, NULL, &ow->reorder, indent);
+}
+
+/* IP length of a report: header, ICMP echo reply header, payload */
+#define PP_REPORT_IP_LEN (20 + 8 + (unsigned int)sizeof(struct pktpair_report))
+
+/* "245.76kbps": two decimals at the largest SI prefix below 1000 */
+static const char *pp_bps_str(uint64_t bps, char *buf, size_t len)
+{
+	static const char *const prefix[] = { "", "k", "M", "G", "T" };
+	unsigned int i = 0;
+	double scale = 1;
+
+	while (i + 1 < array_size(prefix) && (double)bps / scale >= 999.995) {
+		scale *= 1000;
+		i++;
+	}
+	snprintf(buf, len, "%.2f%sbps", (double)bps / scale, prefix[i]);
+	return buf;
+}
+
+/*
+ * The bandwidth the measurement itself uses with this peer, at the IP
+ * level, averaged over the probing interval of the latest sample in each
+ * direction (pairs or trains alike):
+ *
+ *   out: our probes, our echo replies to the peer's probes, our reports
+ *   in:  replies to our probes, the peer's probes, the peer's reports
+ *
+ * Our probes and the replies to them recur every one of our intervals;
+ * the peer's probes, our replies and our reports every one of its.
+ */
+static void pp_show_load(struct vty *vty, struct json_object *json,
+			 const struct pktpair_session *s,
+			 const struct pktpair_target *t,
+			 const struct pktpair_oneway *in, const char *indent)
+{
+	uint64_t probes_out = 0, replies_in = 0, reports_in = 0;
+	uint64_t probes_in = 0, replies_out = 0, reports_out = 0;
+	uint64_t out_bps, in_bps;
+	char b1[32], b2[32];
+
+	if (t && t->samples && s->cfg.interval) {
+		const struct pktpair_stats *st = &t->stats;
+		uint64_t bits = (uint64_t)st->pkt_size * 8;
+
+		probes_out = st->loss.last_sent * bits / s->cfg.interval;
+		replies_in = (st->loss.last_sent - st->loss.last_lost) * bits /
+			     s->cfg.interval;
+		if (t->outbound.samples)
+			reports_in = PP_REPORT_IP_LEN * 8 / s->cfg.interval;
+	}
+	if (in && in->samples && in->interval) {
+		uint64_t bits = (uint64_t)in->pkt_size * 8;
+
+		probes_in = in->pkts_rcvd * bits / in->interval;
+		/* the kernel answers every echo request */
+		replies_out = probes_in;
+		reports_out = PP_REPORT_IP_LEN * 8 / in->interval;
+	}
+	out_bps = probes_out + replies_out + reports_out;
+	in_bps = replies_in + probes_in + reports_in;
+
+	if (json) {
+		struct json_object *jl = json_object_new_object();
+
+		json_object_object_add(json, "probeLoad", jl);
+		json_object_int_add(jl, "outBps", out_bps);
+		json_object_int_add(jl, "inBps", in_bps);
+		json_object_int_add(jl, "probesSentBps", probes_out);
+		json_object_int_add(jl, "echoRepliesSentBps", replies_out);
+		json_object_int_add(jl, "reportsSentBps", reports_out);
+		json_object_int_add(jl, "repliesReceivedBps", replies_in);
+		json_object_int_add(jl, "peerProbesReceivedBps", probes_in);
+		json_object_int_add(jl, "reportsReceivedBps", reports_in);
+		if (t && t->samples)
+			json_object_int_add(jl, "intervalSec", s->cfg.interval);
+		if (in && in->samples)
+			json_object_int_add(jl, "peerIntervalSec", in->interval);
+		return;
+	}
+
+	if (!out_bps && !in_bps)
+		return;
+	vty_out(vty,
+		"%s  Measurement traffic: %s out, %s in (average, IP level)\n",
+		indent, pp_bps_str(out_bps, b1, sizeof(b1)),
+		pp_bps_str(in_bps, b2, sizeof(b2)));
 }
 
 void pktpair_show_peer(struct vty *vty, struct json_object *json,
@@ -1991,6 +2196,9 @@ void pktpair_show_peer(struct vty *vty, struct json_object *json,
 			       indent);
 	else if (responder && !json)
 		vty_out(vty, "%s  No probes received from peer\n", indent);
+
+	if (s)
+		pp_show_load(vty, json, s, responder ? NULL : t, in, indent);
 
 	/* Recently ignored a message from this peer for its version. */
 	if (s && s->ver_mismatch && IPV4_ADDR_SAME(&s->ver_last_src, &peer) &&
@@ -2055,6 +2263,10 @@ void pktpair_show_train_cfg(struct vty *vty, struct json_object *json,
 			json_object_int_add(json, "trainMaxPackets",
 					    t->max_len);
 			json_object_int_add(json, "trainSkipPct", t->skip_pct);
+			json_object_string_add(json, "trainEstimate",
+					       t->estimate == PKTPAIR_TRAIN_EST_FASTEST
+						       ? "fastest"
+						       : "median");
 		}
 		if (c->period_ms) {
 			json_object_int_add(json, "schedulePeriodMsec",
@@ -2069,8 +2281,10 @@ void pktpair_show_train_cfg(struct vty *vty, struct json_object *json,
 
 	if (t->span_ms)
 		vty_out(vty,
-			"%sTrains: %u per sample, each sized to take %u ms (at most %u packets), first %u%% not timed\n",
-			indent, t->count, t->span_ms, t->max_len, t->skip_pct);
+			"%sTrains: %u per sample, each sized to take %u ms (at most %u packets), first %u%% not timed, %s train reported\n",
+			indent, t->count, t->span_ms, t->max_len, t->skip_pct,
+			t->estimate == PKTPAIR_TRAIN_EST_FASTEST ? "fastest"
+								 : "median");
 	if (c->period_ms)
 		vty_out(vty,
 			"%sSchedule: avoiding %u ms around boundaries every %u ms at offset %u ms (UTC)\n",

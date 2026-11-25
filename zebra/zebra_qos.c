@@ -1245,7 +1245,7 @@ enum qos_bw_origin {
 	QOS_BW_FROM_LINK,      /* link speed */
 };
 
-static const char *qos_bps2str(uint64_t bps, char *buf, size_t len);
+static const char *qos_rate2str(uint64_t bps, char *buf, size_t len);
 
 struct qos_bw_info {
 	uint64_t bps;
@@ -1407,7 +1407,7 @@ static const char *qos_bw_origin2str(const struct qos_bw_info *info, char *buf, 
 			     info->nexthops == 1 ? "" : "s");
 		if (info->percent < 100 && n >= 0 && (size_t)n < len)
 			n += snprintf(buf + n, len - n, ", %u%% of %s", info->percent,
-				      qos_bps2str(info->measured, mbuf, sizeof(mbuf)));
+				      qos_rate2str(info->measured, mbuf, sizeof(mbuf)));
 		if (info->held && n >= 0 && (size_t)n < len) {
 			bool up = info->measured * info->percent / 100 > info->bps;
 
@@ -1833,32 +1833,24 @@ void zebra_qos_if_fini(struct interface *ifp)
  * ----------------------------------------------------------------------
  */
 
-static const char *qos_bps2str(uint64_t bps, char *buf, size_t len)
+/*
+ * A rate in bits/sec for display: always two decimals, at the largest SI
+ * prefix that keeps the value below 1000 after rounding ("512.00bps",
+ * "15.36kbps", "1.00Mbps" rather than "1000.00kbps", "2.50Gbps").  JSON
+ * output carries the raw bits/sec instead.
+ */
+static const char *qos_rate2str(uint64_t bps, char *buf, size_t len)
 {
-	if (bps >= 1000000000ULL && bps % 10000000ULL == 0)
-		snprintf(buf, len, "%.2fGbps", bps / 1e9);
-	else if (bps >= 1000000ULL && bps % 10000ULL == 0)
-		snprintf(buf, len, "%.2fMbps", bps / 1e6);
-	else if (bps >= 1000ULL && bps % 10ULL == 0)
-		snprintf(buf, len, "%.2fkbps", bps / 1e3);
-	else
-		snprintf(buf, len, "%lubps", bps);
+	static const char *const prefix[] = { "", "k", "M", "G", "T" };
+	unsigned int i = 0;
+	double scale = 1;
 
-	return buf;
-}
-
-/* Measured rates are rarely round numbers: always scale and keep 2 digits */
-static const char *qos_measured2str(uint64_t bps, char *buf, size_t len)
-{
-	if (bps >= 1000000000ULL)
-		snprintf(buf, len, "%.2fGbps", bps / 1e9);
-	else if (bps >= 1000000ULL)
-		snprintf(buf, len, "%.2fMbps", bps / 1e6);
-	else if (bps >= 1000ULL)
-		snprintf(buf, len, "%.2fkbps", bps / 1e3);
-	else
-		snprintf(buf, len, "%" PRIu64 "bps", bps);
-
+	/* 999.995 rounds to 1000.00: move up while that happens */
+	while (i + 1 < array_size(prefix) && (double)bps / scale >= 999.995) {
+		scale *= 1000;
+		i++;
+	}
+	snprintf(buf, len, "%.2f%sbps", (double)bps / scale, prefix[i]);
 	return buf;
 }
 
@@ -1898,14 +1890,14 @@ static const char *qos_curve2str(const struct qos_hw_curve *c, char *buf, size_t
 	if (!c->m2) {
 		snprintf(buf, len, "-");
 	} else if (c->d) {
-		qos_measured2str(c->m1, m1, sizeof(m1));
-		qos_measured2str(c->m2, m2, sizeof(m2));
+		qos_rate2str(c->m1, m1, sizeof(m1));
+		qos_rate2str(c->m2, m2, sizeof(m2));
 		if (c->d % 1000 == 0)
 			snprintf(buf, len, "%s/%ums/%s", m1, c->d / 1000, m2);
 		else
 			snprintf(buf, len, "%s/%uus/%s", m1, c->d, m2);
 	} else {
-		qos_measured2str(c->m2, buf, len);
+		qos_rate2str(c->m2, buf, len);
 	}
 
 	return buf;
@@ -1969,7 +1961,7 @@ static void qos_show_detected(struct vty *vty, struct interface *ifp,
 		} else {
 			vty_out(vty, "%s %u. %s %s", i ? "," : "", i + 1,
 				qos_bw_proto2str(qos->detected_src[i]),
-				have ? qos_bps2str(res.out_kbps * 1000, buf, sizeof(buf))
+				have ? qos_rate2str(res.out_kbps * 1000, buf, sizeof(buf))
 				     : "not detected");
 		}
 	}
@@ -1981,7 +1973,7 @@ static void qos_show_detected(struct vty *vty, struct interface *ifp,
 			vty_out(vty, "; hysteresis increase %u%%, decrease %u%%",
 				qos->detected_hyst_inc, qos->detected_hyst_dec);
 		vty_out(vty, "; default %s\n",
-			qos->detected_default ? qos_bps2str(qos->detected_default, buf, sizeof(buf))
+			qos->detected_default ? qos_rate2str(qos->detected_default, buf, sizeof(buf))
 					      : "none");
 	}
 }
@@ -2047,7 +2039,7 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		json_object_object_add(json_if, "classes", json_classes);
 	} else {
 		vty_out(vty, "Interface %s\n", ifp->name);
-		vty_out(vty, "  QoS bandwidth: %s (%s)\n", qos_bps2str(bw, buf1, sizeof(buf1)),
+		vty_out(vty, "  QoS bandwidth: %s (%s)\n", qos_rate2str(bw, buf1, sizeof(buf1)),
 			qos_bw_origin2str(&bwi, obuf, sizeof(obuf)));
 		if (qos->detected)
 			qos_show_detected(vty, ifp, qos, NULL);
@@ -2150,8 +2142,8 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 		}
 
 		vty_out(vty, "  %-10s %-10s %-12s %-12s %-4u %-7s %s%s\n", classid, parent,
-			qos_bps2str(hc->rate, buf1, sizeof(buf1)),
-			qos_bps2str(hc->ceil, buf2, sizeof(buf2)), hc->prio, queue, hc->name,
+			qos_rate2str(hc->rate, buf1, sizeof(buf1)),
+			qos_rate2str(hc->ceil, buf2, sizeof(buf2)), hc->prio, queue, hc->name,
 			hc->leaf ? "" : " (parent)");
 	}
 
@@ -2184,7 +2176,7 @@ static void qos_show_interface(struct vty *vty, struct interface *ifp, json_obje
 				}
 
 				if (st->rate_valid) {
-					qos_measured2str(st->bps, buf3, sizeof(buf3));
+					qos_rate2str(st->bps, buf3, sizeof(buf3));
 					snprintf(pps, sizeof(pps), "%" PRIu64, st->pps);
 					snprintf(pct_rate, sizeof(pct_rate), "%u%%",
 						 qos_percent(st->bps, hc->rate));
@@ -2518,7 +2510,7 @@ static void qos_show_class_map_interface(struct vty *vty, struct interface *ifp,
 					st->packets, st->bytes, st->drops, st->overlimits);
 				if (st->rate_valid)
 					vty_out(vty, ", current %s",
-						qos_measured2str(st->bps, buf, sizeof(buf)));
+						qos_rate2str(st->bps, buf, sizeof(buf)));
 				vty_out(vty, "\n");
 			} else {
 				vty_out(vty, "    Class: statistics %s\n",

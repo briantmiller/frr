@@ -1003,6 +1003,15 @@ a BFD profile to these sessions.
    samples (see ``ip ospf packet-pair smoothing``). Results are shown by
    ``show ip ospf neighbor detail [json]``.
 
+   ``show ip ospf neighbor detail`` also shows how much bandwidth the measurement itself uses
+   with each peer ("Measurement traffic", ``probeLoad`` in JSON). This is
+   an IP-level average over the probing interval of the latest sample,
+   for pairs and trains alike. Outgoing (``outBps``) counts this router's
+   probes, its echo replies to the peer's probes and its reports. Incoming
+   (``inBps``) counts the replies to its probes, the peer's probes and the
+   peer's reports. JSON also gives each part in bits per second.
+   Link-layer headers and tunnel encapsulation are not included.
+
    On Linux the probes are sent on an ``AF_PACKET`` socket with
    ``PACKET_QDISC_BYPASS`` set, so they skip the egress queueing
    discipline of the local interface (shapers, policers, fq_codel and
@@ -1131,7 +1140,7 @@ a BFD profile to these sessions.
    has no valid pair. Options omitted from the command revert to their
    defaults.
 
-.. clicmd:: ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)}]
+.. clicmd:: ip ospf packet-pair train [{span (2-500)|count (1-16)|max-packets (8-1024)|head-skip (0-50)|estimate <median|fastest>}]
 
    Measure with packet trains instead of packet pairs. Use this on links
    that deliver traffic in scheduled frames instead of sending it at a
@@ -1145,13 +1154,36 @@ a BFD profile to these sessions.
    train is chosen from the current estimate so that it takes about
    ``span`` milliseconds at the bottleneck (default 20, many frames
    long). It is at least 8 and at most ``max-packets`` packets (default
-   512). A train's rate is the number of packets that arrived after the
-   first timed one, divided by the time until the last one. The first
-   ``head-skip`` percent of each train (default 0) is not timed, because
-   some schedulers are slow to give a new burst its full rate. The sample
-   value is the fastest train, because cross traffic can only slow a
-   train down. Lost packets are not counted, so loss can only lower the
-   result. ``show ip ospf neighbor detail`` shows the train length and the span of the fastest
+   512). The length only changes when the estimate moves by more than
+   25%, so that small errors in the estimate do not feed back into the
+   length.
+
+   A train's rate comes from a least-squares fit of the arrival times
+   against the order of arrival. On a link that delivers in frames, the
+   packets of the first frame arrive together. Timing from the first to
+   the last arrival would count them as delivered in no time, and read
+   several percent too fast. The fit also tolerates receive-side
+   batching such as interrupt coalescing. The first ``head-skip`` percent
+   of each train (default 0) is not timed, because some schedulers are
+   slow to give a new burst its full rate. Lost packets are not counted,
+   so loss can only lower the result.
+
+   Reordering does not affect the result, because arrivals are fitted
+   in the order they arrive, not by sequence number. The untimed head is
+   likewise the first ``head-skip`` percent of arrivals, and RTT and
+   one-way delay are taken from the first arrival of each train. The
+   share of packets that arrived after a higher-numbered packet of the
+   same train, and by how many positions (as RFC 4737 counts it), is
+   shown for the round trip and for the peer's probes (``reorderedPct``,
+   ``reorderMaxPositions``, ``packetsReorderedTotal``,
+   ``reorderedTotalPct``, ``reorderMaxPositionsEver`` in JSON). Starlink
+   delivers a large share of packets a few positions late, which matters
+   for IPsec replay windows and TCP running over the link.
+
+   The sample value is the median train. With ``estimate fastest`` it is
+   the fastest train instead. Cross traffic can only slow a train down,
+   so the fastest train is closest to the capacity, but where train rates
+   vary for other reasons, as on Starlink, it reads high. ``show ip ospf neighbor detail`` shows the train length and the span of the fastest
    train (``trainLength``, ``trainSpanUsec`` in JSON).
 
    Trains load the link for ``span`` milliseconds per train. The peer

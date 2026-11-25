@@ -137,6 +137,7 @@ struct ospf_if_params {
 	DECLARE_IF_PARAM(uint8_t, pp_train_count);
 	DECLARE_IF_PARAM(uint16_t, pp_train_max);
 	DECLARE_IF_PARAM(uint8_t, pp_train_skip); /* % */
+	DECLARE_IF_PARAM(uint8_t, pp_train_est);  /* pktpair_train_estimate */
 	DECLARE_IF_PARAM(uint32_t, pp_sched_period); /* ms, 0 = off */
 	DECLARE_IF_PARAM(uint32_t, pp_sched_offset);
 	DECLARE_IF_PARAM(uint16_t, pp_sched_guard);
